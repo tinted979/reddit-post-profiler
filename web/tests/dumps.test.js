@@ -113,3 +113,22 @@ test("parseManifest leaves out subreddits it can't trust", () => {
   assert.equal(parseManifest({ format: DUMP_FORMAT, subreddits: { python: { ...sub, posts_to_utc: "soon" } } }).size, 0);
   assert.equal(parseManifest(null).size, 0);
 });
+
+test("a lookup is read once per source, whatever the case", async () => {
+  let opens = 0;
+  const dumps = await openFixtures({ openFile: async (url) => (opens++, localFile(url)) });
+  const first = await dumps.timestamps("comments", "Python", "alice");
+  const again = await dumps.timestamps("comments", "PYTHON", "Alice");
+  assert.equal(again, first); // the same array: no second read
+  assert.equal(dumps.reads, 1);
+  assert.equal(opens, 1);
+});
+
+test("a failed lookup isn't remembered", async () => {
+  let fail = true;
+  const dumps = await openFixtures({ openFile: async (url) => { if (fail) throw new Error("boom"); return localFile(url); } });
+  await assert.rejects(dumps.timestamps("comments", "Python", "alice"), DumpUnavailable);
+  fail = false;
+  dumps.broken = false; // pretend a new scan's source; the lookup itself must not be cached
+  assert.deepEqual(await dumps.timestamps("comments", "Python", "alice"), [1698000000, 1699000000, 1699500000]);
+});

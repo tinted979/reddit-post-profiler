@@ -821,10 +821,15 @@ async function run({ fromQueue = false } = {}) {
     if (archive) {
       if (dumps.broken) {
         text += ` The r/${archive.name} archive files stopped answering partway, so Arctic Shift answered for the rest.`;
-      } else if (dumps.reads > 0) {
-        const upTo = new Date(Math.min(archive.postsThrough, archive.commentsThrough) * 1000)
-          .toLocaleDateString(undefined, { dateStyle: "medium" });
-        text += ` Activity in r/${archive.name} before the post, up to ${upTo}, came from archive files.`;
+      } else {
+        if (dumps.reads > 0) {
+          const upTo = new Date(Math.min(archive.postsThrough, archive.commentsThrough) * 1000)
+            .toLocaleDateString(undefined, { dateStyle: "medium" });
+          text += ` Activity in r/${archive.name} before the post, up to ${upTo}, came from archive files.`;
+        }
+        if (dumps.lifetimeReads > 0) {
+          text += " Subreddit counts came from the archive files plus Arctic Shift for anything newer.";
+        }
       }
     }
     if (failed && failed < counts.total && opts.cacheDays > 0) {

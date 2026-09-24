@@ -579,7 +579,7 @@ async function settleAll(promises) {
 // active user), a single interactions query usually still answers; failing that, only
 // the kind that timed out is split up (per subreddit in `wanted`, else per year).
 // `partial` marks a result limited to `wanted`, which mustn't be saved as a profile.
-async function lifetimeCounts(client, username, { wanted, after }) {
+async function lifetimeCounts(client, username, { wanted, after, skipInteractions = false }) {
   const first = await Promise.allSettled(
     KINDS.map((kind) => client.subredditCounts(kind, username, { after, split: false })),
   );
@@ -588,14 +588,66 @@ async function lifetimeCounts(client, username, { wanted, after }) {
   }
   const done = (i) => first[i].status === "fulfilled";
   if (done(0) && done(1)) return { counts: mergeKinds(first.map((r) => r.value)), partial: false };
-  try {
-    return { counts: await client.interactionCounts(username, { after }), partial: false };
-  } catch (err) {
-    if (!(err instanceof QueryTimeout || err instanceof Unsupported)) throw err;
+  if (!skipInteractions) {
+    try {
+      return { counts: await client.interactionCounts(username, { after }), partial: false };
+    } catch (err) {
+      if (!(err instanceof QueryTimeout || err instanceof Unsupported)) throw err;
+    }
   }
   const parts = await settleAll(KINDS.map((kind, i) =>
     done(i) ? first[i].value : client.subredditCounts(kind, username, { after, only: wanted, attempts: 0 })));
   return { counts: mergeKinds(parts), partial: Boolean(wanted) };
+}
+
+// Lifetime counts from the archive, for a scan limited (`only`) to subreddits it covers:
+// each wanted subreddit's items up to one cutoff (the earliest point every file can be
+// trusted to), plus one interactions query for everything after it, posts and comments
+// together (its `after` is exclusive, so nothing is counted twice). One request instead
+// of two aggregates. Returns {counts, partial: true, source: "archive"} (only the wanted
+// subreddits, so it's cached under its own `lifeonly` key rather than as the user's full
+// profile), null when the archive doesn't cover them all or can't be read (the aggregates
+// then answer as usual), or {skipInteractions: true} when interactions can't answer: the
+// aggregates answer instead, but without retrying the interactions query they already
+// found unusable.
+async function archiveLifetime(client, dumps, username, wanted, after) {
+  const covered = wanted.map((sub) => dumps.covers(sub));
+  if (covered.some((c) => !c)) return null;
+  const cutoff = minOf(covered.flatMap((c) => [c.postsThrough, c.commentsThrough]));
+  if (!Number.isFinite(cutoff)) return null;
+  const counts = new Map();
+  const byKey = new Map();
+  const upToCutoff = (times) => times.filter((t) => t <= cutoff && (after === null || t > after)).length;
+  try {
+    const perSub = await settleAll(covered.map(async (c) => {
+      const [posts, comments] = await settleAll(KINDS.map((k) => dumps.timestamps(k, c.name, username)));
+      return [c.name, { posts: upToCutoff(posts), comments: upToCutoff(comments) }];
+    }));
+    for (const [name, c] of perSub) {
+      counts.set(name, c);
+      byKey.set(name.toLowerCase(), c);
+    }
+  } catch (err) {
+    if (err instanceof Aborted) throw err;
+    return null;
+  }
+  let recent;
+  try {
+    recent = await client.interactionCounts(username, { after: after === null ? cutoff : Math.max(after, cutoff) });
+  } catch (err) {
+    if (err instanceof QueryTimeout || err instanceof Unsupported) return { skipInteractions: true };
+    throw err;
+  }
+  for (const [sub, c] of recent) {
+    const mine = byKey.get(sub.toLowerCase());
+    if (!mine) continue;
+    mine.posts += c.posts;
+    mine.comments += c.comments;
+  }
+  // For the end-of-scan note: a scan limited to covered subreddits whose lifetime counts
+  // came from the archive files rather than Arctic Shift's aggregates.
+  if (dumps) dumps.lifetimeReads = (dumps.lifetimeReads ?? 0) + 1;
+  return { counts, partial: true, source: "archive" };
 }
 
 // [posts map, comments map] -> Map<subreddit, {posts, comments}>
@@ -717,6 +769,11 @@ async function cacheSet(cache, key, value) {
 // Round the window start to the day so cache keys stay stable between runs.
 const windowBucket = (after) => (after === null ? "all" : String(Math.floor(after / 86400)));
 const lifetimeKey = (user, bucket) => `${CACHE_VERSION}|life|${user.toLowerCase()}|${bucket}`;
+// Archive-derived lifetime rows for one `only` set (see archiveLifetime): keyed separately
+// from the full lifetime totals, since they cover just the wanted subreddits. Case- and
+// order-insensitive in `wanted` so the same set hits the same key however it was typed.
+const lifeOnlyKey = (user, bucket, wanted) =>
+  `${CACHE_VERSION}|lifeonly|${user.toLowerCase()}|${bucket}|${wanted.map((s) => s.toLowerCase()).sort().join(",")}`;
 
 // Scans larger than this many users ask first (or, from the queue, profile only this many).
 export const LARGE_SCAN = 300;
@@ -773,7 +830,9 @@ export function emptyProfile(username, threadComments) {
 // then on is counted, "before the post" included. With `cache` ({get(key) -> {value,
 // fetchedAt} | null, set(key, value)}), earlier results are reused and new ones saved.
 // With `dumps` (a DumpSource, see dumps.js), "before" facts for a covered subreddit
-// come from its archive files.
+// come from its archive files. With `only` and `dumps`, when the archive covers every
+// wanted subreddit, lifetime counts come from it plus one interactions query (see
+// archiveLifetime).
 export async function buildProfile(client, username, threadComments, post, { only = null, after = null, lastCommentUtc = null, cache = null, dumps = null } = {}) {
   const profile = emptyProfile(username, threadComments);
   const user = username.toLowerCase();
@@ -781,14 +840,33 @@ export async function buildProfile(client, username, threadComments, post, { onl
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
 
   const lifeKey = lifetimeKey(user, bucket);
-  const hit = await cacheGet(cache, lifeKey, isRows);
+  let hit = await cacheGet(cache, lifeKey, isRows);
   let rows;
   if (hit) {
     rows = hit.value;
   } else {
-    const life = await lifetimeCounts(client, username, { wanted, after });
-    rows = [...life.counts].map(([sub, c]) => [sub, c.posts, c.comments]);
-    if (!life.partial) await cacheSet(cache, lifeKey, rows);
+    const onlyKey = wanted && dumps ? lifeOnlyKey(user, bucket, wanted) : null;
+    if (onlyKey) hit = await cacheGet(cache, onlyKey, isRows);
+    if (hit) {
+      rows = hit.value;
+    } else {
+      let archived = null;
+      let skipInteractions = false;
+      if (wanted && dumps) {
+        archived = await archiveLifetime(client, dumps, username, wanted, after);
+        if (archived?.skipInteractions) {
+          skipInteractions = true;
+          archived = null;
+        }
+      }
+      const life = archived ?? await lifetimeCounts(client, username, { wanted, after, skipInteractions });
+      rows = [...life.counts].map(([sub, c]) => [sub, c.posts, c.comments]);
+      if (!life.partial) {
+        await cacheSet(cache, lifeKey, rows);
+      } else if (life.source === "archive" && onlyKey) {
+        await cacheSet(cache, onlyKey, rows);
+      }
+    }
   }
 
   const byKey = new Map();
