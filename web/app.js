@@ -3,6 +3,7 @@ import {
   ArcticShiftClient,
   buildProfile,
   collectCommenters,
+  mapPool,
   parsePostRef,
   sortedSubreddits,
   toCsv,
@@ -34,7 +35,8 @@ function readOptions() {
     includeOp: $("include-op").checked,
     exclude: $("exclude").value.split(/[\s,]+/).filter(Boolean),
     maxUsers: Number.isFinite(maxUsers) && maxUsers > 0 ? maxUsers : null,
-    delay: Math.max(0.5, parseFloat($("delay").value) || 2),
+    delay: Math.max(0.25, parseFloat($("delay").value) || 0.5),
+    concurrency: Math.min(5, Math.max(1, parseInt($("concurrency").value, 10) || 3)),
   };
 }
 
@@ -107,6 +109,7 @@ function userCard(profile, post) {
   summary.querySelector("a").addEventListener("click", (e) => e.stopPropagation());
 
   const card = el("details", { class: "user" }, summary);
+  card.dataset.rank = String(profile.rank ?? 0);
   card.dataset.search = [profile.username, ...profile.subreddits.keys()].join(" ").toLowerCase();
 
   // Build the full table lazily, the first time the card is opened.
@@ -141,6 +144,13 @@ function renderUsers() {
   applyFilter();
 }
 
+// Insert a card so the list stays in thread-activity order while results arrive out of order.
+function insertCard(card) {
+  const rank = Number(card.dataset.rank);
+  const after = [...$("users").children].find((c) => Number(c.dataset.rank) > rank);
+  $("users").insertBefore(card, after ?? null);
+}
+
 function applyFilter() {
   const q = $("filter").value.trim().toLowerCase();
   for (const card of $("users").children) {
@@ -157,6 +167,8 @@ function shareUrl() {
   if (opts.exclude.length) url.searchParams.set("exclude", opts.exclude.join(","));
   if (opts.maxUsers) url.searchParams.set("max", String(opts.maxUsers));
   if (minCount()) url.searchParams.set("min", String(minCount()));
+  if (opts.delay !== 0.5) url.searchParams.set("delay", String(opts.delay));
+  if (opts.concurrency !== 3) url.searchParams.set("par", String(opts.concurrency));
   return url.toString();
 }
 
@@ -213,9 +225,17 @@ async function run() {
     }
     $("results").hidden = false;
 
-    for (const [i, [username, n]] of ranked.entries()) {
-      current = `Profiling ${i + 1} of ${ranked.length}: u/${username}`;
-      setStatus(current, i / ranked.length);
+    const slots = [];
+    let done = 0;
+    let inFlight = 0;
+    const progress = () => {
+      current = `Profiled ${done} of ${ranked.length}` + (inFlight ? ` (${inFlight} in progress)` : "");
+      setStatus(current, done / ranked.length);
+    };
+    progress();
+    await mapPool(ranked, opts.concurrency, async ([username, n], i) => {
+      inFlight++;
+      progress();
       let profile;
       try {
         profile = await buildProfile(client, username, n, post);
@@ -225,11 +245,17 @@ async function run() {
           username, threadComments: n, targetPostsBefore: 0, targetCommentsBefore: 0,
           subreddits: new Map(), error: err.message,
         };
+      } finally {
+        inFlight--;
       }
-      state.profiles.push(profile);
-      $("users").append(userCard(profile, post));
+      profile.rank = i;
+      slots[i] = profile;
+      state.profiles = slots.filter(Boolean);
+      done++;
+      progress();
+      insertCard(userCard(profile, post));
       applyFilter();
-    }
+    }, state.controller.signal);
     const failed = state.profiles.filter((p) => p.error).length;
     setStatus(`Done: profiled ${state.profiles.length} users${failed ? ` (${failed} failed)` : ""}.`, 1);
   } catch (err) {
@@ -283,7 +309,9 @@ function init() {
   if (params.get("exclude")) $("exclude").value = params.get("exclude");
   if (params.get("max")) $("max-users").value = params.get("max");
   if (params.get("min")) $("min-count").value = params.get("min");
-  if (params.has("exclude") || params.has("max") || params.has("min") || params.has("op")) {
+  if (params.get("delay")) $("delay").value = params.get("delay");
+  if (params.get("par")) $("concurrency").value = params.get("par");
+  if (["exclude", "max", "min", "op", "delay", "par"].some((k) => params.has(k))) {
     $("options").open = true;
   }
   if (params.get("post")) {

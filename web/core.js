@@ -47,7 +47,13 @@ export class ArcticShiftClient {
     this._fetch = fetchFn;
     this._sleepFn = sleep;
     this._now = now;
-    this._last = null;
+    // Request starts are spaced `_interval` apart (never below `delay`); back-offs widen
+    // it and push `_pausedUntil` forward for every caller sharing this client.
+    this._interval = delay;
+    this._nextSlot = 0;
+    this._pausedUntil = 0;
+    this._pauseReason = null;
+    this._streak = 0;
     this.requests = 0;
   }
 
@@ -61,12 +67,36 @@ export class ArcticShiftClient {
     this._checkAbort();
   }
 
+  // Reserve the next start slot synchronously, so concurrent callers can't grab the
+  // same one, then wait for it. Re-check afterwards in case a back-off began meanwhile.
   async _throttle() {
-    if (this._last !== null && this.delay > 0) {
-      const wait = this.delay - (this._now() - this._last);
-      if (wait > 0) await this._sleep(wait);
+    for (;;) {
+      const now = this._now();
+      const start = Math.max(now, this._nextSlot, this._pausedUntil);
+      this._nextSlot = start + this._interval;
+      if (start <= now) return;
+      await this._sleep(start - now, this._pausedUntil > now ? this._pauseReason : null);
+      if (this._pausedUntil <= this._now()) return;
     }
-    this._last = this._now();
+  }
+
+  // Pause every request on this client for `seconds` and slow the pace down.
+  _backoff(seconds, reason) {
+    const until = this._now() + seconds;
+    if (until > this._pausedUntil) {
+      this._pausedUntil = until;
+      this._pauseReason = reason;
+    }
+    this._interval = Math.min(Math.max(this._interval * 2, 1), Math.max(5, this.delay));
+    this._streak = 0;
+  }
+
+  // After a run of successes, speed back up towards the configured delay.
+  _succeeded() {
+    if (++this._streak >= 20 && this._interval > this.delay) {
+      this._interval = Math.max(this.delay, this._interval / 2);
+      this._streak = 0;
+    }
   }
 
   async _get(path, params) {
@@ -90,7 +120,7 @@ export class ArcticShiftClient {
         if (failures > this.maxRetries) {
           throw new ArcticShiftError(`network error on ${path}: ${err.message ?? err}`);
         }
-        await this._sleep(5 * 2 ** (failures - 1), "network error, retrying");
+        this._backoff(5 * 2 ** (failures - 1), "network error, retrying");
         continue;
       }
 
@@ -101,7 +131,7 @@ export class ArcticShiftClient {
         }
         // X-RateLimit-Reset isn't exposed to browsers via CORS; fall back to 30s.
         const reset = Number(resp.headers.get("X-RateLimit-Reset"));
-        await this._sleep(Number.isFinite(reset) && reset > 0 ? reset + 1 : 30, "rate limited");
+        this._backoff(Number.isFinite(reset) && reset > 0 ? reset + 1 : 30, "rate limited");
         continue;
       }
 
@@ -118,7 +148,7 @@ export class ArcticShiftClient {
         // a bit"; the same query usually succeeds after a pause.
         slowdowns++;
         if (slowdowns > this.maxRetries) throw new QueryTimeout(error);
-        await this._sleep(5 * 2 ** (slowdowns - 1), "server busy");
+        this._backoff(5 * 2 ** (slowdowns - 1), "server busy");
         continue;
       }
       if (resp.status >= 500 || payload === null) {
@@ -126,12 +156,13 @@ export class ArcticShiftClient {
         if (failures > this.maxRetries) {
           throw new ArcticShiftError(`HTTP ${resp.status} on ${path}: ${error ?? "bad response"}`);
         }
-        await this._sleep(2 ** failures, "server error, retrying");
+        this._backoff(2 ** failures, "server error, retrying");
         continue;
       }
       if (error || resp.status >= 400) {
         throw new ArcticShiftError(`HTTP ${resp.status} on ${path}: ${error}`);
       }
+      this._succeeded();
       return payload.data;
     }
   }
@@ -243,8 +274,12 @@ export async function buildProfile(client, username, threadComments, post) {
     error: null,
   };
   const byKey = new Map();
-  for (const kind of ["posts", "comments"]) {
-    for (const [sub, n] of await client.subredditCounts(kind, username)) {
+  const lifetime = await Promise.all([
+    client.subredditCounts("posts", username),
+    client.subredditCounts("comments", username),
+  ]);
+  for (const [i, kind] of ["posts", "comments"].entries()) {
+    for (const [sub, n] of lifetime[i]) {
       // Merge case-insensitively, keeping the first spelling we saw.
       let counts = byKey.get(sub.toLowerCase());
       if (!counts) {
@@ -255,10 +290,37 @@ export async function buildProfile(client, username, threadComments, post) {
       counts[kind] += n;
     }
   }
+
+  // Only ask for "before the post" counts when the lifetime totals leave room for any:
+  // the OP's own post and every comment in the thread came after the post was made.
+  const target = byKey.get(post.subreddit.toLowerCase()) ?? { posts: 0, comments: 0 };
+  const isOp = username.toLowerCase() === post.author.toLowerCase();
   const before = { subreddit: post.subreddit, before: post.createdUtc };
-  profile.targetPostsBefore = sum(await client.subredditCounts("posts", username, before));
-  profile.targetCommentsBefore = sum(await client.subredditCounts("comments", username, before));
+  const [postsBefore, commentsBefore] = await Promise.all([
+    target.posts > (isOp ? 1 : 0) ? client.subredditCounts("posts", username, before) : null,
+    target.comments > threadComments ? client.subredditCounts("comments", username, before) : null,
+  ]);
+  profile.targetPostsBefore = postsBefore ? sum(postsBefore) : 0;
+  profile.targetCommentsBefore = commentsBefore ? sum(commentsBefore) : 0;
   return profile;
+}
+
+// Run `fn(item, index)` over `items` with at most `concurrency` calls in flight. Stops
+// starting new items once `signal` is aborted; waits for the ones in flight, then
+// rethrows the first failure.
+export async function mapPool(items, concurrency, fn, signal = null) {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      if (signal?.aborted) throw new Aborted("stopped");
+      const i = next++;
+      await fn(items[i], i);
+    }
+  };
+  const workers = Math.max(1, Math.min(concurrency, items.length));
+  const results = await Promise.allSettled(Array.from({ length: workers }, worker));
+  const failed = results.find((r) => r.status === "rejected");
+  if (failed) throw failed.reason;
 }
 
 function sum(map) {

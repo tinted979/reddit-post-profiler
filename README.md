@@ -16,6 +16,11 @@ profiled; click a user to see every subreddit they're active in, or download the
 as the command-line version. Everything runs in the visitor's browser and talks to Arctic
 Shift directly, so there's no server to maintain.
 
+The web version profiles several users at once and skips the "before this post" lookups
+when a user's lifetime counts show there can't be any, so most commenters cost 2 requests
+instead of 4. If Arctic Shift rate-limits or asks to slow down, all requests pause and the
+pace eases off automatically.
+
 You can share a link that starts an analysis as soon as it opens (*Copy link* builds one
 with the current options):
 
@@ -30,6 +35,8 @@ https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=
 | `op=1` | also profile the post's author |
 | `exclude` | comma-separated usernames to skip |
 | `min` | hide subreddits with fewer than N posts+comments |
+| `delay` | seconds between request starts (default 0.5) |
+| `par` | users profiled in parallel, 1–5 (default 3) |
 
 The site lives in `web/`. `.github/workflows/pages.yml` runs both test suites on every
 push and deploys `web/` to GitHub Pages from the default branch. One-time setup: in the

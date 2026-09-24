@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  Aborted,
   ArcticShiftClient,
   ArcticShiftError,
   buildProfile,
   collectCommenters,
+  mapPool,
   parsePostRef,
   toCsv,
   yearlyRanges,
@@ -18,19 +20,27 @@ function json(body, status = 200) {
 }
 
 // A client whose fetch is served by `handler(url) -> Response`; records calls and sleeps.
-function makeClient(handler) {
+// Time is simulated: `sleep` advances the clock instantly.
+function makeClient(handler, { delay = 0 } = {}) {
   const calls = [];
+  const starts = [];
   const sleeps = [];
+  const clock = { t: 1_000 };
   const client = new ArcticShiftClient({
-    delay: 0,
+    delay,
     fetchFn: async (url) => {
       const u = new URL(url);
       calls.push(u);
+      starts.push(clock.t);
       return handler(u, calls.length);
     },
-    sleep: async (s) => sleeps.push(s),
+    sleep: async (s) => {
+      sleeps.push(s);
+      clock.t += s;
+    },
+    now: () => clock.t,
   });
-  return { client, calls, sleeps };
+  return { client, calls, starts, sleeps, clock };
 }
 
 function sequence(...responses) {
@@ -169,6 +179,86 @@ test("buildProfile merges case-insensitively and fetches before counts", async (
   assert.deepEqual(Object.fromEntries(p.subreddits), {
     Python: { posts: 2, comments: 10 }, rust: { posts: 1, comments: 0 }, AskReddit: { posts: 0, comments: 5 },
   });
+});
+
+test("buildProfile skips before queries the lifetime counts rule out", async () => {
+  const { client, calls } = makeClient((u) => {
+    assert.ok(!u.searchParams.has("before"), "unexpected before query");
+    return u.pathname.includes("/posts/")
+      ? json({ data: [{ key: "rust", count: "4" }] })
+      : json({ data: [{ key: "python", count: "2" }, { key: "rust", count: "9" }] });
+  });
+  const p = await buildProfile(client, "bob", 2, POST);
+  assert.equal(calls.length, 2);
+  assert.equal(p.targetPostsBefore, 0);
+  assert.equal(p.targetCommentsBefore, 0);
+  assert.deepEqual(Object.fromEntries(p.subreddits), {
+    rust: { posts: 4, comments: 9 }, python: { posts: 0, comments: 2 },
+  });
+});
+
+test("buildProfile skips the OP's posts-before query when their only post is this one", async () => {
+  const { client, calls } = makeClient((u) => {
+    if (u.searchParams.has("before")) {
+      assert.ok(u.pathname.includes("/comments/"));
+      return json({ data: [{ key: "Python", count: "3" }] });
+    }
+    return u.pathname.includes("/posts/")
+      ? json({ data: [{ key: "Python", count: "1" }] })
+      : json({ data: [{ key: "Python", count: "5" }] });
+  });
+  const p = await buildProfile(client, "OP_User", 2, POST);
+  assert.equal(calls.length, 3);
+  assert.equal(p.targetPostsBefore, 0);
+  assert.equal(p.targetCommentsBefore, 3);
+});
+
+test("concurrent requests are spaced by the delay", async () => {
+  const { client, clock } = makeClient(() => json({ data: [] }), { delay: 0.5 });
+  await Promise.all([1, 2, 3].map(() => client.subredditCounts("posts", "alice")));
+  // Each caller reserves its own start slot (now, +0.5s, +1s), so the last one waits
+  // until +1s rather than all of them firing together after a single delay.
+  assert.equal(clock.t, 1001);
+});
+
+test("a rate limit pauses every request on the client", async () => {
+  let n = 0;
+  const { client, starts, sleeps } = makeClient(() =>
+    ++n === 1 ? json({ error: "Too many requests" }, 429) : json({ data: [] }),
+  );
+  await Promise.all([client.subredditCounts("posts", "a"), client.subredditCounts("posts", "b")]);
+  // Both start at once; the 429 pauses the retry *and* anything queued behind it.
+  assert.equal(starts[0], 1000);
+  assert.ok(starts.slice(2).every((t) => t >= 1030), `starts: ${starts}`);
+  assert.ok(sleeps.includes(30));
+});
+
+test("mapPool limits concurrency and passes indexes", async () => {
+  let active = 0;
+  let peak = 0;
+  const seen = [];
+  await mapPool(["a", "b", "c", "d", "e"], 2, async (item, i) => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise((r) => setTimeout(r, 5));
+    seen.push([item, i]);
+    active--;
+  });
+  assert.equal(peak, 2);
+  assert.deepEqual(seen.sort(), [["a", 0], ["b", 1], ["c", 2], ["d", 3], ["e", 4]]);
+});
+
+test("mapPool stops starting work once aborted", async () => {
+  const controller = new AbortController();
+  const started = [];
+  await assert.rejects(
+    mapPool([1, 2, 3, 4], 1, async (item) => {
+      started.push(item);
+      if (item === 2) controller.abort();
+    }, controller.signal),
+    Aborted,
+  );
+  assert.deepEqual(started, [1, 2]);
 });
 
 test("toCsv matches the CLI layout", () => {
