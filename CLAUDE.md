@@ -9,7 +9,7 @@ Profiles everyone who commented on a Reddit post using the [Arctic Shift](https:
 - each commenter's posts and comments in the post's subreddit *before* the post was created;
 - their per-subreddit activity everywhere.
 
-There are two independent implementations that write the same CSV format:
+There are two independent implementations that write the same CSV format (the web app adds three badge columns at the end):
 
 - **Web app:** `web/`, plain ES modules with no build step and no dependencies. Deployed to GitHub Pages.
 - **Python CLI:** `src/reddit_tool/`, using httpx and managed with uv.
@@ -48,16 +48,17 @@ The working branch is also the repo's default branch, so **every push deploys**.
   - **`buildProfile`:**
     - Lifetime counts come from two parallel `/api/{posts,comments}/search/aggregate` calls.
     - If those time out, it falls back to `/api/users/interactions/subreddits`. That endpoint encodes posts×1e6 + comments in one count via `weight_posts`. After that it falls back to yearly or per-subreddit splits of only the kind that timed out.
-    - "Before" counts use the same aggregates with `subreddit` and `before`. They're skipped when the lifetime totals already prove the answer.
+    - "Before" facts (`beforeFacts`) come from timestamp searches (`client.timestamps`: `/api/{kind}/search?fields=created_utc&limit=100`), giving the count, distinct days active and first date in one request per kind; past 100 items the aggregate gives the exact count and an `asc` search the first date, and days become a lower bound (`targetTimelineComplete: false`). If the search fails, the aggregate count is used with no timeline. They're skipped when the lifetime totals already prove the answer.
     - It reads and writes the optional cache. Lifetime totals are trusted only if fetched at least `INGEST_LAG` after the post and after the user's last comment in the thread.
+  - **Badges** (`DEFAULT_BADGES`, `profileFacts`, `activityTier`, `parseBadges`/`formatBadges`, `badgeFacts`/`tierCounts`): new here / occasional / regular from posts+comments, days active and tenure, each with a configurable threshold (0 = off; unknown facts skip their check). Tiers are never stored: `app.js` works them out when rendering from the stored facts, so changing the rules re-rates results and saved scans (their summaries keep `facts`) with no requests.
   - **`Eta`** estimates time left from the recent pace of users that needed requests, leaving out saved results and shared pauses.
 - **`cache.js`:** IndexedDB DB `reddit-tool` (version 2) with two stores sharing one connection; `MemoryBackend` for tests. Adding a store means bumping `DB_VERSION` and adding it to `STORES`.
-  - `counts`: `ProfileCache`, the per-user results `buildProfile` reuses. It has a TTL and prunes old records. Keys are versioned (`v1|life|…`, `v1|before|…`); bump the version if the stored value shape changes.
+  - `counts`: `ProfileCache`, the per-user results `buildProfile` reuses. It has a TTL and prunes old records. Keys are versioned (`v1|life|…`, `v2|before|…`, the latter `{posts, comments, first, days, complete}`); bump the version if the stored value shape changes.
   - `scans`: `ScanStore`, snapshots of finished or stopped scans (`sum|<id>` summary for the list, `data|<id>` serialized profiles) that `app.js` reopens with no requests. Kept until deleted.
   - A store that hangs turns itself off instead of blocking the page.
 - **`queue.js`:** `LinkQueue`, the scheduler's queue (localStorage, key `reddit-tool-queue`; storage injectable for tests). Items keep the options from when they were added; a `running` item found on load was cut off and goes back to `waiting`.
 - **`app.js`** handles the DOM only:
-  - It reads and clamps the options. Share links use URL params `post`, `max`, `op`, `exclude`, `subs`, `years`, `min`, `delay`, `par` and `cache`.
+  - It reads and clamps the options. Share links use URL params `post`, `max`, `op`, `exclude`, `subs`, `years`, `min`, `delay`, `par`, `cache` and `badges`. Badge rules live outside `#option-fields` (editable during a run) and are remembered in localStorage (`reddit-tool-badges`); a link's `badges=` applies without being saved.
   - It runs `mapPool(buildProfile)` and inserts cards in thread-activity order as results arrive.
   - It renders the status line, progress and ETA, and builds the CSV with `toCsv`.
   - Every run has a `runId`. Callbacks from an older run must check it before touching shared state.
@@ -71,6 +72,7 @@ Accessibility is maintained. The last check with axe-core reported 0 violations 
 - The rate-limit header `x-ratelimit-reset` isn't exposed to browsers because there's no CORS expose header, so the web app waits 30 s on a 429.
 - A 422 "Timeout. Maybe slow down a bit" is the server-busy reply and is retried. It is not a client error.
 - `/api/comments/tree` accepts `limit` up to 25000 and does not support `fields`.
+- `aggregate=created_utc&frequency=…` answers all-zero counts (even with only a subreddit filter), so it can't give a timeline; search with `fields=created_utc` can.
 - `interactions` has no `subreddit` parameter. It returns 400 "not supported" for huge accounts such as AutoModerator.
 - The search website (`/search?fun=posts_search|comments_search&author=&subreddit=&after=`) is a front end over the same API, so scraping it saves nothing.
 

@@ -72,6 +72,24 @@
           </div>
           <p class="hint">AutoModerator and deleted accounts are always skipped. Most commenters take 2 requests to the free Arctic Shift API, 3–4 if they're active in the post's subreddit outside this thread, and none when saved results can be reused. If Arctic Shift rate-limits, every request pauses; if it asks us to slow down, fewer requests run at once.</p>
         </fieldset>
+        <!-- Outside #option-fields so it stays editable during a run: badges are worked out
+             from saved facts, so changing them never needs new requests. -->
+        <fieldset id="badge-fields" class="badges">
+          <legend>Badges <span class="legend-note">(activity in the post's subreddit before the post)</span></legend>
+          <div class="badge-rule">
+            <span class="pill occasional">occasional</span>
+            <span>at least <input id="badge-occasional-count" type="number" min="0" step="1" inputmode="numeric" aria-label="Occasional: minimum posts and comments"> posts + comments,
+              on <input id="badge-occasional-days" type="number" min="0" step="1" inputmode="numeric" aria-label="Occasional: minimum different days active"> or more different days,
+              the first <input id="badge-occasional-tenure" type="number" min="0" step="1" inputmode="numeric" aria-label="Occasional: first activity at least this many days before the post"> or more days before the post</span>
+          </div>
+          <div class="badge-rule">
+            <span class="pill regular">regular</span>
+            <span>at least <input id="badge-regular-count" type="number" min="0" step="1" inputmode="numeric" aria-label="Regular: minimum posts and comments"> posts + comments,
+              on <input id="badge-regular-days" type="number" min="0" step="1" inputmode="numeric" aria-label="Regular: minimum different days active"> or more different days,
+              the first <input id="badge-regular-tenure" type="number" min="0" step="1" inputmode="numeric" aria-label="Regular: first activity at least this many days before the post"> or more days before the post</span>
+          </div>
+          <small>Everyone else is <span class="pill new">new here</span>. 0 turns a check off. Changes apply straight away, to saved scans too. <button id="badge-reset" type="button" class="link">Reset to defaults</button></small>
+        </fieldset>
       </details>
     </form>
 
@@ -125,7 +143,7 @@
           posts + comments</span></label>
         <span id="filter-note" aria-live="polite"></span>
       </div>
-      <p class="legend">Sorted by comments in the thread. The coloured badge counts posts and comments in <span class="target-name"></span> before this post was made: <b>new here</b> (none), <b>occasional</b> (1–9) or <b>regular</b> (10+).<span id="window-note"></span> Click a user for all their subreddits; their post and comment counts link to those posts and comments on Arctic Shift. <b>saved</b> marks results reused from an earlier scan.</p>
+      <p class="legend">Sorted by comments in the thread. The coloured badge rates their posts and comments in <span class="target-name"></span> before this post was made: <span id="badge-legend"></span><span id="window-note"></span> Click a user for all their subreddits; their post and comment counts link to those posts and comments on Arctic Shift. <b>saved</b> marks results reused from an earlier scan.</p>
       <div id="users"></div>
     </section>
 

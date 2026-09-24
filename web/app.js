@@ -10,7 +10,14 @@ import {
   QueryTimeout,
   ServerBusy,
   buildProfile,
+  DEFAULT_BADGES,
   activityTier,
+  badgeFacts,
+  formatBadges,
+  parseBadges,
+  profileFacts,
+  sameBadges,
+  tierCounts,
   arcticSearchUrl,
   collectCommenters,
   deserializeProfile,
@@ -116,8 +123,79 @@ function updateOptionsSummary(o = readOptions()) {
   if (o.cacheDays !== DEFAULTS.cacheDays) parts.push(o.cacheDays ? `results kept ${plural(o.cacheDays, "day")}` : "not saving results");
   if (o.delay !== DEFAULTS.delay) parts.push(`${o.delay}s between requests`);
   if (o.concurrency !== DEFAULTS.concurrency) parts.push(`${o.concurrency} in parallel`);
+  if (!sameBadges(badges, DEFAULT_BADGES)) parts.push("custom badges");
   $("options-summary").textContent = parts.length ? `: ${parts.join(" · ")}` : "";
 }
+
+// ---- Badges ----
+
+// The badge rules in use: from the link (badges=), else as last set in this browser, else
+// the defaults. Badges are worked out when shown, so changing the rules re-rates every
+// result on the page and in saved scans without any requests.
+const BADGE_KEY = "reddit-tool-badges";
+let badges = DEFAULT_BADGES;
+
+function storedBadges() {
+  try {
+    return parseBadges(localStorage.getItem(BADGE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function showBadges() {
+  for (const tier of ["occasional", "regular"]) {
+    for (const field of ["count", "days", "tenure"]) $(`badge-${tier}-${field}`).value = badges[tier][field];
+  }
+  renderBadgeLegend();
+}
+
+// "3+ posts and comments, on 2+ days, the first 14+ days before"
+function describeRule(r) {
+  const parts = [`${Math.max(1, r.count)}+ ${r.count === 1 ? "post or comment" : "posts and comments"}`];
+  if (r.days > 0) parts.push(`on ${r.days}+ ${r.days === 1 ? "day" : "different days"}`);
+  if (r.tenure > 0) parts.push(`the first ${r.tenure}+ ${r.tenure === 1 ? "day" : "days"} before`);
+  return parts.join(", ");
+}
+
+function renderBadgeLegend() {
+  $("badge-legend").replaceChildren(
+    el("b", {}, "regular"), ` (${describeRule(badges.regular)}), `,
+    el("b", {}, "occasional"), ` (${describeRule(badges.occasional)}) or `,
+    el("b", {}, "new here"), " (anyone else).");
+}
+
+// Read the inputs; a blank or invalid one keeps its current value.
+function readBadges() {
+  const rules = { occasional: { ...badges.occasional }, regular: { ...badges.regular } };
+  for (const tier of ["occasional", "regular"]) {
+    for (const field of ["count", "days", "tenure"]) {
+      const n = Math.floor(Number.parseFloat($(`badge-${tier}-${field}`).value));
+      if (Number.isFinite(n) && n >= 0) rules[tier][field] = Math.min(n, 99999);
+    }
+  }
+  return rules;
+}
+
+function setBadges(rules, { remember = true } = {}) {
+  badges = rules;
+  if (remember) {
+    try {
+      if (sameBadges(rules, DEFAULT_BADGES)) localStorage.removeItem(BADGE_KEY);
+      else localStorage.setItem(BADGE_KEY, formatBadges(rules));
+    } catch {
+      // Storage blocked: the rules still apply until the page closes.
+    }
+  }
+  renderBadgeLegend();
+  updateOptionsSummary();
+  rerateBadges();
+}
+
+const rerateBadges = debounce(() => {
+  renderUsers();
+  renderSaved();
+}, 200);
 
 // ---- Status ----
 
@@ -305,8 +383,28 @@ function activity(profile, post) {
     return { cls: "pill new", text: "new here", title: `No posts or comments in ${sub} before this post` };
   }
   const counts = [posts && plural(posts, "post"), comments && plural(comments, "comment")].filter(Boolean).join(", ");
-  const tier = activityTier(posts, comments);
-  return { cls: `pill ${tier}`, text: `${tier} · ${counts} before`, title: `${counts} in ${sub} before this post` };
+  const facts = profileFacts(profile, post);
+  const tier = activityTier(facts, badges);
+  const detail = `${counts} in ${sub} before this post${timelineText(facts)}`;
+  return { cls: `pill ${tier}`, text: `${TIER_LABELS[tier]} · ${counts} before`, title: detail, detail };
+}
+
+const TIER_LABELS = { new: "new here", occasional: "occasional", regular: "regular" };
+
+// ", on 12 different days, the first 5 months before" (or why there's no timeline).
+function timelineText(f) {
+  if (f.days === null) return " (no timeline saved, so the badge goes by the count alone)";
+  let text = `, on ${f.exact ? "" : "at least "}${plural(f.days, "different day")}`;
+  if (f.tenureDays !== null) text += `, the first ${formatAge(f.tenureDays)} before`;
+  return text;
+}
+
+function formatAge(days) {
+  if (days < 1) return "less than a day";
+  if (days < 14) return plural(Math.floor(days), "day");
+  if (days < 60) return plural(Math.floor(days / 7), "week");
+  if (days < 730) return plural(Math.floor(days / 30.44), "month");
+  return plural(Math.floor(days / 365.25), "year");
 }
 
 const searchWords = new WeakMap();
@@ -349,6 +447,8 @@ function userCard(profile, post) {
     const panel = el("div", { class: "panel" },
       el("p", { class: "panel-links" },
         el("a", { href: profileUrl, target: "_blank", rel: "noopener" }, `u/${profile.username} on Reddit ↗`)));
+    const a = profile.error ? null : activity(profile, post);
+    if (a?.detail) panel.append(el("p", { class: "facts" }, `${a.detail[0].toUpperCase()}${a.detail.slice(1)}.`));
     if (profile.error) panel.append(el("p", { class: "empty" }, profile.errorDetail || profile.error));
     else if (!subs.length) panel.append(el("p", { class: "empty" }, "No archived activity."));
     else panel.append(subredditTable(subs, post, profile.username));
@@ -439,7 +539,7 @@ function renderUsers() {
   });
   $("users").replaceChildren(...cards);
   applyFilter();
-  history.replaceState(null, "", shareUrl(currentPostRef()));
+  if (queueCurrent === null) history.replaceState(null, "", shareUrl(currentPostRef()));
 }
 
 // ---- A run ----
@@ -523,7 +623,8 @@ async function run({ fromQueue = false } = {}) {
       after,
       beforeKnown: state.beforeKnown,
       opts: { only: opts.only, years: opts.years, maxUsers: opts.maxUsers, includeOp: opts.includeOp, exclude: opts.exclude },
-      stats: scanStats(profiles, state.beforeKnown),
+      stats: scanStats(profiles, state.post, state.beforeKnown, badges),
+      facts: badgeFacts(profiles, state.post), // tier counts under whatever badge rules apply later
     };
     if (await openScans().save(summary, profiles.map(serializeProfile))) {
       savedOk = true;
@@ -957,10 +1058,12 @@ function scanItem(scan) {
     pill("", scan.complete ? plural(stats.profiled, "user") : `${stats.profiled} of ${plural(scan.total, "user")}`,
       scan.complete ? "Users profiled" : "Stopped before every user was profiled"));
   if (scan.beforeKnown) {
+    const tiers = Array.isArray(scan.facts) ? tierCounts(scan.facts, badges) : stats;
+    const where = `in r/${post.subreddit} before the post`;
     pills.append(
-      pill("regular", `${stats.regular} regular`, `10+ posts and comments in r/${post.subreddit} before the post`),
-      pill("occasional", `${stats.occasional} occasional`, `1–9 posts and comments in r/${post.subreddit} before the post`),
-      pill("new", `${stats.new} new here`, `No activity in r/${post.subreddit} before the post`));
+      pill("regular", `${tiers.regular} regular`, `${describeRule(badges.regular)} ${where}`),
+      pill("occasional", `${tiers.occasional} occasional`, `${describeRule(badges.occasional)} ${where}`),
+      pill("new", `${tiers.new} new here`, `Below the occasional badge ${where}`));
   }
   if (stats.failed) pills.append(pill("err", `${stats.failed} failed`, "Lookups that failed"));
   pills.append(pill("", plural(stats.subreddits, "subreddit"), "Subreddits these users are active in"));
@@ -1104,6 +1207,7 @@ function shareUrl(postRef, opts = readOptions()) {
   if (opts.delay !== DEFAULTS.delay) url.searchParams.set("delay", String(opts.delay));
   if (opts.concurrency !== DEFAULTS.concurrency) url.searchParams.set("par", String(opts.concurrency));
   if (opts.cacheDays !== DEFAULTS.cacheDays) url.searchParams.set("cache", String(opts.cacheDays));
+  if (!sameBadges(badges, DEFAULT_BADGES)) url.searchParams.set("badges", formatBadges(badges));
   return url.toString();
 }
 
@@ -1126,7 +1230,7 @@ async function copyLink() {
 function downloadCsv() {
   if (!state.post) return;
   const partial = state.controller !== null;
-  const csv = toCsv(state.slots.filter(Boolean), state.post, minCount());
+  const csv = toCsv(state.slots.filter(Boolean), state.post, minCount(), { rules: badges, beforeKnown: state.beforeKnown });
   const a = el("a", {
     href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })),
     download: `${state.post.id}_activity${partial ? "_partial" : ""}.csv`,
@@ -1158,6 +1262,13 @@ function init() {
   $("download").addEventListener("click", downloadCsv);
   $("share").addEventListener("click", copyLink);
   $("clear-cache").addEventListener("click", clearCache);
+  $("badge-fields").addEventListener("input", () => setBadges(readBadges()));
+  $("badge-fields").addEventListener("change", showBadges); // tidy up blanks on leaving a box
+  $("badge-reset").addEventListener("click", () => {
+    setBadges(DEFAULT_BADGES);
+    showBadges();
+    announce("Badges reset to the defaults.");
+  });
   $("queue-add").addEventListener("click", addToQueue);
   $("queue-toggle").addEventListener("click", toggleQueue);
   $("queue-clear").addEventListener("click", clearFinishedQueued);
@@ -1175,6 +1286,9 @@ function init() {
   // Pre-fill from a shared link (the Options panel stays closed; its summary lists what's
   // set) and start straight away.
   const params = new URLSearchParams(window.location.search);
+  // A link's badge rules apply to this visit without replacing the ones saved here.
+  badges = parseBadges(params.get("badges")) ?? storedBadges() ?? DEFAULT_BADGES;
+  showBadges();
   const fill = (id, key) => {
     if (params.has(key)) $(id).value = params.get(key);
   };

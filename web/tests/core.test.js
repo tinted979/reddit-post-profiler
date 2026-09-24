@@ -10,7 +10,13 @@ import {
   ServerBusy,
   Unsupported,
   buildProfile,
+  DEFAULT_BADGES,
   activityTier,
+  badgeFacts,
+  formatBadges,
+  parseBadges,
+  sameBadges,
+  tierCounts,
   arcticSearchUrl,
   collectCommenters,
   deserializeProfile,
@@ -64,14 +70,27 @@ const isInteractions = (u) => u.pathname === "/api/users/interactions/subreddits
 const interactions = (rows) => json({ data: rows.map(([subreddit, posts, comments]) => ({ subreddit, count: posts * W + comments })) });
 const notSupported = () => json({ data: null, error: "This user is currently not supported (too much data)" }, 400);
 
-// Aggregate responses: lifetime `posts`/`comments` rows, and "before" counts for
-// subreddit-filtered queries. Fails the test if the interactions endpoint is queried.
-function aggregates({ posts = [], comments = [], before = { posts: 0, comments: 0 } }) {
+// Timestamps for "before" searches: n items, one a day, the newest a day before `end`.
+const daily = (n, end = POST.createdUtc) => Array.from({ length: n }, (_, i) => end - (i + 1) * 86400);
+
+// Answers a timestamp search (fields=created_utc) from `times`, honouring sort and limit.
+function searchTimes(u, times) {
+  const sorted = [...times].sort((a, b) => (u.searchParams.get("sort") === "asc" ? a - b : b - a));
+  return json({ data: sorted.slice(0, Number(u.searchParams.get("limit"))).map((t) => ({ created_utc: t })) });
+}
+
+// Aggregate responses: lifetime `posts`/`comments` rows, and "before" answers for
+// subreddit-filtered queries: `before[kind]` items, one a day (or `beforeTimes[kind]`),
+// from the timestamp search, and their count from the aggregate. Fails the test if the
+// interactions endpoint is queried.
+function aggregates({ posts = [], comments = [], before = { posts: 0, comments: 0 }, beforeTimes = {} }) {
   return (u) => {
     assert.ok(!isInteractions(u), "unexpected interactions query");
     const kind = u.pathname.includes("/posts/") ? "posts" : "comments";
+    const times = beforeTimes[kind] ?? daily(before[kind]);
+    if (u.pathname === `/api/${kind}/search`) return searchTimes(u, times);
     if (u.searchParams.has("subreddit")) {
-      return json({ data: [{ key: u.searchParams.get("subreddit"), count: String(before[kind]) }] });
+      return json({ data: [{ key: u.searchParams.get("subreddit"), count: String(times.length) }] });
     }
     return json({ data: (kind === "posts" ? posts : comments).map(([key, n]) => ({ key, count: String(n) })) });
   };
@@ -257,7 +276,7 @@ test("buildProfile skips the OP's posts-before query when their only post is thi
 test("timed-out lifetime aggregates fall back to one interactions query", async () => {
   const { client, calls } = makeClient((u) => {
     if (isInteractions(u)) return interactions([["Python", 2, 40], ["rust", 0, 7]]);
-    if (u.searchParams.has("subreddit")) return json({ data: [{ key: "Python", count: "30" }] });
+    if (u.pathname.endsWith("/search")) return searchTimes(u, u.pathname.includes("/posts/") ? [] : daily(30));
     return u.pathname.includes("/posts/") ? json({ data: [{ key: "Python", count: "2" }] }) : json({ error: "Query timed out" });
   });
   const p = await buildProfile(client, "busy", 1, POST);
@@ -527,7 +546,7 @@ test("saved lifetime totals older than the user's last comment here don't justif
   assert.equal(p.cached, true);
 
   // Without a saved answer, both "before" queries are made.
-  cache.backend.map.delete(`v1|before|alice|python|${POST.createdUtc}|all`);
+  cache.backend.map.delete(`v2|before|alice|python|${POST.createdUtc}|all`);
   const fresh = makeClient(handler);
   const p2 = await buildProfile(fresh.client, "alice", 4, POST, opts);
   assert.equal(fresh.calls.length, 2);
@@ -552,7 +571,7 @@ test("broken or old-format saved records are ignored", async () => {
   const map = cache.backend.map;
   const t = POST.createdUtc + 30 * 86400;
   map.set("v1|life|alice|all", { value: [[null, 1, 2]], fetchedAt: t });
-  map.set(`v1|before|alice|python|${POST.createdUtc}|all`, { value: { posts: "x" }, fetchedAt: t });
+  map.set(`v2|before|alice|python|${POST.createdUtc}|all`, { value: { posts: "x" }, fetchedAt: t });
   const { client, calls } = makeClient(aggregates({ comments: [["Python", 5]], before: { posts: 0, comments: 3 } }));
   const p = await buildProfile(client, "alice", 1, POST, { cache, lastCommentUtc: POST.createdUtc + 60 });
   assert.equal(calls.length, 3); // 2 lifetime + the comments-before query
@@ -585,7 +604,7 @@ test("ProfileCache is off with 0 days and clears", async () => {
   assert.equal(await on.get("a"), null);
 });
 
-test("toCsv matches the CLI layout", () => {
+test("toCsv matches the CLI layout, plus the web app's badge columns", () => {
   const profiles = [
     {
       username: "alice", threadComments: 3, targetPostsBefore: 1, targetCommentsBefore: 4, error: null,
@@ -597,11 +616,12 @@ test("toCsv matches the CLI layout", () => {
   assert.equal(
     toCsv(profiles, POST, 2),
     [
-      "username,thread_comments,target_subreddit,target_posts_before,target_comments_before,subreddit,posts,comments,total,error",
-      "alice,3,Python,1,4,Python,2,10,12,",
-      "alice,3,Python,1,4,big,0,5,5,",
-      "ghost,1,Python,0,0,,,,,",
-      'busy,2,Python,,,,,,,"Query timed out, sorry"',
+      "username,thread_comments,target_subreddit,target_posts_before,target_comments_before,subreddit,posts,comments,total,error," +
+        "target_active_days_before,target_first_before_utc,target_badge",
+      "alice,3,Python,1,4,Python,2,10,12,,,,occasional", // no timeline saved: judged by count
+      "alice,3,Python,1,4,big,0,5,5,,,,occasional",
+      "ghost,1,Python,0,0,,,,,,0,,new",
+      'busy,2,Python,,,,,,,"Query timed out, sorry",,,',
       "",
     ].join("\r\n"),
   );
@@ -848,14 +868,40 @@ test("sortedSubreddits can put the post's subreddit first", () => {
   assert.deepEqual(sortedSubreddits(profile, post, 5, { targetFirst: true }).map((s) => s.name), ["python", "AskReddit", "rust"]);
 });
 
-test("activityTier", () => {
-  assert.equal(activityTier(0, 0), "new");
-  assert.equal(activityTier(1, 8), "occasional");
-  assert.equal(activityTier(0, 10), "regular");
+test("badges weigh how much, on how many days and since when", () => {
+  const facts = (n, days, tenureDays) => ({ n, days, tenureDays });
+  // Defaults: occasional 3+ on 2+ days from 14+ days back; regular 20+ on 8+ days from 90+.
+  assert.equal(activityTier(facts(0, 0, null)), "new");
+  assert.equal(activityTier(facts(40, 5, 6)), "new"); // a burst in the week before the post
+  assert.equal(activityTier(facts(40, 30, 300)), "regular"); // spread over most of a year
+  assert.equal(activityTier(facts(40, 3, 400)), "occasional"); // one old comment, then a burst
+  assert.equal(activityTier(facts(5, 4, 200)), "occasional");
+  // 0 turns a check off; unknown facts skip theirs.
+  const loose = { occasional: { count: 1, days: 0, tenure: 0 }, regular: { count: 10, days: 0, tenure: 0 } };
+  assert.equal(activityTier(facts(1, 1, 0), loose), "occasional");
+  assert.equal(activityTier(facts(0, 0, null), { ...loose, occasional: { count: 0, days: 0, tenure: 0 } }), "new");
+  assert.equal(activityTier(facts(25, null, null)), "regular");
+});
+
+test("badge rules round-trip as six numbers and reject junk", () => {
+  assert.equal(formatBadges(DEFAULT_BADGES), "3,2,14,20,8,90");
+  assert.deepEqual(parseBadges(" 1, 0,7 ,30,10,365"), {
+    occasional: { count: 1, days: 0, tenure: 7 }, regular: { count: 30, days: 10, tenure: 365 },
+  });
+  for (const junk of ["", "1,2,3", "1,2,3,4,5,x", "1,2,3,4,5,-6", "1,2,3,4,5,6,7", null]) assert.equal(parseBadges(junk), null);
+  assert.ok(sameBadges(parseBadges("3,2,14,20,8,90"), DEFAULT_BADGES));
+});
+
+test("saved-scan facts give tier counts under any rules", () => {
+  const facts = badgeFacts(sampleProfiles(), POST);
+  assert.deepEqual(facts, [[11, 11, 200], [0, 0, null], null]);
+  assert.deepEqual(tierCounts(facts), { new: 1, occasional: 1, regular: 0 });
+  assert.deepEqual(tierCounts(facts, parseBadges("1,1,1,10,10,100")), { new: 1, occasional: 0, regular: 1 });
 });
 
 const sampleProfiles = () => [
   { username: "a", threadComments: 3, targetPostsBefore: 2, targetCommentsBefore: 9, rank: 0,
+    targetFirstBefore: POST.createdUtc - 200 * 86400, targetDaysBefore: 11, targetTimelineComplete: true,
     subreddits: new Map([["Python", { posts: 2, comments: 30 }], ["rust", { posts: 0, comments: 4 }]]) },
   { username: "b", threadComments: 1, targetPostsBefore: 0, targetCommentsBefore: 0, rank: 1, cached: true,
     subreddits: new Map([["python", { posts: 0, comments: 1 }], ["Empty", { posts: 0, comments: 0 }]]) },
@@ -866,15 +912,17 @@ const sampleProfiles = () => [
 test("profiles survive serialization for saved scans", () => {
   for (const p of sampleProfiles()) {
     const back = deserializeProfile(JSON.parse(JSON.stringify(serializeProfile(p))));
-    assert.deepEqual(back, { ...p, cached: Boolean(p.cached) });
+    const timeline = { targetFirstBefore: null, targetDaysBefore: null, targetTimelineComplete: true };
+    assert.deepEqual(back, { ...timeline, ...p, cached: Boolean(p.cached) });
   }
 });
 
 test("scanStats counts tiers, failures and distinct active subreddits", () => {
-  assert.deepEqual(scanStats(sampleProfiles()), {
-    profiled: 3, failed: 1, new: 1, occasional: 0, regular: 1, subreddits: 2, posts: 2, comments: 35,
+  assert.deepEqual(scanStats(sampleProfiles(), POST), {
+    profiled: 3, failed: 1, new: 1, occasional: 1, regular: 0, subreddits: 2, posts: 2, comments: 35,
   });
-  const outside = scanStats(sampleProfiles(), false);
+  assert.equal(scanStats(sampleProfiles(), POST, true, parseBadges("1,1,1,10,10,100")).regular, 1);
+  const outside = scanStats(sampleProfiles(), POST, false);
   assert.equal(outside.regular + outside.occasional + outside.new, 0);
 });
 
@@ -901,4 +949,56 @@ test("ScanStore gives up on a store that hangs", async () => {
   const store = new ScanStore({ backend: { getPrefix: hang, set: hang, get: hang, delete: hang, clear: hang }, timeoutMs: 10 });
   assert.deepEqual(await store.list(), []);
   assert.equal(await store.save({ id: "x", scannedAt: 1 }, []), false);
+});
+
+test("before facts come from one timestamp search per kind", async () => {
+  const { client, calls } = makeClient(aggregates({
+    comments: [["Python", 9]], posts: [["Python", 2]],
+    beforeTimes: { comments: [...daily(3), POST.createdUtc - 40 * 86400 + 60], posts: [POST.createdUtc - 3600] },
+  }));
+  const p = await buildProfile(client, "alice", 1, POST);
+  const before = calls.filter((u) => u.searchParams.has("before"));
+  assert.equal(before.length, 2);
+  for (const u of before) {
+    assert.ok(u.pathname.endsWith("/search"));
+    assert.deepEqual([u.searchParams.get("fields"), u.searchParams.get("sort"), u.searchParams.get("limit")], ["created_utc", "desc", "100"]);
+  }
+  assert.deepEqual([p.targetPostsBefore, p.targetCommentsBefore], [1, 4]);
+  // Days: 3 daily comments, one 40 days back, and a post in the last day before the post.
+  assert.equal(p.targetDaysBefore, 5);
+  assert.equal(p.targetFirstBefore, POST.createdUtc - 40 * 86400 + 60);
+  assert.equal(p.targetTimelineComplete, true);
+});
+
+test("past 100 items the count and first date take a query each", async () => {
+  const many = daily(250);
+  const { client, calls } = makeClient(aggregates({ comments: [["Python", 300]], beforeTimes: { comments: many } }));
+  const p = await buildProfile(client, "busy", 1, POST);
+  assert.equal(p.targetCommentsBefore, 250);
+  assert.equal(p.targetFirstBefore, Math.min(...many));
+  assert.equal(p.targetDaysBefore, 100); // the newest 100: a lower bound
+  assert.equal(p.targetTimelineComplete, false);
+  assert.equal(calls.filter((u) => u.searchParams.has("before")).length, 3);
+});
+
+test("if the timestamp search fails, the count still comes from the aggregate", async () => {
+  const handler = aggregates({ comments: [["Python", 9]], before: { comments: 6 } });
+  const { client } = makeClient((u) => (u.pathname === "/api/comments/search" ? json({ error: "Internal error" }, 500) : handler(u)));
+  const p = await buildProfile(client, "alice", 1, POST);
+  assert.equal(p.targetCommentsBefore, 6);
+  assert.equal(p.targetDaysBefore, null);
+  assert.equal(p.targetFirstBefore, null);
+});
+
+test("saved before facts are reused, old count-only records are not", async () => {
+  const { cache } = makeCache();
+  cache.backend.map.set(`v1|before|alice|python|${POST.createdUtc}|all`, { value: { posts: 0, comments: 3 }, fetchedAt: POST.createdUtc + 86400 });
+  const handler = aggregates({ comments: [["Python", 9]], before: { comments: 4 } });
+  const first = makeClient(handler);
+  const p1 = await buildProfile(first.client, "alice", 1, POST, { cache });
+  assert.equal(p1.targetCommentsBefore, 4); // the v1 record was ignored
+  const again = makeClient(handler);
+  const p2 = await buildProfile(again.client, "alice", 1, POST, { cache });
+  assert.equal(again.calls.length, 0);
+  assert.deepEqual([p2.targetDaysBefore, p2.targetFirstBefore], [4, POST.createdUtc - 4 * 86400]);
 });

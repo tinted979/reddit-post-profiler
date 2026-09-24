@@ -30,7 +30,7 @@ some of the same people, reuses them instead of asking the API again.
 | On a user's card | Meaning |
 |---|---|
 | *N in thread* | their comments in this thread (0 for a post author who didn't comment) |
-| *new here* / *occasional* / *regular* | their posts + comments in the post's subreddit before the post was made: none / 1–9 / 10 or more. The badge shows the counts |
+| *new here* / *occasional* / *regular* | how established they were in the post's subreddit before the post was made (see [Badges](#badges)). The badge shows their posts and comments there; open the card for how many days they were active and when they started |
 | *N subreddits* | subreddits they have archived posts or comments in |
 | *saved* | reused from an earlier scan in this browser, with no new requests |
 | *lookup failed* | Arctic Shift kept failing for this user (open the card for details). Press *Analyze* again to retry; saved results are reused for everyone else |
@@ -40,6 +40,27 @@ Opening a card shows the full table, with the post's own subreddit highlighted a
 and a link to their Reddit profile.
 Each post and comment count links to the Arctic Shift search page listing those posts or
 comments (newest first, within the `years` window if set).
+
+### Badges
+
+A badge weighs three things about a user's activity in the post's subreddit before the
+post: how many posts and comments, on how many **different days**, and how long before the
+post the **first** one was. So a burst of comments in the week before the post still
+reads *new here*, while the same number spread over months doesn't. The defaults:
+
+| Badge | Posts + comments | Different days | First one at least |
+|---|---|---|---|
+| *regular* | 20+ | 8+ | 90 days before |
+| *occasional* | 3+ | 2+ | 14 days before |
+| *new here* | anyone else, including no activity at all | | |
+
+Change them under *Options → Badges*; 0 turns a check off. They're remembered in this
+browser, apply straight away to the results on screen and to saved scans (no new requests),
+and a shared link carries them as `badges=` (six numbers: count, days and days-before for
+occasional, then for regular, e.g. `badges=3,2,14,20,8,90`) without replacing the
+recipient's own settings. For someone with more than 100 posts or more than 100 comments
+there, the day count is taken from the newest 100 of each, so it's a lower bound. Scans
+saved before badges looked at time only have counts, so their badges go by the count alone.
 
 ### Scheduler
 
@@ -85,13 +106,15 @@ https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=
 | `delay` | seconds between request starts (default 0.5, minimum 0.25) |
 | `par` | users profiled in parallel, 1–5 (default 3); also the most requests in flight at once |
 | `cache` | days to keep and reuse saved results (default 7, `0` = don't save) |
+| `badges` | badge thresholds, see [Badges](#badges) |
 
 ### Saved results and privacy
 
 - The page has no server of its own and no analytics. Your browser sends every query
   straight to Arctic Shift, which sees the post and the usernames you look up.
 - Results are saved in this browser's IndexedDB (database `reddit-tool`): each user's
-  per-subreddit counts, and their "before" counts for each post you scan. They're reused
+  per-subreddit counts, and their "before" counts, days active and first date for each
+  post you scan. They're reused
   for `cache` days; records older than that (and at least 30 days old) are deleted when
   the page loads. The scheduler's queue is kept in localStorage until you remove its links.
   Saved scans (each post, its options and every profile shown) are kept
@@ -164,6 +187,10 @@ barkmonster,2,learnpython,0,24,ADHD,0,53,53,
 - `target_posts_before` / `target_comments_before`: their activity there before the post was created (blank if the lookup failed)
 - `posts` / `comments` / `total`: their counts in `subreddit`, as archived by Arctic Shift: all-time, or since the start of the web app's `years` window
 - `error`: why the lookup failed, if it did
+- web app only (the CLI doesn't write these three):
+  - `target_active_days_before`: different days they posted or commented in the post's subreddit before it (a lower bound past 100 posts or comments)
+  - `target_first_before_utc`: when the first of those was
+  - `target_badge`: `new`, `occasional` or `regular` under the badge settings in use (blank for a post older than the `years` window)
 
 Subreddits below the minimum (`--min-count` or `min`) are left out, except the post's own.
 A user with no archived activity, or whose lookup failed, still gets one row. A CSV
@@ -179,10 +206,15 @@ Both versions use the [Arctic Shift API](https://github.com/ArthurHeitmann/arcti
    `GET /api/comments/search?link_id=…` by timestamp only if the tree is incomplete, fails,
    or the thread has 25,000+ comments. The CLI always pages the search.
 3. For each commenter, `GET /api/{posts,comments}/search/aggregate?aggregate=subreddit&author=…`
-   returns per-subreddit counts. The same call with `subreddit=…&before=<post time>`
-   returns the "before" counts. The web app runs these in parallel and skips a "before"
-   query when the lifetime counts leave no room for one, e.g. when all of a user's
-   comments in the subreddit are in this thread.
+   returns per-subreddit counts. For the "before" counts the CLI makes the same call with
+   `subreddit=…&before=<post time>`. The web app instead asks
+   `GET /api/{posts,comments}/search?author=…&subreddit=…&before=<post time>&fields=created_utc&limit=100`
+   for the timestamps themselves, which gives the count, the days active and the first
+   date in one small request (the `created_utc` aggregate would be cheaper, but it
+   currently answers all zeros). Past 100 items it adds the aggregate for the exact count
+   and one more search for the first date. The web app runs these in parallel and skips a
+   "before" query when the lifetime counts leave no room for one, e.g. when all of a
+   user's comments in the subreddit are in this thread.
 
 Aggregations can time out for very active users; both versions retry once. The CLI then
 splits the query into yearly chunks and adds them up. The web app first tries

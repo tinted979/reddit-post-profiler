@@ -20,6 +20,10 @@ const TREE_LIMIT = 25_000;
 const INGEST_LAG = 3600;
 // Prefix of every cache key; change it when the stored format changes.
 const CACHE_VERSION = "v1";
+// "Before" records moved to v2 when they gained the timeline facts (first, days).
+const BEFORE_VERSION = "v2";
+// Timestamps fetched per kind for the "before" timeline (the search endpoint's maximum).
+const TIMELINE_LIMIT = 100;
 
 export class ArcticShiftError extends Error {
   // `status` is the HTTP status, or null when the request never got a response.
@@ -428,6 +432,20 @@ export class ArcticShiftClient {
     return total;
   }
 
+  // Creation times (epoch seconds) of an author's posts or comments, newest first by
+  // default, at most `limit`. (The created_utc aggregate would be cheaper, but it answers
+  // all zeros, so the timeline is built from the items themselves.)
+  async timestamps(kind, author, { subreddit = null, after = null, before = null, sort = "desc", limit = TIMELINE_LIMIT } = {}) {
+    const params = { author, sort, limit, fields: "created_utc" };
+    if (subreddit !== null) params.subreddit = subreddit;
+    if (after !== null) params.after = after;
+    if (before !== null) params.before = before;
+    const data = await this._get(`/api/${kind}/search`, params);
+    return (Array.isArray(data) ? data : [])
+      .map((row) => Math.trunc(Number(row?.created_utc)))
+      .filter((t) => Number.isFinite(t) && t > 0);
+  }
+
   async _aggregate(kind, author, { subreddit = null, after = null, before = null } = {}) {
     // An empty limit returns every subreddit rather than the top few.
     const params = { aggregate: "subreddit", author, limit: "" };
@@ -553,23 +571,55 @@ function mergeKinds(parts) {
   return counts;
 }
 
-// Posts and comments in the post's subreddit before it was made, within the window.
-// Only the kinds the lifetime totals don't already rule out are queried.
-async function beforeCounts(client, username, post, { after, needPosts, needComments }) {
+// Posts and comments in the post's subreddit before it was made, within the window, and
+// when: `first` (earliest, epoch seconds) and `days` (distinct UTC days with activity).
+// Only the kinds the lifetime totals don't already rule out are queried. Usually one
+// timestamp search per kind answers everything; past TIMELINE_LIMIT items the exact count
+// and the first date take a query each, and `days` is a lower bound (complete: false).
+// If the search fails, the counts come from the aggregate and the timeline is unknown.
+async function beforeFacts(client, username, post, { after, needPosts, needComments }) {
   const opts = { subreddit: post.subreddit, after, before: post.createdUtc };
+  const kind = async (k) => {
+    let times;
+    try {
+      times = await client.timestamps(k, username, opts);
+    } catch (err) {
+      if (err instanceof Aborted) throw err;
+      return { count: sum(await client.subredditCounts(k, username, opts)), times: null, first: null, complete: false };
+    }
+    if (times.length < TIMELINE_LIMIT) {
+      return { count: times.length, times, first: times.length ? Math.min(...times) : null, complete: true };
+    }
+    const [counts, earliest] = await settleAll([
+      client.subredditCounts(k, username, opts),
+      client.timestamps(k, username, { ...opts, sort: "asc", limit: 1 }),
+    ]);
+    return { count: Math.max(sum(counts), times.length), times, first: Math.min(...times, ...earliest), complete: false };
+  };
   const [posts, comments] = await settleAll([
-    needPosts ? client.subredditCounts("posts", username, opts) : null,
-    needComments ? client.subredditCounts("comments", username, opts) : null,
+    needPosts ? kind("posts") : null,
+    needComments ? kind("comments") : null,
   ]);
-  return { posts: posts ? sum(posts) : 0, comments: comments ? sum(comments) : 0 };
+  const parts = [posts, comments].filter(Boolean);
+  const known = parts.every((p) => p.times !== null);
+  const days = new Set(parts.flatMap((p) => p.times ?? []).map((t) => Math.floor(t / 86400)));
+  const firsts = parts.map((p) => p.first).filter((t) => t !== null);
+  return {
+    posts: posts?.count ?? 0,
+    comments: comments?.count ?? 0,
+    first: known && firsts.length ? Math.min(...firsts) : null,
+    days: known ? days.size : null,
+    complete: known && parts.every((p) => p.complete),
+  };
 }
 
 const isCount = (n) => Number.isFinite(n) && n >= 0;
 // [[subreddit, posts, comments], …]
 const isRows = (v) =>
   Array.isArray(v) && v.every((r) => Array.isArray(r) && typeof r[0] === "string" && isCount(r[1]) && isCount(r[2]));
-// {posts, comments}
-const isBefore = (v) => v !== null && typeof v === "object" && isCount(v.posts) && isCount(v.comments);
+// {posts, comments, first, days, complete}; first and days may be null (unknown)
+const isBefore = (v) => v !== null && typeof v === "object" && isCount(v.posts) && isCount(v.comments) &&
+  (v.first === null || isCount(v.first)) && (v.days === null || isCount(v.days)) && typeof v.complete === "boolean";
 
 // A saved record ({value, fetchedAt}) if there is one and its value passes `valid`; a
 // broken or old-format record counts as missing.
@@ -602,6 +652,11 @@ export async function buildProfile(client, username, threadComments, post, { onl
     threadComments,
     targetPostsBefore: 0,
     targetCommentsBefore: 0,
+    // When, before the post: earliest activity (epoch seconds) and distinct days active.
+    // null = unknown; targetTimelineComplete false = days is only a lower bound.
+    targetFirstBefore: null,
+    targetDaysBefore: 0,
+    targetTimelineComplete: true,
     subreddits: new Map(), // display name -> {posts, comments}
     error: null,
     cached: false,
@@ -666,18 +721,23 @@ export async function buildProfile(client, username, threadComments, post, { onl
   if (needPosts || needComments) {
     // "Before" counts can't change once the archive has everything up to the post, so a
     // saved answer fetched after that is reused.
-    const beforeKey = `${CACHE_VERSION}|before|${user}|${post.subreddit.toLowerCase()}|${post.createdUtc}|${bucket}`;
+    const beforeKey = `${BEFORE_VERSION}|before|${user}|${post.subreddit.toLowerCase()}|${post.createdUtc}|${bucket}`;
     const saved = await cacheGet(cache, beforeKey, isBefore);
     let before;
     if (saved && saved.fetchedAt >= post.createdUtc + INGEST_LAG) {
       before = saved.value;
     } else {
       fromCache = false;
-      before = await beforeCounts(client, username, post, { after, needPosts, needComments });
+      before = await beforeFacts(client, username, post, { after, needPosts, needComments });
       await cacheSet(cache, beforeKey, before);
     }
-    profile.targetPostsBefore = before.posts;
-    profile.targetCommentsBefore = before.comments;
+    Object.assign(profile, {
+      targetPostsBefore: before.posts,
+      targetCommentsBefore: before.comments,
+      targetFirstBefore: before.first,
+      targetDaysBefore: before.days,
+      targetTimelineComplete: before.complete,
+    });
   }
   profile.cached = fromCache;
   return profile;
@@ -797,12 +857,76 @@ export function sortedSubreddits(profile, post, minCount = 0, { targetFirst = fa
       b.total - a.total || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 }
 
-// "new" (no activity), "occasional" (1-9) or "regular" (10+): how active someone was in
-// the post's subreddit before the post.
-export const REGULAR_FROM = 10;
-export function activityTier(postsBefore, commentsBefore) {
-  const n = postsBefore + commentsBefore;
-  return n === 0 ? "new" : n < REGULAR_FROM ? "occasional" : "regular";
+// ---- Badges: new here / occasional / regular ----
+// A user's badge rates their activity in the post's subreddit before the post by three
+// facts: posts + comments, distinct days active, and tenure (days from their first post
+// or comment there to the post). A tier's rule is met when every fact reaches its
+// threshold; 0 turns a check off, and an unknown fact (older saved data, or a timeline
+// query that failed) skips its check. Regular is tested first, then occasional; anyone
+// else, including anyone with no activity at all, is new here.
+export const DEFAULT_BADGES = Object.freeze({
+  occasional: Object.freeze({ count: 3, days: 2, tenure: 14 }),
+  regular: Object.freeze({ count: 20, days: 8, tenure: 90 }),
+});
+const BADGE_TIERS = ["occasional", "regular"];
+const BADGE_FIELDS = ["count", "days", "tenure"];
+
+// The facts a badge is decided on. days: null if unknown; exact: false if days is only a
+// lower bound; tenureDays: null if unknown or there's no activity.
+export function profileFacts(p, post) {
+  const n = (p.targetPostsBefore || 0) + (p.targetCommentsBefore || 0);
+  const first = Number.isFinite(p.targetFirstBefore) ? p.targetFirstBefore : null;
+  return {
+    n,
+    days: n === 0 ? 0 : Number.isFinite(p.targetDaysBefore) ? p.targetDaysBefore : null,
+    tenureDays: first === null ? null : Math.max(0, (post.createdUtc - first) / 86400),
+    exact: p.targetTimelineComplete !== false,
+  };
+}
+
+export function activityTier(facts, rules = DEFAULT_BADGES) {
+  const meets = (r) => facts.n > 0 && facts.n >= r.count &&
+    (facts.days === null || facts.days >= r.days) &&
+    (facts.tenureDays === null || facts.tenureDays >= r.tenure);
+  return meets(rules.regular) ? "regular" : meets(rules.occasional) ? "occasional" : "new";
+}
+
+// Rules as six numbers, "count,days,tenure" for occasional then regular (for links and
+// storage), and back. Anything malformed gives null.
+export function formatBadges(rules) {
+  return BADGE_TIERS.flatMap((t) => BADGE_FIELDS.map((f) => rules[t][f])).join(",");
+}
+
+export function parseBadges(text) {
+  const parts = String(text ?? "").split(",").map((x) => x.trim());
+  if (parts.length !== 6 || !parts.every((x) => /^\d{1,5}$/.test(x))) return null;
+  const n = parts.map(Number);
+  return {
+    occasional: { count: n[0], days: n[1], tenure: n[2] },
+    regular: { count: n[3], days: n[4], tenure: n[5] },
+  };
+}
+
+export function sameBadges(a, b) {
+  return formatBadges(a) === formatBadges(b);
+}
+
+// [n, days, tenureDays] per profiled user (null for a failed one), kept with a saved scan
+// so its tier counts can be worked out again under other rules without its profiles.
+export function badgeFacts(profiles, post) {
+  return profiles.map((p) => {
+    if (p.error) return null;
+    const f = profileFacts(p, post);
+    return [f.n, f.days, f.tenureDays === null ? null : Math.round(f.tenureDays * 10) / 10];
+  });
+}
+
+export function tierCounts(facts, rules = DEFAULT_BADGES) {
+  const counts = { new: 0, occasional: 0, regular: 0 };
+  for (const f of facts) {
+    if (f) counts[activityTier({ n: f[0], days: f[1], tenureDays: f[2] }, rules)]++;
+  }
+  return counts;
 }
 
 // Profiles as plain data for storage (subreddits as [name, posts, comments] rows), and back.
@@ -812,6 +936,9 @@ export function serializeProfile(p) {
     threadComments: p.threadComments,
     targetPostsBefore: p.targetPostsBefore,
     targetCommentsBefore: p.targetCommentsBefore,
+    targetFirstBefore: p.targetFirstBefore ?? null,
+    targetDaysBefore: p.targetDaysBefore ?? null,
+    targetTimelineComplete: p.targetTimelineComplete !== false,
     subreddits: [...p.subreddits].map(([name, c]) => [name, c.posts, c.comments]),
     rank: p.rank,
     cached: Boolean(p.cached),
@@ -834,7 +961,7 @@ export function deserializeProfile(d) {
 
 // What a scan found, for the list of saved scans. beforeKnown: false when the post is
 // older than the history window, so there are no tiers to count.
-export function scanStats(profiles, beforeKnown = true) {
+export function scanStats(profiles, post, beforeKnown = true, rules = DEFAULT_BADGES) {
   const stats = { profiled: 0, failed: 0, new: 0, occasional: 0, regular: 0, subreddits: 0, posts: 0, comments: 0 };
   const subs = new Set();
   for (const p of profiles) {
@@ -843,7 +970,7 @@ export function scanStats(profiles, beforeKnown = true) {
       stats.failed++;
       continue;
     }
-    if (beforeKnown) stats[activityTier(p.targetPostsBefore, p.targetCommentsBefore)]++;
+    if (beforeKnown) stats[activityTier(profileFacts(p, post), rules)]++;
     for (const [name, c] of p.subreddits) {
       if (c.posts + c.comments > 0) subs.add(name.toLowerCase());
       stats.posts += c.posts;
@@ -875,6 +1002,10 @@ export const CSV_COLUMNS = [
   "comments",
   "total",
   "error",
+  // Web app only (the CLI doesn't write these):
+  "target_active_days_before",
+  "target_first_before_utc",
+  "target_badge",
 ];
 
 function csvCell(value) {
@@ -882,8 +1013,9 @@ function csvCell(value) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-// Same layout as the Python CLI: one row per (user, subreddit).
-export function toCsv(profiles, post, minCount = 0) {
+// The Python CLI's layout (one row per user and subreddit), plus the web app's badge
+// columns at the end. beforeKnown: false when the post is older than the history window.
+export function toCsv(profiles, post, minCount = 0, { rules = DEFAULT_BADGES, beforeKnown = true } = {}) {
   const lines = [CSV_COLUMNS.join(",")];
   for (const p of profiles) {
     const base = {
@@ -894,6 +1026,16 @@ export function toCsv(profiles, post, minCount = 0) {
       target_comments_before: p.error ? "" : p.targetCommentsBefore,
       error: p.error || "",
     };
+    if (!p.error) {
+      const f = profileFacts(p, post);
+      const first = Number.isFinite(p.targetFirstBefore) ? new Date(p.targetFirstBefore * 1000).toISOString() : "";
+      Object.assign(base, {
+        // A lower bound for users with 100+ posts or comments there (see beforeFacts).
+        target_active_days_before: f.days === null ? "" : f.days,
+        target_first_before_utc: first,
+        target_badge: beforeKnown ? activityTier(f, rules) : "",
+      });
+    }
     const subs = sortedSubreddits(p, post, minCount);
     const rows = subs.length
       ? subs.map((s) => ({ ...base, subreddit: s.name, posts: s.posts, comments: s.comments, total: s.total }))
