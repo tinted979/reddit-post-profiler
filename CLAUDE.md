@@ -9,18 +9,11 @@ Profiles everyone who commented on a Reddit post using the [Arctic Shift](https:
 - each commenter's posts and comments in the post's subreddit *before* the post was created;
 - their per-subreddit activity everywhere.
 
-There are two independent implementations that write the same CSV format (the web app adds three badge columns at the end):
-
-- **Web app:** `web/`, plain ES modules with no build step and no dependencies. Deployed to GitHub Pages.
-- **Python CLI:** `src/reddit_tool/`, using httpx and managed with uv.
-
-They share no code. The CLI is deliberately simpler: it profiles one user at a time with 4 aggregate requests each, has no cache, and always pages the comment search. Web-only features such as `subs`, `years`, the result cache, the interactions endpoint and the comment tree don't exist in the CLI.
+It's a web app in `web/`: plain ES modules with no build step and no dependencies, deployed to GitHub Pages. Results download as a CSV (`toCsv`, one row per user and subreddit). There's no server and no other implementation.
 
 ## Commands
 
 ```sh
-uv run pytest -q                          # Python tests (respx mocks httpx)
-uv run pytest tests/test_api.py -k name   # single Python test
 cd web && npm test                        # web tests: node --test (Node 22+)
 cd web && node --test --test-name-pattern="Eta" tests/core.test.js   # single web test
 python3 -m http.server -d web             # serve the web app locally (ES modules need http)
@@ -30,7 +23,7 @@ There is no linter or formatter configured.
 
 ## Deployment
 
-`.github/workflows/pages.yml` runs both test suites on every push and PR. On the default branch it copies `web/*.html web/*.js web/*.css` into the site and publishes it to Pages. It fails if a module imports a file that wasn't copied, so a new file of another type (such as images or JSON) must be added to that copy step. It also tags local imports, `app.js` and `style.css` with `?v=<commit>`, so browsers never mix cached old and new modules. Keep imports in the form `from "./x.js"` for that rewrite.
+`.github/workflows/pages.yml` runs the web tests on every push and PR. On the default branch it copies `web/*.html web/*.js web/*.css` into the site and publishes it to Pages. It fails if a module imports a file that wasn't copied, so a new file of another type (such as images or JSON) must be added to that copy step. It also tags local imports, `app.js` and `style.css` with `?v=<commit>`, so browsers never mix cached old and new modules. Keep imports in the form `from "./x.js"` for that rewrite.
 
 The default branch is `main`, and only `main` deploys. Work on a feature branch and open a pull request into `main`; CI runs the tests on the PR, and merging it deploys. After a merge, check that the live `https://tinted979.github.io/reddit-tool/*.js` serves the new code.
 

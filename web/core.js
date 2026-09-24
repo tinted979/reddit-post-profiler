@@ -1,7 +1,6 @@
 // Arctic Shift client and the profiling logic behind the web app: finding a thread's
-// commenters, building each one's per-subreddit profile, and the CSV export (the same
-// columns as the Python CLI in src/reddit_tool). No DOM access here, so it runs under Node
-// for the tests.
+// commenters, building each one's per-subreddit profile, and the CSV export. No DOM access
+// here, so it runs under Node for the tests.
 
 export const BASE_URL = "https://arctic-shift.photon-reddit.com";
 // Sent with every request (as the Arctic Shift search site sends its own), so the archive's
@@ -1034,7 +1033,7 @@ export const CSV_COLUMNS = [
   "comments",
   "total",
   "error",
-  // Web app only (the CLI doesn't write these):
+  // Badge facts:
   "target_active_days_before",
   "target_first_before_utc",
   "target_badge",
@@ -1045,8 +1044,7 @@ function csvCell(value) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-// The Python CLI's layout (one row per user and subreddit), plus the web app's badge
-// columns at the end. beforeKnown: false when the post is older than the history window.
+// One row per user and subreddit, with the badge facts at the end. beforeKnown: false when the post is older than the history window.
 export function toCsv(profiles, post, minCount = 0, { rules = DEFAULT_BADGES, beforeKnown = true } = {}) {
   const lines = [CSV_COLUMNS.join(",")];
   for (const p of profiles) {
