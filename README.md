@@ -17,7 +17,8 @@ Nothing to install. Paste a post URL and press *Analyze*. Users appear as they'r
 profiled, ordered by how many comments they left in the thread. Click a user to see every
 subreddit they're active in, filter by user or subreddit, or download a CSV. The status line
 estimates the time left from the recent pace, allowing for saved results and any rate-limit
-pause. *Stop* ends a run at once and keeps what was found so far.
+pause, and when the run ends it shows how long it really took (and how much of that was
+profiling, the part the estimate covers). *Stop* ends a run at once and keeps what was found so far.
 
 Everything runs in your browser and talks to Arctic Shift directly. The whole thread comes
 in one request, several users are profiled at once, and most commenters take 2 requests.

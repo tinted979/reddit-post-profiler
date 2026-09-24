@@ -138,6 +138,16 @@ function formatEta(seconds) {
   return m < 60 ? `about ${m} min left` : `about ${Math.floor(m / 60)} h ${m % 60} min left`;
 }
 
+// A measured duration: "4.2 s", "38 s", "1 min 38 s", "1 h 5 min".
+function formatDuration(seconds) {
+  if (seconds < 10) return `${seconds.toFixed(1)} s`;
+  const s = Math.round(seconds);
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""}`;
+  const m = Math.round(s / 60);
+  return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+}
+
 function startEta(total) {
   stopEta();
   status.eta = new Eta(total);
@@ -460,14 +470,27 @@ async function run() {
     onPause: (until) => runId === state.runId && status.eta?.pause(until),
   });
   const counts = { done: 0, total: 0 };
+  // Real time taken, shown when the run ends so it can be compared with the estimate
+  // (which covers the profiling part only).
+  const startedAt = performance.now();
+  let profilingAt = null;
+  const took = () => {
+    const now = performance.now();
+    const total = formatDuration((now - startedAt) / 1000);
+    return profilingAt === null ? total : `${total} (profiling ${formatDuration((now - profilingAt) / 1000)})`;
+  };
+  const fail = (text) => {
+    $("bar").hidden = true;
+    setStatus(`Failed after ${took()}.`);
+    return text;
+  };
 
   try {
     setStatus("Looking up the post…");
     announce("Looking up the post…");
     const post = await client.getPost(postId);
     if (!post) {
-      showError(`Post ${postId} isn't in the Arctic Shift archive. It may have been removed, or be too new: posts usually appear within minutes.`);
-      $("status").hidden = true;
+      showError(fail(`Post ${postId} isn't in the Arctic Shift archive. It may have been removed, or be too new: posts usually appear within minutes.`));
       return;
     }
     state.post = post;
@@ -487,7 +510,7 @@ async function run() {
       const text = post.numComments
         ? "None of this post's archived comments are from accounts that can be profiled."
         : "This post has no archived comments yet.";
-      setStatus(text);
+      setStatus(`${text} Took ${took()}.`);
       announce(text);
       return;
     }
@@ -512,6 +535,7 @@ async function run() {
     };
     announce(`Found ${plural(counts.total, "commenter")}. Profiling…`);
     startEta(counts.total);
+    profilingAt = performance.now();
     progress();
     await mapPool(ranked, opts.concurrency, async ([username, { count, last }], i) => {
       inFlight++;
@@ -544,7 +568,7 @@ async function run() {
     stopEta();
     const notes = [fromCache && `${fromCache} from saved results`, failed && `${failed} failed`].filter(Boolean);
     let text = `Done: profiled ${plural(counts.total, "user")}${notes.length ? ` (${notes.join(", ")})` : ""}` +
-      ` with ${plural(client.requests, "request")}.`;
+      ` with ${plural(client.requests, "request")}. Took ${took()}.`;
     if (failed && failed < counts.total && opts.cacheDays > 0) {
       text += " Press Analyze to retry the failed ones; the rest are reused.";
     }
@@ -554,12 +578,12 @@ async function run() {
   } catch (err) {
     if (runId === state.runId) stopEta();
     if (err instanceof Aborted) {
-      const text = counts.total ? `Stopped after ${counts.done} of ${plural(counts.total, "user")}.` : "Stopped.";
+      const text = (counts.total ? `Stopped after ${counts.done} of ${plural(counts.total, "user")}.` : "Stopped.") +
+        ` Ran for ${took()}.`;
       setStatus(text);
       announce(text);
     } else {
-      showError(explain(err), err.message);
-      $("status").hidden = true;
+      showError(fail(explain(err)), err.message);
       announce(explain(err));
     }
   } finally {
