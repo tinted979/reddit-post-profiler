@@ -76,6 +76,7 @@ The automatic pull request review (`.github/workflows/code-review.yml`) checks c
 - **The API:** Arctic Shift is a free shared service. New requests go through `ArcticShiftClient._get` (pacing, backoff, `meta-app`); don't add request patterns that bypass its throttle, and don't fall back to heavier queries when the server is busy or rate-limiting.
 - **Accessibility:** keep keyboard focus somewhere sensible when elements hide, announce milestones through `#announce` rather than every tick, and keep colour pairs at 4.5:1 or better.
 - **Tests:** logic in `core.js`, `cache.js` and `queue.js` gets a test in `web/tests/`; `npm test` must pass.
+- **Git workflow:** for any code change, create a `claude/<topic>` branch before editing. When the work is done and `npm test` passes, commit, push, and open a PR into `main` with `gh pr create`. Never push to `main` directly or merge PRs yourself.
 
 ## Arctic Shift API facts (verified live)
 
