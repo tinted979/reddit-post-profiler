@@ -5,7 +5,7 @@
 export const BASE_URL = "https://arctic-shift.photon-reddit.com";
 // Sent with every request (as the Arctic Shift search site sends its own), so the archive's
 // maintainer can tell this tool's traffic apart and get in touch rather than block it.
-export const APP_TAG = "reddit-tool";
+export const APP_TAG = "reddit-post-profiler";
 // The first year of Reddit data: where the yearly split starts.
 const ARCHIVE_START_YEAR = 2005;
 // Authors that can't be profiled: deleted accounts, and the moderation bot.
@@ -1077,7 +1077,9 @@ export function toCsv(profiles, post, minCount = 0, { rules = DEFAULT_BADGES, be
 
 // ---- Saved scans as a file ----
 
-export const EXPORT_KIND = "reddit-tool-saved-scans";
+export const EXPORT_KIND = "rpp-saved-scans";
+// Files exported before the rename to Reddit Post Profiler still import.
+const OLD_EXPORT_KINDS = new Set(["reddit-tool-saved-scans"]);
 export const EXPORT_VERSION = 1;
 
 // The JSON file "Export" downloads: every saved scan, as stored.
@@ -1184,7 +1186,7 @@ export function parseScanExport(text) {
   } catch {
     throw new Error("That file isn't a saved-scans export (it isn't JSON).");
   }
-  if (data?.kind !== EXPORT_KIND || !Array.isArray(data.scans)) {
+  if ((data?.kind !== EXPORT_KIND && !OLD_EXPORT_KINDS.has(data?.kind)) || !Array.isArray(data.scans)) {
     throw new Error("That file isn't a saved-scans export from this tool.");
   }
   if (data.version > EXPORT_VERSION) {

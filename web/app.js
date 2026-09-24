@@ -138,6 +138,7 @@ function updateOptionsSummary(o = readOptions()) {
 // The badge rules in use: from the link (badges=), else as last set in this browser, else
 // the defaults. Badges are worked out when shown, so changing the rules re-rates every
 // result on the page and in saved scans without any requests.
+// Named before the project became Reddit Post Profiler; kept so visitors' saved data survives.
 const BADGE_KEY = "reddit-tool-badges";
 let badges = DEFAULT_BADGES;
 
@@ -1069,7 +1070,7 @@ function queueFinished() {
   document.title = `✓ ${TITLE}`;
   if ($("queue-notify").checked && globalThis.Notification?.permission === "granted") {
     try {
-      new Notification("Reddit Commenter Profiler", { body: text });
+      new Notification("Reddit Post Profiler", { body: text });
     } catch {
       // Some browsers only allow notifications from a service worker.
     }
@@ -1132,7 +1133,7 @@ async function exportSaved() {
   if (!scans.length) return savedNote("Nothing to export.");
   const a = el("a", {
     href: URL.createObjectURL(new Blob([exportScans(scans)], { type: "application/json" })),
-    download: `reddit-tool-saved-scans-${new Date().toISOString().slice(0, 10)}.json`,
+    download: `rpp-saved-scans-${new Date().toISOString().slice(0, 10)}.json`,
   });
   document.body.append(a);
   a.click();

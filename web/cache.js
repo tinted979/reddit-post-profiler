@@ -44,6 +44,7 @@ export class MemoryBackend {
   }
 }
 
+// Named before the project became Reddit Post Profiler; kept so visitors' saved data survives.
 const DB_NAME = "reddit-tool";
 const DB_VERSION = 2; // 1: counts; 2: + scans
 const STORES = ["counts", "scans"];

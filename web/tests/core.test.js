@@ -1012,7 +1012,7 @@ test("every request is tagged with meta-app", async () => {
   const { client, calls } = makeClient(() => json({ data: [] }));
   await client.getPost("abc123");
   await client.timestamps("comments", "alice", { subreddit: "Python" });
-  assert.deepEqual(calls.map((u) => u.searchParams.get("meta-app")), ["reddit-tool", "reddit-tool"]);
+  assert.deepEqual(calls.map((u) => u.searchParams.get("meta-app")), ["reddit-post-profiler", "reddit-post-profiler"]);
 });
 
 test("estimateScan counts saved users and prices the rest", async () => {
@@ -1051,6 +1051,10 @@ test("saved scans round-trip through an export file, with stats worked out again
   assert.deepEqual(summary.stats, scanStats(sampleProfiles(), summary.post));
   assert.deepEqual(summary.facts, badgeFacts(sampleProfiles(), summary.post));
   assert.equal(summary.seconds, 12.5);
+  // Exports from before the rename still import.
+  const old = text.replace('"kind":"rpp-saved-scans"', '"kind":"reddit-tool-saved-scans"');
+  assert.notEqual(old, text);
+  assert.equal(parseScanExport(old).scans.length, 1);
 });
 
 test("imported scans are checked", () => {

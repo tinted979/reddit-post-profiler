@@ -4,6 +4,7 @@
 
 import { parsePostRef } from "./core.js";
 
+// Named before the project became Reddit Post Profiler; kept so visitors' saved data survives.
 const KEY = "reddit-tool-queue";
 // Most scans waiting at once: the queue runs unattended, so keep it from piling up a day's
 // worth of requests on the free API.
