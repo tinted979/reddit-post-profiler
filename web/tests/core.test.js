@@ -20,6 +20,7 @@ import {
   arcticSearchUrl,
   collectCommenters,
   deserializeProfile,
+  emptyProfile,
   estimateScan,
   exportScans,
   importScan,
@@ -29,10 +30,13 @@ import {
   parsePostRef,
   parseSubreddits,
   parseUsernames,
+  SCAN_DEFAULTS,
+  SCAN_LIMITS,
   scanStats,
   serializeProfile,
   sortedSubreddits,
   toCsv,
+  wait,
   yearlyRanges,
 } from "../core.js";
 import { MemoryBackend, ProfileCache, ScanStore } from "../cache.js";
@@ -1173,4 +1177,45 @@ test("imported scan options are cleaned like the form's, keeping u/-prefixed ski
   const { summary } = importScan(scan);
   assert.deepEqual(summary.opts.only, ["rust"]);
   assert.deepEqual(summary.opts.exclude, ["Alice", "bob"]);
+});
+
+test("the client paces with the scan defaults, which sit inside the limits", () => {
+  const client = new ArcticShiftClient({ fetchFn: async () => json({ data: [] }) });
+  assert.equal(client.delay, SCAN_DEFAULTS.delay);
+  assert.equal(client.maxInFlight, SCAN_DEFAULTS.concurrency);
+  for (const key of ["delay", "concurrency"]) {
+    const { min, max } = SCAN_LIMITS[key];
+    assert.ok(min <= SCAN_DEFAULTS[key] && SCAN_DEFAULTS[key] <= max, key);
+  }
+});
+
+test("wait runs on the timer it's given, and abort cancels that timer", async () => {
+  const started = [];
+  let cancelled = 0;
+  const timer = (ms, done) => {
+    started.push({ ms, done });
+    return () => cancelled++;
+  };
+  const first = wait(1.5, null, timer);
+  assert.equal(started[0].ms, 1500);
+  started[0].done();
+  await first;
+  assert.equal(cancelled, 1); // finishing clears the timer too
+
+  const controller = new AbortController();
+  const second = wait(60, controller.signal, timer);
+  controller.abort();
+  await second;
+  assert.equal(cancelled, 2);
+
+  let calls = 0;
+  await wait(60, controller.signal, () => calls++); // already aborted: no timer at all
+  assert.equal(calls, 0);
+});
+
+test("a failed lookup's profile serializes like any other", () => {
+  const p = { ...emptyProfile("gone_user", 3), error: "lookup failed", errorDetail: "HTTP 500", rank: 4 };
+  const back = deserializeProfile(JSON.parse(JSON.stringify(serializeProfile(p))));
+  assert.deepEqual(back, { ...p, subreddits: new Map() });
+  assert.deepEqual(toCsv([p], POST).split("\r\n")[1].split(",").slice(0, 3), ["gone_user", "3", "Python"]);
 });
