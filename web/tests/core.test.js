@@ -10,16 +10,20 @@ import {
   ServerBusy,
   Unsupported,
   buildProfile,
+  activityTier,
   arcticSearchUrl,
   collectCommenters,
+  deserializeProfile,
   mapPool,
   parsePostRef,
   parseSubreddits,
+  scanStats,
+  serializeProfile,
   sortedSubreddits,
   toCsv,
   yearlyRanges,
 } from "../core.js";
-import { MemoryBackend, ProfileCache } from "../cache.js";
+import { MemoryBackend, ProfileCache, ScanStore } from "../cache.js";
 
 const POST = { id: "abc123", author: "op_user", subreddit: "Python", createdUtc: 1_700_000_000, title: "t" };
 
@@ -842,4 +846,59 @@ test("sortedSubreddits can put the post's subreddit first", () => {
   const post = { subreddit: "Python" };
   assert.deepEqual(sortedSubreddits(profile, post).map((s) => s.name), ["AskReddit", "rust", "python"]);
   assert.deepEqual(sortedSubreddits(profile, post, 5, { targetFirst: true }).map((s) => s.name), ["python", "AskReddit", "rust"]);
+});
+
+test("activityTier", () => {
+  assert.equal(activityTier(0, 0), "new");
+  assert.equal(activityTier(1, 8), "occasional");
+  assert.equal(activityTier(0, 10), "regular");
+});
+
+const sampleProfiles = () => [
+  { username: "a", threadComments: 3, targetPostsBefore: 2, targetCommentsBefore: 9, rank: 0,
+    subreddits: new Map([["Python", { posts: 2, comments: 30 }], ["rust", { posts: 0, comments: 4 }]]) },
+  { username: "b", threadComments: 1, targetPostsBefore: 0, targetCommentsBefore: 0, rank: 1, cached: true,
+    subreddits: new Map([["python", { posts: 0, comments: 1 }], ["Empty", { posts: 0, comments: 0 }]]) },
+  { username: "c", threadComments: 1, targetPostsBefore: 0, targetCommentsBefore: 0, rank: 2,
+    subreddits: new Map(), error: "Arctic Shift is overloaded", errorDetail: "slow down" },
+];
+
+test("profiles survive serialization for saved scans", () => {
+  for (const p of sampleProfiles()) {
+    const back = deserializeProfile(JSON.parse(JSON.stringify(serializeProfile(p))));
+    assert.deepEqual(back, { ...p, cached: Boolean(p.cached) });
+  }
+});
+
+test("scanStats counts tiers, failures and distinct active subreddits", () => {
+  assert.deepEqual(scanStats(sampleProfiles()), {
+    profiled: 3, failed: 1, new: 1, occasional: 0, regular: 1, subreddits: 2, posts: 2, comments: 35,
+  });
+  const outside = scanStats(sampleProfiles(), false);
+  assert.equal(outside.regular + outside.occasional + outside.new, 0);
+});
+
+test("ScanStore saves, lists newest first, loads, replaces and deletes scans", async () => {
+  const store = new ScanStore();
+  const rows = sampleProfiles().map(serializeProfile);
+  assert.deepEqual(await store.list(), []);
+  assert.equal(await store.save({ id: "p1", scannedAt: 100, title: "old" }, rows), true);
+  await store.save({ id: "p2", scannedAt: 200 }, rows.slice(0, 1));
+  assert.deepEqual((await store.list()).map((s) => s.id), ["p2", "p1"]);
+  await store.save({ id: "p1", scannedAt: 300, title: "new" }, rows); // a rescan replaces
+  assert.deepEqual((await store.list()).map((s) => s.id), ["p1", "p2"]);
+  const rec = await store.load("p1");
+  assert.equal(rec.summary.title, "new");
+  assert.equal(rec.profiles.length, 3);
+  await store.delete("p1");
+  assert.equal(await store.load("p1"), null);
+  assert.equal(await store.clear(), 1);
+  assert.deepEqual(await store.list(), []);
+});
+
+test("ScanStore gives up on a store that hangs", async () => {
+  const hang = () => new Promise(() => {});
+  const store = new ScanStore({ backend: { getPrefix: hang, set: hang, get: hang, delete: hang, clear: hang }, timeoutMs: 10 });
+  assert.deepEqual(await store.list(), []);
+  assert.equal(await store.save({ id: "x", scannedAt: 1 }, []), false);
 });

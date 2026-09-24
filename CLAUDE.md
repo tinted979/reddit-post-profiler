@@ -51,10 +51,10 @@ The working branch is also the repo's default branch, so **every push deploys**.
     - "Before" counts use the same aggregates with `subreddit` and `before`. They're skipped when the lifetime totals already prove the answer.
     - It reads and writes the optional cache. Lifetime totals are trusted only if fetched at least `INGEST_LAG` after the post and after the user's last comment in the thread.
   - **`Eta`** estimates time left from the recent pace of users that needed requests, leaving out saved results and shared pauses.
-- **`cache.js`:** `ProfileCache` over IndexedDB (DB `reddit-tool`, store `counts`, with `MemoryBackend` for tests).
-  - It has a TTL and prunes old records.
-  - A store that hangs disables the cache instead of blocking the run.
-  - Keys are versioned (`v1|life|…`, `v1|before|…`). Bump the version if the stored value shape changes.
+- **`cache.js`:** IndexedDB DB `reddit-tool` (version 2) with two stores sharing one connection; `MemoryBackend` for tests. Adding a store means bumping `DB_VERSION` and adding it to `STORES`.
+  - `counts`: `ProfileCache`, the per-user results `buildProfile` reuses. It has a TTL and prunes old records. Keys are versioned (`v1|life|…`, `v1|before|…`); bump the version if the stored value shape changes.
+  - `scans`: `ScanStore`, snapshots of finished or stopped scans (`sum|<id>` summary for the list, `data|<id>` serialized profiles) that `app.js` reopens with no requests. Kept until deleted.
+  - A store that hangs turns itself off instead of blocking the page.
 - **`app.js`** handles the DOM only:
   - It reads and clamps the options. Share links use URL params `post`, `max`, `op`, `exclude`, `subs`, `years`, `min`, `delay`, `par` and `cache`.
   - It runs `mapPool(buildProfile)` and inserts cards in thread-activity order as results arrive.

@@ -59,7 +59,7 @@
             <div class="field">
               <label for="cache-days">Keep saved results for (days)</label>
               <input id="cache-days" type="number" min="0" step="any" inputmode="decimal" value="7" aria-describedby="cache-help">
-              <small id="cache-help">0 = don't save. <button id="clear-cache" type="button" class="link">Clear saved results</button></small>
+              <small id="cache-help">0 = don't save (scans too). <button id="clear-cache" type="button" class="link">Clear saved results</button></small>
             </div>
             <div class="field">
               <label for="delay">Seconds between requests</label>
@@ -109,6 +109,12 @@
       </div>
       <p class="legend">Sorted by comments in the thread. The coloured badge counts posts and comments in <span class="target-name"></span> before this post was made: <b>new here</b> (none), <b>occasional</b> (1–9) or <b>regular</b> (10+).<span id="window-note"></span> Click a user for all their subreddits; their post and comment counts link to those posts and comments on Arctic Shift. <b>saved</b> marks results reused from an earlier scan.</p>
       <div id="users"></div>
+    </section>
+
+    <section id="saved" aria-labelledby="saved-heading" hidden>
+      <h2 id="saved-heading" tabindex="-1">Saved scans <span id="saved-count" class="count"></span></h2>
+      <p class="legend">Scans you've run in this browser. Open one to see its users again straight away, with no requests; <b>Scan again</b> checks for new comments and activity.</p>
+      <ul id="saved-list" class="saved-list"></ul>
     </section>
 
     <footer>

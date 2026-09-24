@@ -10,15 +10,19 @@ import {
   QueryTimeout,
   ServerBusy,
   buildProfile,
+  activityTier,
   arcticSearchUrl,
   collectCommenters,
+  deserializeProfile,
   mapPool,
   parsePostRef,
   parseSubreddits,
+  scanStats,
+  serializeProfile,
   sortedSubreddits,
   toCsv,
 } from "./core.js";
-import { openCache } from "./cache.js";
+import { openCache, openScans } from "./cache.js";
 
 const $ = (id) => document.getElementById(id);
 const TITLE = document.title;
@@ -33,6 +37,7 @@ const state = {
   shown: 0, // cards passing the filter
   beforeKnown: true, // false when the post is older than the history window
   after: null, // start of the history window (epoch seconds), null = all time
+  savedId: null, // post id of the saved scan on show, if one was opened
 };
 
 function el(tag, attrs = {}, ...children) {
@@ -148,6 +153,11 @@ function formatDuration(seconds) {
   return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
 }
 
+function tookText({ seconds, profilingSeconds }) {
+  const total = formatDuration(seconds);
+  return profilingSeconds === null ? total : `${total} (profiling ${formatDuration(profilingSeconds)})`;
+}
+
 function startEta(total) {
   stopEta();
   status.eta = new Eta(total);
@@ -225,6 +235,7 @@ function setRunning(running) {
   $("run").disabled = running;
   $("post").readOnly = running;
   $("option-fields").disabled = running;
+  for (const b of $("saved-list").querySelectorAll("button")) b.disabled = running;
   $("stop").hidden = !running;
   $("stop").disabled = false;
   $("stop").textContent = "Stop";
@@ -247,17 +258,21 @@ function formatDate(ts) {
   return new Date(ts * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-function renderPost(post, commenters) {
+// Commenters in the archive and their comments (a scan's commenters map → numbers).
+function threadStats(commenters) {
+  const people = [...commenters.values()].filter((c) => c.count > 0);
+  return { people: people.length, comments: people.reduce((n, c) => n + c.count, 0) };
+}
+
+function renderPost(post, thread) {
   $("post-card").hidden = false;
   $("post-sub").textContent = `r/${post.subreddit}`;
   $("post-title").textContent = post.title || "(untitled post)";
   $("post-title").href = `https://www.reddit.com/r/${post.subreddit}/comments/${post.id}/`;
   let meta = `by u/${post.author} · ${formatDate(post.createdUtc)}`;
   let title = "";
-  if (commenters) {
-    const people = [...commenters.values()].filter((c) => c.count > 0);
-    const comments = people.reduce((n, c) => n + c.count, 0);
-    meta += ` · ${plural(people.length, "commenter")} with ${plural(comments, "comment")} in the archive`;
+  if (thread) {
+    meta += ` · ${plural(thread.people, "commenter")} with ${plural(thread.comments, "comment")} in the archive`;
     title = "Not counting deleted accounts, AutoModerator or skipped users. " +
       `Reddit counted ${plural(post.numComments, "comment")} when the post was archived.`;
   }
@@ -287,7 +302,7 @@ function activity(profile, post) {
     return { cls: "pill new", text: "new here", title: `No posts or comments in ${sub} before this post` };
   }
   const counts = [posts && plural(posts, "post"), comments && plural(comments, "comment")].filter(Boolean).join(", ");
-  const tier = posts + comments >= 10 ? "regular" : "occasional";
+  const tier = activityTier(posts, comments);
   return { cls: `pill ${tier}`, text: `${tier} · ${counts} before`, title: `${counts} in ${sub} before this post` };
 }
 
@@ -452,7 +467,8 @@ async function run() {
   const after = opts.years ? Math.floor(Date.now() / 1000 - opts.years * 365.25 * 86400) : null;
   const runId = ++state.runId;
   const controller = new AbortController();
-  Object.assign(state, { controller, post: null, slots: [], shown: 0, beforeKnown: true, after });
+  Object.assign(state, { controller, post: null, slots: [], shown: 0, beforeKnown: true, after, savedId: null });
+  markCurrentScan();
   $("post-card").hidden = true;
   $("results").hidden = true;
   $("users").replaceChildren();
@@ -470,15 +486,41 @@ async function run() {
     onPause: (until) => runId === state.runId && status.eta?.pause(until),
   });
   const counts = { done: 0, total: 0 };
+  let thread = null;
+  let fromCache = 0;
+  // Snapshot the scan for the saved list (a stopped one too, if anyone was profiled).
+  const save = async (complete) => {
+    if (!opts.cacheDays || !counts.done || !state.post) return;
+    const profiles = state.slots.filter(Boolean);
+    const summary = {
+      id: state.post.id,
+      post: state.post,
+      scannedAt: Date.now() / 1000,
+      complete,
+      total: counts.total,
+      thread,
+      requests: client.requests,
+      ...elapsed(),
+      fromSaved: fromCache,
+      after,
+      beforeKnown: state.beforeKnown,
+      opts: { only: opts.only, years: opts.years, maxUsers: opts.maxUsers, includeOp: opts.includeOp, exclude: opts.exclude },
+      stats: scanStats(profiles, state.beforeKnown),
+    };
+    if (await openScans().save(summary, profiles.map(serializeProfile))) {
+      state.savedId = state.post.id;
+      renderSaved();
+    }
+  };
   // Real time taken, shown when the run ends so it can be compared with the estimate
   // (which covers the profiling part only).
   const startedAt = performance.now();
   let profilingAt = null;
-  const took = () => {
+  const elapsed = () => {
     const now = performance.now();
-    const total = formatDuration((now - startedAt) / 1000);
-    return profilingAt === null ? total : `${total} (profiling ${formatDuration((now - profilingAt) / 1000)})`;
+    return { seconds: (now - startedAt) / 1000, profilingSeconds: profilingAt === null ? null : (now - profilingAt) / 1000 };
   };
+  const took = () => tookText(elapsed());
   const fail = (text) => {
     $("bar").hidden = true;
     setStatus(`Failed after ${took()}.`);
@@ -500,7 +542,8 @@ async function run() {
 
     setStatus("Collecting commenters…");
     const commenters = await collectCommenters(client, post, opts);
-    renderPost(post, commenters);
+    thread = threadStats(commenters);
+    renderPost(post, thread);
 
     let ranked = [...commenters].sort((a, b) =>
       b[1].count - a[1].count || a[0].toLowerCase().localeCompare(b[0].toLowerCase()));
@@ -519,7 +562,6 @@ async function run() {
 
     counts.total = ranked.length;
     let inFlight = 0;
-    let fromCache = 0;
     let failed = 0;
     let firstError = null;
     let milestone = 0.25;
@@ -574,6 +616,7 @@ async function run() {
     }
     setStatus(text);
     announce(text);
+    await save(true);
     if (failed === counts.total) showError(`Every lookup failed. ${explain(firstError)}`, firstError.message);
   } catch (err) {
     if (runId === state.runId) stopEta();
@@ -582,6 +625,7 @@ async function run() {
         ` Ran for ${took()}.`;
       setStatus(text);
       announce(text);
+      await save(false);
     } else {
       showError(fail(explain(err)), err.message);
       announce(explain(err));
@@ -597,6 +641,160 @@ async function run() {
       document.title = TITLE;
     }
   }
+}
+
+// ---- Saved scans ----
+
+let savedRender = 0;
+
+// The list of saved scans, newest first.
+async function renderSaved() {
+  const token = ++savedRender;
+  const scans = await openScans().list();
+  if (token !== savedRender) return; // a newer render started
+  $("saved").hidden = !scans.length;
+  $("saved-count").textContent = scans.length ? `(${scans.length})` : "";
+  $("saved-list").replaceChildren(...scans.map(scanItem));
+  markCurrentScan();
+}
+
+function scanItem(scan) {
+  const { post, stats } = scan;
+  const pill = (cls, text, title) => el("span", { class: `pill ${cls}`, title }, text);
+  const running = state.controller !== null;
+  const open = el("button", { type: "button", class: "scan-title", "aria-describedby": `scan-meta-${post.id}` },
+    post.title || "(untitled post)");
+  open.addEventListener("click", () => openSaved(post.id));
+  const again = el("button", { type: "button", "aria-label": `Scan “${post.title}” again` }, "Scan again");
+  again.addEventListener("click", () => scanAgain(post.id));
+  const del = el("button", { type: "button", "aria-label": `Delete saved scan of “${post.title}”` }, "Delete");
+  del.addEventListener("click", () => deleteSaved(post.id));
+  for (const b of [open, again, del]) b.disabled = running;
+
+  const pills = el("div", { class: "scan-stats" },
+    pill("", scan.complete ? plural(stats.profiled, "user") : `${stats.profiled} of ${plural(scan.total, "user")}`,
+      scan.complete ? "Users profiled" : "Stopped before every user was profiled"));
+  if (scan.beforeKnown) {
+    pills.append(
+      pill("regular", `${stats.regular} regular`, `10+ posts and comments in r/${post.subreddit} before the post`),
+      pill("occasional", `${stats.occasional} occasional`, `1–9 posts and comments in r/${post.subreddit} before the post`),
+      pill("new", `${stats.new} new here`, `No activity in r/${post.subreddit} before the post`));
+  }
+  if (stats.failed) pills.append(pill("err", `${stats.failed} failed`, "Lookups that failed"));
+  pills.append(pill("", plural(stats.subreddits, "subreddit"), "Subreddits these users are active in"));
+
+  const meta = [
+    `Scanned ${formatDate(scan.scannedAt)}`,
+    scan.thread && `${plural(scan.thread.comments, "comment")} from ${plural(scan.thread.people, "commenter")}`,
+    `${plural(scan.requests, "request")}`,
+    `took ${tookText(scan)}`,
+    !scan.complete && "stopped early",
+    ...scanOptionNotes(scan.opts),
+  ].filter(Boolean).join(" · ");
+
+  const li = el("li", { class: "scan" },
+    el("div", {},
+      el("div", { class: "post-sub" }, `r/${post.subreddit} · by u/${post.author} · ${formatDate(post.createdUtc)}`),
+      open,
+      pills,
+      el("div", { class: "scan-meta", id: `scan-meta-${post.id}` }, meta)),
+    el("div", { class: "scan-actions" }, again, del));
+  li.dataset.id = post.id;
+  return li;
+}
+
+function scanOptionNotes(o = {}) {
+  return [
+    o.years && `last ${plural(o.years, "year")}`,
+    o.only?.length && `only ${o.only.map((x) => `r/${x}`).join(", ")}`,
+    o.maxUsers && `top ${o.maxUsers}`,
+    o.includeOp && "author included",
+    o.exclude?.length && `skipped ${o.exclude.join(", ")}`,
+  ].filter(Boolean);
+}
+
+function markCurrentScan() {
+  for (const li of $("saved-list").children) {
+    if (li.dataset.id === state.savedId) li.setAttribute("aria-current", "true");
+    else li.removeAttribute("aria-current");
+  }
+}
+
+// Put a saved scan's post and options (not pace or caching) back in the form.
+function fillFromScan(summary) {
+  const { post, opts: o = {} } = summary;
+  $("post").value = `https://www.reddit.com/r/${post.subreddit}/comments/${post.id}/`;
+  $("include-op").checked = Boolean(o.includeOp);
+  showOptions({
+    ...readOptions(),
+    includeOp: Boolean(o.includeOp),
+    exclude: o.exclude ?? [],
+    only: o.only ?? [],
+    years: o.years ?? null,
+    maxUsers: o.maxUsers ?? null,
+  });
+}
+
+// Show a saved scan's users, as they were when it was saved, with no requests.
+async function openSaved(id) {
+  if (state.controller) return;
+  const rec = await openScans().load(id);
+  if (state.controller) return;
+  if (!rec) {
+    showError("That saved scan couldn't be read. It may have been deleted in another tab.");
+    renderSaved();
+    return;
+  }
+  const { summary } = rec;
+  state.runId++;
+  const slots = [];
+  rec.profiles.forEach((d, i) => {
+    const p = deserializeProfile(d);
+    p.rank ??= i;
+    slots[p.rank] = p;
+  });
+  Object.assign(state, {
+    post: summary.post, slots, shown: 0, after: summary.after ?? null,
+    beforeKnown: summary.beforeKnown ?? true, savedId: id,
+  });
+  showError("");
+  fillFromScan(summary);
+  renderPost(summary.post, summary.thread);
+  renderWindowNote(state.after);
+  $("results").hidden = false;
+  renderUsers();
+  markCurrentScan();
+
+  const profiled = summary.complete
+    ? `profiled ${plural(summary.stats.profiled, "user")}`
+    : `stopped after ${summary.stats.profiled} of ${plural(summary.total, "user")}`;
+  const text = `Saved scan from ${formatDate(summary.scannedAt)}: ${profiled} with ` +
+    `${plural(summary.requests, "request")}. Took ${tookText(summary)}. Opened with no new requests.`;
+  clearWaits();
+  $("bar").hidden = true;
+  setStatus(text);
+  announce(`Opened saved scan of ${summary.post.title}.`);
+  document.title = TITLE;
+  $("post-card").scrollIntoView({ block: "start" });
+}
+
+function scanAgain(id) {
+  if (state.controller) return;
+  openScans().load(id).then((rec) => {
+    if (rec) fillFromScan(rec.summary);
+    else $("post").value = id;
+    run();
+  });
+}
+
+async function deleteSaved(id) {
+  if (state.controller) return;
+  await openScans().delete(id);
+  if (state.savedId === id) state.savedId = null;
+  announce("Saved scan deleted.");
+  await renderSaved();
+  // The button is gone; keep keyboard focus nearby.
+  ($("saved").hidden ? $("post") : $("saved-heading")).focus();
 }
 
 // ---- Sharing, CSV, saved results ----
@@ -658,8 +856,10 @@ function downloadCsv() {
 }
 
 async function clearCache() {
-  const n = await openCache(0).clear();
-  const text = n ? `Cleared ${plural(n, "saved result")}` : "Nothing saved";
+  const [n, scans] = await Promise.all([openCache(0).clear(), openScans().clear()]);
+  const text = n || scans ? `Cleared ${plural(n, "saved result")} and ${plural(scans, "scan")}` : "Nothing saved";
+  state.savedId = null;
+  renderSaved();
   flash($("clear-cache"), text, "Clear saved results");
   announce(text);
 }
@@ -696,6 +896,7 @@ function init() {
   const opts = readOptions();
   showOptions(opts);
   openCache(opts.cacheDays).prune();
+  renderSaved();
   if (params.get("post")) {
     $("post").value = params.get("post");
     run();

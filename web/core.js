@@ -797,6 +797,63 @@ export function sortedSubreddits(profile, post, minCount = 0, { targetFirst = fa
       b.total - a.total || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 }
 
+// "new" (no activity), "occasional" (1-9) or "regular" (10+): how active someone was in
+// the post's subreddit before the post.
+export const REGULAR_FROM = 10;
+export function activityTier(postsBefore, commentsBefore) {
+  const n = postsBefore + commentsBefore;
+  return n === 0 ? "new" : n < REGULAR_FROM ? "occasional" : "regular";
+}
+
+// Profiles as plain data for storage (subreddits as [name, posts, comments] rows), and back.
+export function serializeProfile(p) {
+  return {
+    username: p.username,
+    threadComments: p.threadComments,
+    targetPostsBefore: p.targetPostsBefore,
+    targetCommentsBefore: p.targetCommentsBefore,
+    subreddits: [...p.subreddits].map(([name, c]) => [name, c.posts, c.comments]),
+    rank: p.rank,
+    cached: Boolean(p.cached),
+    error: p.error ?? null,
+    errorDetail: p.errorDetail ?? null,
+  };
+}
+
+export function deserializeProfile(d) {
+  const p = {
+    ...d,
+    subreddits: new Map(d.subreddits.map(([name, posts, comments]) => [name, { posts, comments }])),
+  };
+  if (!p.error) {
+    delete p.error;
+    delete p.errorDetail;
+  }
+  return p;
+}
+
+// What a scan found, for the list of saved scans. beforeKnown: false when the post is
+// older than the history window, so there are no tiers to count.
+export function scanStats(profiles, beforeKnown = true) {
+  const stats = { profiled: 0, failed: 0, new: 0, occasional: 0, regular: 0, subreddits: 0, posts: 0, comments: 0 };
+  const subs = new Set();
+  for (const p of profiles) {
+    stats.profiled++;
+    if (p.error) {
+      stats.failed++;
+      continue;
+    }
+    if (beforeKnown) stats[activityTier(p.targetPostsBefore, p.targetCommentsBefore)]++;
+    for (const [name, c] of p.subreddits) {
+      if (c.posts + c.comments > 0) subs.add(name.toLowerCase());
+      stats.posts += c.posts;
+      stats.comments += c.comments;
+    }
+  }
+  stats.subreddits = subs.size;
+  return stats;
+}
+
 // Link to the Arctic Shift search page listing an author's posts or comments in a
 // subreddit, newest first. kind: "posts" | "comments"; after: epoch seconds or null.
 export function arcticSearchUrl(kind, author, subreddit, after = null) {

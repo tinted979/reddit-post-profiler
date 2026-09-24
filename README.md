@@ -41,6 +41,16 @@ and a link to their Reddit profile.
 Each post and comment count links to the Arctic Shift search page listing those posts or
 comments (newest first, within the `years` window if set).
 
+### Saved scans
+
+Every scan you run (or stop after some users are profiled) is listed under *Saved scans*,
+newest first, with its post, how many users were profiled, how many are regular, occasional
+or new to the subreddit, failures, the subreddits they're active in, and when it ran, how
+many requests it made and how long it took. Click a post to see its users again exactly as
+they were, with no requests; *Scan again* runs it again with the same options (reusing
+saved results where it can), and *Delete* removes it. A new scan of a post replaces its
+saved one.
+
 ### Options and share links
 
 *Copy link* builds a link that starts the same analysis as soon as it opens, and the
@@ -71,7 +81,9 @@ https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=
 - Results are saved in this browser's IndexedDB (database `reddit-tool`): each user's
   per-subreddit counts, and their "before" counts for each post you scan. They're reused
   for `cache` days; records older than that (and at least 30 days old) are deleted when
-  the page loads. *Clear saved results* under *Options* deletes everything now.
+  the page loads. Saved scans (each post, its options and every profile shown) are kept
+  until you delete them. *Clear saved results* under *Options* deletes everything now, and
+  `cache=0` saves nothing.
 - A saved "before" count is reused only if it was fetched at least an hour after the post,
   and saved totals from before a user's latest comment in the thread aren't trusted to
   skip queries, so rescanning a thread that's still growing stays correct.
