@@ -7,8 +7,6 @@ Profile everyone who commented on a Reddit post, using the
   post was created**. This shows whether they're a regular or a newcomer.
 - **every subreddit** they're active in, with their post and comment counts in each.
 
-There's a web version and a command-line version; both write the same CSV.
-
 ## Use it in your browser
 
 **https://tinted979.github.io/reddit-tool/**
@@ -160,7 +158,7 @@ page; once it's removed there, this tool can't see it either. The page repeats t
   missing. A post that isn't archived yet can't be analysed.
 - **Deleted accounts.** Comments whose author shows as `[deleted]` or `[removed]` can't be
   traced to anyone, so they're skipped, and so is AutoModerator.
-- **History window (web).** `years` counts back from today, not from the post, and applies
+- **History window.** `years` counts back from today, not from the post, and applies
   to every count. For a post older than the window there's no "before" to count.
 - **Very active users.** Their full history can time out; the fallbacks (see
   [How it works](#how-it-works)) take more requests, and if those fail the user shows
@@ -168,36 +166,10 @@ page; once it's removed there, this tool can't see it either. The page repeats t
 - **Reddit app share links** (`reddit.com/r/<sub>/s/<code>`) don't contain the post id.
   Open the link and copy the full `…/comments/<id>/…` address instead.
 - **Rate limits.** Arctic Shift is a free, shared service. A rate limit (HTTP 429) pauses
-  every request, for 30 seconds in the web app; a "slow down" answer delays only the request
+  every request, for 30 seconds; a "slow down" answer delays only the request
   that got it, and fewer requests run at once until the server recovers. If it keeps
   saying so, that user fails rather than piling on heavier queries. Please don't turn up
   the pace aggressively.
-
-## Command-line version
-
-Requires [uv](https://docs.astral.sh/uv/) (Python 3.12+, which uv installs if needed).
-
-```sh
-uv sync
-uv run reddit-tool https://www.reddit.com/r/learnpython/comments/1l7d1e4/running_python_scripts/
-```
-
-The post can be given as a full reddit URL, a `redd.it/<id>` link, a `t3_<id>` fullname or
-the bare post id. Progress is printed to stderr; the results go to a CSV file.
-
-| Option | Meaning |
-|---|---|
-| `-o, --output PATH` | CSV path (default `<post_id>_activity.csv`) |
-| `--include-op` | also profile the post's author |
-| `--exclude USER` | username to skip, repeatable (`AutoModerator`, `[deleted]` and `[removed]` are always skipped) |
-| `--max-users N` | only profile the N most active commenters in the thread |
-| `--min-count N` | omit subreddits where a user has fewer than N posts+comments (the target subreddit is always kept) |
-| `--delay SECONDS` | minimum pause between API requests (default 2.0) |
-
-The CLI profiles one user at a time with 4 requests each and saves nothing between runs,
-so a thread with 100 commenters takes roughly 15 minutes at the default delay. It has no
-equivalent of the web app's `subs` or `years`. Press Ctrl-C to stop early; the profiles
-collected so far are still written.
 
 ## CSV output
 
@@ -205,69 +177,65 @@ One row per (user, subreddit), sorted by the user's comment count in the thread,
 activity in each subreddit:
 
 ```
-username,thread_comments,target_subreddit,target_posts_before,target_comments_before,subreddit,posts,comments,total,error
-barkmonster,2,learnpython,0,24,learnpython,0,82,82,
-barkmonster,2,learnpython,0,24,ADHD,0,53,53,
+username,thread_comments,target_subreddit,target_posts_before,target_comments_before,subreddit,posts,comments,total,error,target_active_days_before,target_first_before_utc,target_badge
+barkmonster,2,learnpython,0,24,learnpython,0,82,82,,12,2024-03-05T18:22:10.000Z,occasional
+barkmonster,2,learnpython,0,24,ADHD,0,53,53,,12,2024-03-05T18:22:10.000Z,occasional
 …
 ```
 
 - `thread_comments`: the user's comment count in the analysed thread
 - `target_subreddit`: the post's subreddit
 - `target_posts_before` / `target_comments_before`: their activity there before the post was created (blank if the lookup failed)
-- `posts` / `comments` / `total`: their counts in `subreddit`, as archived by Arctic Shift: all-time, or since the start of the web app's `years` window
+- `posts` / `comments` / `total`: their counts in `subreddit`, as archived by Arctic Shift: all-time, or since the start of the `years` window
 - `error`: why the lookup failed, if it did
-- web app only (the CLI doesn't write these three):
-  - `target_active_days_before`: different days they posted or commented in the post's subreddit before it (a lower bound past 100 posts or comments)
-  - `target_first_before_utc`: when the first of those was
-  - `target_badge`: `new`, `occasional` or `regular` under the badge settings in use (blank for a post older than the `years` window)
+- `target_active_days_before`: different days they posted or commented in the post's subreddit before it (a lower bound past 100 posts or comments)
+- `target_first_before_utc`: when the first of those was
+- `target_badge`: `new`, `occasional` or `regular` under the badge settings in use (blank for a post older than the `years` window)
 
-Subreddits below the minimum (`--min-count` or `min`) are left out, except the post's own.
+Subreddits below the minimum (`min`) are left out, except the post's own.
 A user with no archived activity, or whose lookup failed, still gets one row. A CSV
 downloaded mid-run is named `…_activity_partial.csv`.
 
 ## How it works
 
-Both versions use the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md):
+The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md):
 
 1. `GET /api/posts/ids` fetches the post's subreddit, author and creation time.
-2. The commenters: the web app gets the whole thread from
-   `GET /api/comments/tree?link_id=…` in one request, and pages
-   `GET /api/comments/search?link_id=…` by timestamp only if the tree is incomplete, fails,
-   or the thread has 25,000+ comments. The CLI always pages the search.
+2. The commenters: the whole thread comes from
+   `GET /api/comments/tree?link_id=…` in one request. `GET /api/comments/search?link_id=…`
+   is paged by timestamp only if the tree is incomplete, fails, or the thread has 25,000+
+   comments.
 3. For each commenter, `GET /api/{posts,comments}/search/aggregate?aggregate=subreddit&author=…`
-   returns per-subreddit counts. For the "before" counts the CLI makes the same call with
-   `subreddit=…&before=<post time>`. The web app instead asks
+   returns per-subreddit counts. For the "before" facts it asks
    `GET /api/{posts,comments}/search?author=…&subreddit=…&before=<post time>&fields=created_utc&limit=100`
    for the timestamps themselves, which gives the count, the days active and the first
    date in one small request (the `created_utc` aggregate would be cheaper, but it
    currently answers all zeros). Past 100 items it adds the aggregate for the exact count
-   and one more search for the first date. The web app runs these in parallel and skips a
+   and one more search for the first date. These run in parallel, and it and skips a
    "before" query when the lifetime counts leave no room for one, e.g. when all of a
    user's comments in the subreddit are in this thread.
 
-Aggregations can time out for very active users; both versions retry once. The CLI then
-splits the query into yearly chunks and adds them up. The web app first tries
+Aggregations can time out for very active users. The page then tries
 `GET /api/users/interactions/subreddits`, which answers for posts and comments in one query
 (`weight_posts=1000000&weight_comments=1` packs both counts into one number). If that fails
 too, it splits only the kind that timed out: into one query per subreddit when `subs` is
 set, otherwise into yearly chunks. For ordinary users the two aggregations are quicker, so
 they stay the first choice.
 
-The web app spaces request starts by `delay` and caps how many are in flight, starting at
+The page spaces request starts by `delay` and caps how many are in flight, starting at
 `par`: the cap halves on a 429, slow-down or network error, and rises again after a run of
 successes.
 
 ## Development
 
 ```sh
-uv run pytest            # Python CLI
 cd web && npm test       # web app core (Node 22+, no dependencies)
 ```
 
 To try the web app locally, serve `web/` with any static server (ES modules don't load
 from `file://`), e.g. `python3 -m http.server -d web`, and open http://localhost:8000.
 
-`.github/workflows/pages.yml` runs both test suites on every push and pull request. On the
+`.github/workflows/pages.yml` runs the tests on every push and pull request. On the
 default branch (`main`) it then publishes the page files at the top of `web/` (`*.html`, `*.js`,
 `*.css`) to GitHub Pages, failing if a module imports a file that isn't among them, and tags each script and stylesheet
 with the commit so browsers don't mix cached versions; any

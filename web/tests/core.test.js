@@ -609,7 +609,7 @@ test("ProfileCache is off with 0 days and clears", async () => {
   assert.equal(await on.get("a"), null);
 });
 
-test("toCsv matches the CLI layout, plus the web app's badge columns", () => {
+test("toCsv writes one row per user and subreddit, with the badge columns at the end", () => {
   const profiles = [
     {
       username: "alice", threadComments: 3, targetPostsBefore: 1, targetCommentsBefore: 4, error: null,
