@@ -819,11 +819,13 @@ async function run({ fromQueue = false } = {}) {
     let text = `Done: profiled ${who}${notes.length ? ` (${notes.join(", ")})` : ""}` +
       ` with ${plural(client.requests, "request")}. Took ${took()}.`;
     if (archive) {
-      const upTo = new Date(Math.min(archive.postsThrough, archive.commentsThrough) * 1000)
-        .toLocaleDateString(undefined, { dateStyle: "medium" });
-      text += dumps.broken
-        ? ` The r/${archive.name} archive files stopped answering partway, so Arctic Shift answered for the rest.`
-        : ` Activity in r/${archive.name} before the post, up to ${upTo}, came from archive files.`;
+      if (dumps.broken) {
+        text += ` The r/${archive.name} archive files stopped answering partway, so Arctic Shift answered for the rest.`;
+      } else if (dumps.reads > 0) {
+        const upTo = new Date(Math.min(archive.postsThrough, archive.commentsThrough) * 1000)
+          .toLocaleDateString(undefined, { dateStyle: "medium" });
+        text += ` Activity in r/${archive.name} before the post, up to ${upTo}, came from archive files.`;
+      }
     }
     if (failed && failed < counts.total && opts.cacheDays > 0) {
       text += " Press Analyze to retry the failed ones; the rest are reused.";

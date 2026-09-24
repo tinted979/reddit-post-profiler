@@ -1296,6 +1296,38 @@ test("a post newer than the files adds the API's gap after them, counting the ed
   assert.equal(p.targetTimelineComplete, true);
 });
 
+test("if the gap's timestamp search fails, the aggregate answers the count with only the files' timeline", async () => {
+  const through = T - 5 * 86400;
+  const fileTimes = [T - 20 * 86400, through];
+  const gapCount = 3;
+  const handler = (u) => {
+    const kind = u.pathname.includes("/posts/") ? "posts" : "comments";
+    if (!u.searchParams.has("subreddit")) return json({ data: kind === "comments" ? [{ key: "Python", count: "9" }] : [] });
+    if (u.pathname.endsWith("/aggregate")) return json({ data: [{ key: "Python", count: String(gapCount) }] });
+    return json({ error: "internal error" }, 500); // the gap's timestamp search fails
+  };
+  const { client } = makeClient(handler);
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: through, times: { comments: { alice: fileTimes } } });
+  const p = await buildProfile(client, "alice", 1, POST, { dumps });
+  assert.equal(p.targetCommentsBefore, fileTimes.length + gapCount); // files + the aggregate's gap count
+  assert.equal(p.targetFirstBefore, Math.min(...fileTimes)); // the files' earliest
+  assert.equal(p.targetDaysBefore, 2); // the files' days only
+  assert.equal(p.targetTimelineComplete, false);
+});
+
+test("a window start after the files' trust cutoff skips the files and asks the API from `after`", async () => {
+  const after = T - 10 * 86400;
+  const through = T - 30 * 86400; // earlier than `after`: the files can't answer any of the window
+  const apiTimes = [after + 1, T - 86400];
+  const { client, calls } = makeClient(apiWithBefore({ comments: 5, before: { comments: apiTimes } }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: through, times: { comments: { alice: [T - 40 * 86400, through] } } });
+  const p = await buildProfile(client, "alice", 1, POST, { dumps, after });
+  const gap = calls.filter((u) => u.searchParams.has("before"));
+  assert.ok(gap.length > 0);
+  assert.equal(gap[0].searchParams.get("after"), String(after)); // not `through`
+  assert.equal(p.targetCommentsBefore, apiTimes.length); // no file rows counted
+});
+
 test("the history window applies to archive rows too", async () => {
   const after = T - 10 * 86400;
   const { client } = makeClient(apiWithBefore({ comments: 5 }));

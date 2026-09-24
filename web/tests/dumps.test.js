@@ -42,6 +42,25 @@ test("timestamps finds an author in any case, oldest first", async () => {
   assert.deepEqual(await dumps.timestamps("posts", "Python", "nobody"), []);
 });
 
+test("reads counts successful timestamps calls, not failures", async () => {
+  const dumps = await openFixtures();
+  assert.equal(dumps.reads, 0);
+  await dumps.timestamps("comments", "Python", "alice");
+  await dumps.timestamps("posts", "Python", "alice");
+  assert.equal(dumps.reads, 2);
+
+  const failing = await openFixtures({ openFile: async () => { throw new TypeError("Failed to fetch"); } });
+  await assert.rejects(failing.timestamps("comments", "Python", "alice"), DumpUnavailable);
+  assert.equal(failing.reads, 0);
+});
+
+test("a read that never resolves times out as DumpUnavailable and switches the source off", async () => {
+  const dumps = await openFixtures({ readTimeoutMs: 50, openFile: async () => new Promise(() => {}) });
+  await assert.rejects(dumps.timestamps("comments", "Python", "alice"), DumpUnavailable);
+  assert.equal(dumps.broken, true);
+  assert.equal(dumps.reads, 0);
+});
+
 test("each file is opened once per source", async () => {
   let opens = 0;
   const dumps = await openFixtures({ openFile: async (url) => (opens++, localFile(url)) });

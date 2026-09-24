@@ -17,9 +17,18 @@ const isTime = (n) => Number.isSafeInteger(n) && n > 0;
 // The archive files can't answer (a network error, a bad file). Callers use the API.
 export class DumpUnavailable extends Error {}
 
-// Reads a remote file with range requests, keeping what it has fetched.
-async function urlFile(url, byteLength, signal) {
-  return cachedAsyncBuffer(await asyncBufferFromUrl({ url, byteLength, requestInit: { signal: signal ?? undefined } }));
+// Reads a remote file with range requests, keeping what it has fetched. Each range read
+// (hyparquet's `slice`) gets its own timeout via a custom `fetch`, on top of the run's
+// Stop signal, so a stalled connection can't hang a read forever.
+async function urlFile(url, byteLength, signal, timeoutMs = 20000) {
+  const fetchWithTimeout = (input, init) => {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const merged = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    return globalThis.fetch(input, { ...init, signal: merged });
+  };
+  return cachedAsyncBuffer(await asyncBufferFromUrl({
+    url, byteLength, requestInit: { signal: signal ?? undefined }, fetch: fetchWithTimeout,
+  }));
 }
 
 // The covered subreddits in a manifest, keyed by lowercase name. The manifest is fetched,
@@ -51,10 +60,12 @@ export function parseManifest(data) {
 }
 
 export class DumpSource {
-  constructor(subs, { baseUrl = DUMPS_URL, openFile = urlFile, signal = null } = {}) {
+  constructor(subs, { baseUrl = DUMPS_URL, openFile = urlFile, signal = null, readTimeoutMs = 20000 } = {}) {
     this.baseUrl = baseUrl;
     this.signal = signal;
     this.broken = false; // a read failed: leave the files alone for the rest of the scan
+    this.reads = 0; // successful timestamps() calls, for the end-of-scan note
+    this.readTimeoutMs = readTimeoutMs;
     this._subs = subs;
     this._openFile = openFile;
     this._files = new Map(); // path -> Promise<{file, metadata}>
@@ -62,18 +73,35 @@ export class DumpSource {
 
   // The archive, or null if there's no usable manifest (missing, unreachable, slow,
   // malformed, or covering nothing). Throws Aborted only when `signal` aborts.
-  static async open({ baseUrl = DUMPS_URL, fetchFn = (...a) => globalThis.fetch(...a), openFile = urlFile, signal = null, timeoutMs = 5000 } = {}) {
+  static async open({
+    baseUrl = DUMPS_URL, fetchFn = (...a) => globalThis.fetch(...a), openFile = urlFile,
+    signal = null, timeoutMs = 5000, readTimeoutMs = 20000,
+  } = {}) {
     if (signal?.aborted) throw new Aborted("stopped");
-    const timeout = AbortSignal.timeout(timeoutMs);
     try {
+      const timeout = AbortSignal.timeout(timeoutMs);
       const resp = await fetchFn(`${baseUrl}/manifest.json`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
       if (!resp.ok) return null;
       const subs = parseManifest(await resp.json());
-      return subs.size ? new DumpSource(subs, { baseUrl, openFile, signal }) : null;
+      return subs.size ? new DumpSource(subs, { baseUrl, openFile, signal, readTimeoutMs }) : null;
     } catch {
       if (signal?.aborted) throw new Aborted("stopped");
       return null;
     }
+  }
+
+  // Races `promise` against `readTimeoutMs` (never resolving early on success). Used
+  // around each range read so a stalled or never-settling read can't stall a caller
+  // forever; a swallow-handler keeps a late rejection from the loser from surfacing as an
+  // unhandled rejection.
+  _race(promise) {
+    promise.catch(() => {});
+    if (!this.readTimeoutMs) return promise;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`archive read timed out after ${this.readTimeoutMs}ms`)), this.readTimeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
 
   // {name, postsThrough, commentsThrough} for a covered subreddit (any case), else null.
@@ -89,12 +117,13 @@ export class DumpSource {
     const f = this._subs.get(String(subreddit).toLowerCase())?.files[kind];
     if (!f || this.broken) throw new DumpUnavailable(`no usable ${kind} file for r/${subreddit}`);
     try {
-      const { file, metadata } = await this._open(f);
+      const { file, metadata } = await this._race(this._open(f));
       // $eq, not a plain value: only operator filters let hyparquet skip row groups by
       // their author range, so a lookup reads one ~100 KB group, not the whole file.
-      const rows = await parquetQuery({
+      const rows = await this._race(parquetQuery({
         file, metadata, columns: ["author", "created_utc"], filter: { author: { $eq: String(author).toLowerCase() } },
-      });
+      }));
+      this.reads++;
       return rows.map((r) => Number(r.created_utc)).filter(isTime).sort((a, b) => a - b);
     } catch (err) {
       if (this.signal?.aborted) throw new Aborted("stopped");
@@ -103,12 +132,14 @@ export class DumpSource {
     }
   }
 
-  // A file and its footer, fetched once per source (a failed open is retried next time).
+  // A file and its footer, fetched once per source. A failed open here is retried next
+  // time, but `timestamps` only calls this again after a Stop (Aborted): any other
+  // failure, including a read timing out, sets `broken` first and shuts the source off.
   _open(f) {
     let opened = this._files.get(f.path);
     if (!opened) {
       opened = (async () => {
-        const file = await this._openFile(`${this.baseUrl}/${f.path}`, f.bytes, this.signal);
+        const file = await this._openFile(`${this.baseUrl}/${f.path}`, f.bytes, this.signal, this.readTimeoutMs);
         // The footer is a few KB; hyparquet's default first read is the last 512 KB.
         return { file, metadata: await parquetMetadataAsync(file, { initialFetchSize: 64 * 1024 }) };
       })();
