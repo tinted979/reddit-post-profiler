@@ -5,6 +5,7 @@ import {
   Aborted,
   ArcticShiftClient,
   ArcticShiftError,
+  Eta,
   QueryTimeout,
   ServerBusy,
   Unsupported,
@@ -768,4 +769,69 @@ test("arcticSearchUrl links to an author's items in a subreddit", () => {
   const p = new URL(arcticSearchUrl("posts", "a", "rust", 1600000000));
   assert.equal(p.searchParams.get("fun"), "posts_search");
   assert.equal(p.searchParams.get("after"), "1600000000");
+});
+
+test("Eta estimates from the pace of fetched users and counts down between them", () => {
+  let t = 1000;
+  const eta = new Eta(10, () => t);
+  t += 4; eta.record();
+  t += 4; eta.record();
+  assert.equal(eta.secondsLeft(), null); // not enough samples yet
+  t += 4; eta.record();
+  assert.equal(eta.secondsLeft(), 28); // 7 left at 4 s each
+  t += 2;
+  assert.equal(eta.secondsLeft(), 26); // counts down between completions
+  t += 30; // the next user is badly overdue: the estimate grows instead of sitting at 0
+  assert.ok(eta.secondsLeft() > 26);
+  for (let i = 0; i < 7; i++) eta.record();
+  assert.equal(eta.secondsLeft(), 0);
+});
+
+test("Eta ignores saved results for the pace and expects the same share later", () => {
+  let t = 0;
+  const eta = new Eta(20, () => t);
+  for (let i = 0; i < 4; i++) {
+    eta.record(true); // instant
+    t += 5;
+    eta.record();
+  }
+  // 12 left, half expected to be saved: 6 fetches at 5 s each.
+  assert.equal(eta.secondsLeft(), 30);
+});
+
+test("Eta takes its pace from recent users only", () => {
+  let t = 0;
+  const eta = new Eta(100, () => t);
+  for (let i = 0; i < 30; i++) { t += 10; eta.record(); } // slow start
+  for (let i = 0; i < Eta.WINDOW; i++) { t += 1; eta.record(); } // server sped up
+  assert.equal(eta.secondsLeft(), 50); // 50 left at 1 s each
+});
+
+test("Eta with only saved results so far waits for samples", () => {
+  let t = 0;
+  const eta = new Eta(10, () => t);
+  for (let i = 0; i < 5; i++) eta.record(true);
+  assert.equal(eta.secondsLeft(), null);
+});
+
+test("Eta leaves rate-limit pauses out of the pace and adds the rest of one in progress", () => {
+  let t = 0;
+  const eta = new Eta(10, () => t);
+  for (let i = 0; i < 4; i++) { t += 2; eta.record(); } // 2 s each, 6 left
+  eta.pause(t + 30);
+  t += 10;
+  assert.equal(eta.secondsLeft(), 12 + 20); // no progress while paused, plus 20 s of pause left
+  t += 20; // pause over
+  assert.equal(eta.secondsLeft(), 12);
+  t += 2; eta.record();
+  assert.equal(eta.secondsLeft(), 10); // 5 left, still 2 s each: the pause isn't in the pace
+});
+
+test("client reports shared pauses", async () => {
+  const { client, clock } = makeClient(
+    sequence(() => json({ error: "Too many requests" }, 429), () => json({ data: [] })));
+  const pauses = [];
+  client.onPause = (until) => pauses.push(until - clock.t);
+  await client.subredditCounts("comments", "u");
+  assert.deepEqual(pauses, [30]);
 });

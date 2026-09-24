@@ -95,8 +95,9 @@ export class ArcticShiftClient {
     now = monotonicNow,
     signal = null,
     onWait = () => {},
+    onPause = () => {},
   } = {}) {
-    Object.assign(this, { delay, maxInFlight, maxRetries, maxRateLimitWaits, baseUrl, signal, onWait });
+    Object.assign(this, { delay, maxInFlight, maxRetries, maxRateLimitWaits, baseUrl, signal, onWait, onPause });
     this._fetch = fetchFn;
     this._sleepFn = sleep;
     this._now = now;
@@ -176,6 +177,7 @@ export class ArcticShiftClient {
     if (until > this._pausedUntil) {
       this._pausedUntil = until;
       this._pauseReason = reason;
+      this.onPause(until);
     }
   }
 
@@ -701,6 +703,86 @@ function sum(map) {
   let t = 0;
   for (const n of map.values()) t += n;
   return t;
+}
+
+// Estimates the seconds left in a scan from the recent pace of finished users.
+// Saved results finish instantly, so they don't count towards the pace; instead the share
+// of users so far that came from saved results is assumed to hold for the rest. Between
+// completions the estimate counts down, and it grows again if the next user is overdue
+// (a slow server), so it never sits at "0" while work is still going. Pauses that stop
+// every request (rate limits, see pause()) are left out of the pace, since they're
+// one-offs, and the rest of a pause in progress is added on top.
+export class Eta {
+  static MIN_SAMPLES = 3; // fetched users needed before estimating
+  static WINDOW = 20; // recent fetched users the pace is taken from
+
+  constructor(total, now = monotonicNow) {
+    this.total = total;
+    this.now = now;
+    this.start = now();
+    this.done = 0;
+    this.saved = 0;
+    this.finished = []; // completion times of fetched (not saved) users
+    this.estimate = null;
+    this.estimatedAt = 0;
+    this.pauses = []; // [start, end] of pauses that stop every request, in order
+  }
+
+  // Every request is paused until `until` (same clock as `now`).
+  pause(until) {
+    const t = this.now();
+    const last = this.pauses.at(-1);
+    if (last && t <= last[1]) last[1] = Math.max(last[1], until);
+    else this.pauses.push([t, until]);
+  }
+
+  // A user finished; saved = its results were all reused.
+  record(saved = false) {
+    const t = this.now();
+    this.done++;
+    if (saved) this.saved++;
+    else this.finished.push(t);
+    if (this.finished.length > Eta.WINDOW + 1) this.finished.shift();
+    this.estimate = this.finished.length ? this._left() * this._pace(t, 0) : null;
+    this.estimatedAt = t;
+  }
+
+  // Seconds left, or null until there's enough to go on.
+  secondsLeft() {
+    if (this.done >= this.total) return 0;
+    if (this.finished.length < Eta.MIN_SAMPLES || this.estimate === null) return null;
+    const t = this.now();
+    const countdown = this.estimate - this._active(this.estimatedAt, t);
+    // If the next user finished right now, the pace would be this, with one fewer left.
+    const overdue = Math.max(0, this._left() - this._fetchShare()) * this._pace(t, 1);
+    const pauseLeft = Math.max(0, (this.pauses.at(-1)?.[1] ?? 0) - t);
+    return Math.max(0, countdown, overdue) + pauseLeft;
+  }
+
+  // Seconds between a and b, less any pauses.
+  _active(a, b) {
+    let d = b - a;
+    for (const [start, end] of this.pauses) d -= Math.max(0, Math.min(b, end) - Math.max(a, start));
+    return d;
+  }
+
+  _fetchShare() {
+    return this.done ? 1 - this.saved / this.done : 1;
+  }
+
+  // Users still to fetch, allowing for the expected share of saved results.
+  _left() {
+    return (this.total - this.done) * this._fetchShare();
+  }
+
+  // Seconds per fetched user over the recent window ending at t, counting `extra`
+  // not-yet-finished users as done at t.
+  _pace(t, extra) {
+    const n = this.finished.length;
+    const k = Math.min(n, Eta.WINDOW);
+    const from = n > k ? this.finished[n - k - 1] : this.start;
+    return this._active(from, t) / (k + extra);
+  }
 }
 
 // Subreddits of a profile, filtered by minCount (target subreddit always kept) and

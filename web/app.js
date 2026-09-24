@@ -6,6 +6,7 @@ import {
   Aborted,
   ArcticShiftClient,
   ArcticShiftError,
+  Eta,
   QueryTimeout,
   ServerBusy,
   buildProfile,
@@ -114,12 +115,38 @@ function updateOptionsSummary(o = readOptions()) {
 
 // ---- Status ----
 
-const status = { text: "", waits: 0, until: 0, reason: "", timer: null };
+// eta: the running scan's Eta (null when not profiling); etaTimer ticks it every second.
+const status = { text: "", waits: 0, until: 0, reason: "", timer: null, eta: null, etaTimer: null };
 
 function renderStatus() {
   const left = Math.ceil(status.until - Date.now() / 1000);
   const wait = status.waits > 0 && left > 0 ? ` (${status.reason}, resuming in ${left}s)` : "";
-  $("status-text").textContent = status.text + wait;
+  const eta = status.eta ? formatEta(status.eta.secondsLeft()) : "";
+  $("status-text").textContent = status.text + wait + (eta ? ` · ${eta}` : "");
+}
+
+// Rounded so it doesn't flicker: 5 s steps under a minute, 10 s under 10 minutes.
+function formatEta(seconds) {
+  if (seconds === null) return "estimating time left…";
+  if (seconds < 5) return "almost done";
+  if (seconds < 60) return `about ${Math.ceil(seconds / 5) * 5} s left`;
+  if (seconds < 600) {
+    const s = Math.ceil(seconds / 10) * 10;
+    return `about ${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""} left`;
+  }
+  const m = Math.ceil(seconds / 60);
+  return m < 60 ? `about ${m} min left` : `about ${Math.floor(m / 60)} h ${m % 60} min left`;
+}
+
+function startEta(total) {
+  stopEta();
+  status.eta = new Eta(total);
+  status.etaTimer = setInterval(renderStatus, 1000);
+}
+
+function stopEta() {
+  clearInterval(status.etaTimer);
+  Object.assign(status, { eta: null, etaTimer: null });
 }
 
 function setStatus(text) {
@@ -429,6 +456,7 @@ async function run() {
     maxInFlight: opts.concurrency,
     signal: controller.signal,
     onWait: (reason, seconds) => runId === state.runId && onWait(reason, seconds),
+    onPause: (until) => runId === state.runId && status.eta?.pause(until),
   });
   const counts = { done: 0, total: 0 };
 
@@ -482,6 +510,7 @@ async function run() {
       }
     };
     announce(`Found ${plural(counts.total, "commenter")}. Profiling…`);
+    startEta(counts.total);
     progress();
     await mapPool(ranked, opts.concurrency, async ([username, { count, last }], i) => {
       inFlight++;
@@ -506,10 +535,12 @@ async function run() {
       if (profile.cached) fromCache++;
       state.slots[i] = profile;
       counts.done++;
+      if (runId === state.runId) status.eta?.record(profile.cached);
       progress();
       insertCard(userCard(profile, post));
     }, controller.signal);
 
+    stopEta();
     const notes = [fromCache && `${fromCache} from saved results`, failed && `${failed} failed`].filter(Boolean);
     let text = `Done: profiled ${plural(counts.total, "user")}${notes.length ? ` (${notes.join(", ")})` : ""}` +
       ` with ${plural(client.requests, "request")}.`;
@@ -520,6 +551,7 @@ async function run() {
     announce(text);
     if (failed === counts.total) showError(`Every lookup failed. ${explain(firstError)}`, firstError.message);
   } catch (err) {
+    if (runId === state.runId) stopEta();
     if (err instanceof Aborted) {
       const text = counts.total ? `Stopped after ${counts.done} of ${plural(counts.total, "user")}.` : "Stopped.";
       setStatus(text);
@@ -534,6 +566,7 @@ async function run() {
     if (runId === state.runId) {
       state.controller = null;
       clearWaits();
+      stopEta();
       renderStatus();
       setRunning(false);
       document.title = TITLE;
