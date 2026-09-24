@@ -19,6 +19,10 @@ export class MemoryBackend {
   async set(key, record) {
     this.map.set(key, record);
   }
+  // Several [key, record] pairs, all or none.
+  async setMany(entries) {
+    for (const [key, record] of entries) this.map.set(key, record);
+  }
   async delete(key) {
     this.map.delete(key);
   }
@@ -103,6 +107,14 @@ export class IndexedDbBackend {
 
   async set(key, record) {
     await this._run("readwrite", (s) => s.put(record, key));
+  }
+
+  // Several [key, record] pairs in one transaction, so either all are saved or none.
+  async setMany(entries) {
+    await this._run("readwrite", (s) => {
+      for (const [key, record] of entries) s.put(record, key);
+      return null;
+    });
   }
 
   async delete(key) {
@@ -236,11 +248,11 @@ export class ScanStore {
     }
   }
 
-  // Returns true if saved.
+  // Returns true if saved. Both records go in one transaction, so a failed save can't pair
+  // a scan's old summary with new profiles.
   save(summary, profiles) {
     return this._call(async () => {
-      await this.backend.set(`data|${summary.id}`, { profiles });
-      await this.backend.set(`sum|${summary.id}`, summary);
+      await this.backend.setMany([[`data|${summary.id}`, { profiles }], [`sum|${summary.id}`, summary]]);
       return true;
     }, false);
   }
@@ -267,14 +279,17 @@ export class ScanStore {
     });
   }
 
-  // Every scan as {summary, profiles}, newest first, for exporting.
+  // Every scan as {summary, profiles}, newest first, for exporting; `failed` counts the
+  // listed scans that couldn't be read.
   async exportAll() {
-    const out = [];
+    const scans = [];
+    let failed = 0;
     for (const summary of await this.list()) {
       const rec = await this.load(summary.id);
-      if (rec) out.push(rec);
+      if (rec) scans.push(rec);
+      else failed++;
     }
-    return out;
+    return { scans, failed };
   }
 
   // Save imported scans ({summary, profiles}, already checked). A scan of a post that's
