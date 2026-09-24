@@ -25,6 +25,12 @@ in one request, several users are profiled at once, and most commenters take 2 r
 Results are saved in your browser, so rescanning a thread, or scanning another one with
 some of the same people, reuses them instead of asking the API again.
 
+A thread with more than 300 commenters to profile asks first. It shows roughly how many
+requests and how long profiling them all would take, and offers *Profile the top 300* (the
+most active commenters), *Profile all* or *Cancel*. Setting *Only the N most active
+commenters* (`max`) skips the question. Every request carries `meta-app=reddit-tool`, as the
+Arctic Shift site tags its own, so the archive's maintainer can see where the traffic comes from.
+
 ### Reading the results
 
 | On a user's card | Meaning |
@@ -74,6 +80,11 @@ closed tab *Start queue* carries on where it was cut off. *Pause queue* stops af
 current scan; *Stop* ends the current scan and pauses the queue. Failed or stopped links
 can be retried, and *Notify me when it's done* shows a browser notification at the end.
 
+Because nobody is watching it, the queue goes easier on the API: it holds at most 25 scans
+waiting at a time (links past that stay in the box to add later), profiles 2 users at a time
+at most, and in a thread with more than 300 commenters profiles only the 300 most active,
+unless *Only the N most active commenters* was set when the link was added.
+
 ### Saved scans
 
 Every scan you run (or stop after some users are profiled) is listed under *Saved scans*,
@@ -83,6 +94,13 @@ many requests it made and how long it took. Click a post to see its users again 
 they were, with no requests; *Scan again* runs it again with the same options (reusing
 saved results where it can), and *Delete* removes it. A new scan of a post replaces its
 saved one.
+
+Under the list, the page shows how much of the browser's storage the site uses.
+*Export to a file* downloads every saved scan as one JSON file, and *Import from a file*
+adds the scans from such a file, for example on another device or browser. An imported
+scan replaces the one saved here only if it's newer, and every imported scan is checked;
+its statistics are worked out again from its profiles. *Delete all saved scans* removes them
+all after asking; unlike *Clear saved results*, it keeps the per-user results.
 
 ### Options and share links
 
@@ -123,6 +141,17 @@ https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=
 - A saved "before" count is reused only if it was fetched at least an hour after the post,
   and saved totals from before a user's latest comment in the thread aren't trusted to
   skip queries, so rescanning a thread that's still growing stays correct.
+
+## Responsible use
+
+Everything the tool shows is public Reddit activity archived by Arctic Shift, a free
+service run by a volunteer. Use it to understand a discussion, such as whether a thread's
+commenters are regulars in the subreddit, not to single out, harass or brigade people.
+Go easy on the shared API: profile the most active commenters where that's enough. Anyone
+can ask Arctic Shift to remove their data through its
+[removal requests](https://github.com/ArthurHeitmann/arctic_shift#contact--removal-requests)
+page; once it's removed there, this tool can't see it either. The page repeats this under
+*About and responsible use*.
 
 ## Limits
 
@@ -239,9 +268,16 @@ To try the web app locally, serve `web/` with any static server (ES modules don'
 from `file://`), e.g. `python3 -m http.server -d web`, and open http://localhost:8000.
 
 `.github/workflows/pages.yml` runs both test suites on every push and pull request. On the
-default branch it then publishes the page files at the top of `web/` (`*.html`, `*.js`,
+default branch (`main`) it then publishes the page files at the top of `web/` (`*.html`, `*.js`,
 `*.css`) to GitHub Pages, failing if a module imports a file that isn't among them, and tags each script and stylesheet
 with the commit so browsers don't mix cached versions; any
 other kind of file the page needs must be added to its copy step. One-time setup: in the
 repo's **Settings → Pages**, set *Source* to **GitHub Actions**. On a free GitHub plan,
 Pages only works for public repositories.
+
+Work happens on other branches and reaches `main` through pull requests, so the live site
+only changes when a pull request is merged.
+
+## License
+
+[MIT](LICENSE).

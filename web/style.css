@@ -147,6 +147,9 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 
 #status { margin-top: 20px; }
 .status-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; color: var(--muted); font-size: .92rem; min-height: 40px; }
+.confirm { background: var(--info-soft); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.confirm p { margin: 0 0 8px; }
+.confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .bar { height: 6px; background: var(--bar-bg); border-radius: 3px; overflow: hidden; }
 #bar-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
 
@@ -265,3 +268,10 @@ footer { margin-top: 40px; font-size: .82rem; color: var(--muted); }
 @media (prefers-reduced-motion: reduce) {
   #bar-fill, .user > summary::before { transition: none; }
 }
+
+.saved-tools { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 10px; font-size: .85rem; color: var(--muted); }
+.about { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 12px; }
+.about summary { cursor: pointer; font-weight: 600; }
+.about-body { font-size: .9rem; }
+.about-body ul { padding-left: 1.2em; }
+.about-body li { margin-bottom: 6px; }

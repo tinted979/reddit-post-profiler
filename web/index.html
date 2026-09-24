@@ -70,7 +70,7 @@
               <input id="concurrency" type="number" min="1" max="5" step="1" inputmode="numeric" value="3">
             </div>
           </div>
-          <p class="hint">AutoModerator and deleted accounts are always skipped. Most commenters take 2 requests to the free Arctic Shift API, 3–4 if they're active in the post's subreddit outside this thread, and none when saved results can be reused. If Arctic Shift rate-limits, every request pauses; if it asks us to slow down, fewer requests run at once.</p>
+          <p class="hint">AutoModerator and deleted accounts are always skipped. Most commenters take 2 requests to the free Arctic Shift API, 3–4 if they're active in the post's subreddit outside this thread, and none when saved results can be reused. Threads with more than 300 commenters ask before profiling them all. If Arctic Shift rate-limits, every request pauses; if it asks us to slow down, fewer requests run at once.</p>
         </fieldset>
         <!-- Outside #option-fields so it stays editable during a run: badges are worked out
              from saved facts, so changing them never needs new requests. -->
@@ -106,7 +106,7 @@
           <label class="inline-check"><input id="queue-notify" type="checkbox"> Notify me when it's done</label>
         </div>
         <p id="queue-add-note" class="hint" aria-live="polite"></p>
-        <p id="queue-help" class="hint">Scans run one after another, each with the options set when it was added. You can switch to other tabs or windows while it runs, but keep this tab open; if it's closed, the queue is kept and picks up again when you press <b>Start queue</b>. Finished scans are listed under <a href="#saved-heading">Saved scans</a>.</p>
+        <p id="queue-help" class="hint">Scans run one after another, each with the options set when it was added. You can switch to other tabs or windows while it runs, but keep this tab open; if it's closed, the queue is kept and picks up again when you press <b>Start queue</b>. Finished scans are listed under <a href="#saved-heading">Saved scans</a>. To go easy on the free API, the queue holds up to 25 scans, profiles 2 users at a time, and profiles only the 300 most active commenters of a bigger thread unless “Only the N most active commenters” was set.</p>
         <ol id="queue-list" class="queue-list"></ol>
       </div>
     </details>
@@ -117,6 +117,14 @@
       <div class="status-line">
         <span id="status-text"></span>
         <button id="stop" type="button" hidden>Stop</button>
+      </div>
+      <div id="confirm" class="confirm" role="group" aria-labelledby="confirm-text" hidden>
+        <p id="confirm-text"></p>
+        <div class="confirm-actions">
+          <button id="confirm-top" type="button" class="primary">Profile the top 300</button>
+          <button id="confirm-all" type="button">Profile all</button>
+          <button id="confirm-cancel" type="button">Cancel</button>
+        </div>
       </div>
       <div id="bar" class="bar" role="progressbar" aria-label="Profiling progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="bar-fill"></div></div>
     </section>
@@ -147,11 +155,33 @@
       <div id="users"></div>
     </section>
 
-    <section id="saved" aria-labelledby="saved-heading" hidden>
+    <section id="saved" aria-labelledby="saved-heading">
       <h2 id="saved-heading" tabindex="-1">Saved scans <span id="saved-count" class="count"></span></h2>
-      <p class="legend">Scans you've run in this browser. Open one to see its users again straight away, with no requests; <b>Scan again</b> checks for new comments and activity.</p>
+      <p id="saved-legend" class="legend">Scans you've run in this browser. Open one to see its users again straight away, with no requests; <b>Scan again</b> checks for new comments and activity.</p>
+      <p id="saved-empty" class="legend" hidden>No saved scans yet. Scans you run are saved here, in this browser only.</p>
       <ul id="saved-list" class="saved-list"></ul>
+      <div class="saved-tools">
+        <span id="storage-used"></span>
+        <button id="scans-export" type="button" class="link">Export to a file</button>
+        <button id="scans-import" type="button" class="link">Import from a file</button>
+        <button id="scans-delete-all" type="button" class="link">Delete all saved scans</button>
+        <input id="scans-file" type="file" accept=".json,application/json" hidden>
+      </div>
+      <p id="saved-note" class="hint" aria-live="polite"></p>
     </section>
+
+    <details id="about" class="about">
+      <summary>About and responsible use</summary>
+      <div class="about-body">
+        <p>Everything shown is public Reddit activity, archived by <a href="https://github.com/ArthurHeitmann/arctic_shift" target="_blank" rel="noopener">Arctic Shift</a>, a free archive run by a volunteer. This page only counts that activity. Your scans go straight from your browser to Arctic Shift, and results are kept only in your browser.</p>
+        <ul>
+          <li><b>Use it to understand a discussion,</b> such as whether a thread's commenters are regulars in the subreddit. Don't use it to single out, harass or brigade people, and remember a count isn't the whole story about anyone.</li>
+          <li><b>Counts can be incomplete:</b> the archive can miss posts and comments, and anything removed before it was archived isn't there. Deleted accounts and AutoModerator are skipped.</li>
+          <li><b>Go easy on the API.</b> It's shared by everyone who uses it, so profile the most active commenters where that's enough and avoid scanning the same thread over and over. Saved results are reused for 7 days by default.</li>
+          <li><b>Want your data removed?</b> Arctic Shift takes <a href="https://github.com/ArthurHeitmann/arctic_shift#contact--removal-requests" target="_blank" rel="noopener">removal requests</a>. Once your data is removed there, this tool can't see it either.</li>
+        </ul>
+      </div>
+    </details>
 
     <footer>
       Data from the <a href="https://arctic-shift.photon-reddit.com/search" target="_blank" rel="noopener">Arctic Shift</a> Reddit archive, so counts only include what it has archived; new posts and comments usually appear within minutes.

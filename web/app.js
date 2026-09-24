@@ -21,6 +21,10 @@ import {
   arcticSearchUrl,
   collectCommenters,
   deserializeProfile,
+  estimateScan,
+  exportScans,
+  parseScanExport,
+  LARGE_SCAN,
   mapPool,
   parsePostRef,
   parseSubreddits,
@@ -30,11 +34,13 @@ import {
   toCsv,
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
-import { LinkQueue } from "./queue.js";
+import { LinkQueue, MAX_WAITING } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
 const TITLE = document.title;
 const DEFAULTS = { delay: 0.5, concurrency: 3, cacheDays: 7 };
+// Most users profiled in parallel by a queued scan, which runs unattended.
+const QUEUE_CONCURRENCY = 2;
 
 const state = {
   runId: 0, // bumped for every run; callbacks from an older run are ignored
@@ -316,6 +322,7 @@ function setRunning(running) {
   $("post").readOnly = running;
   $("option-fields").disabled = running;
   for (const b of $("saved-list").querySelectorAll("button")) b.disabled = running;
+  $("scans-delete-all").disabled = running;
   renderQueue();
   $("stop").hidden = !running;
   $("stop").disabled = false;
@@ -323,6 +330,37 @@ function setRunning(running) {
   $("download").textContent = running ? "Download CSV (so far)" : "Download CSV";
   if (!running && state.focusRunAfter) $("run").focus({ preventScroll: true });
   state.focusRunAfter = false;
+}
+
+// Before a large scan, show its rough cost and ask how many users to profile. Resolves
+// "top", "all" or "cancel" (also on Stop).
+function askLargeScan(est, signal) {
+  const box = $("confirm");
+  const mins = Math.max(1, Math.round(est.seconds / 60));
+  const time = mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)} h ${mins % 60} min`;
+  $("confirm-text").textContent =
+    `This thread has ${est.users.toLocaleString()} commenters to profile` +
+    (est.saved ? `, ${est.saved.toLocaleString()} with saved results` : "") +
+    `. Profiling them all takes roughly ${est.requests.toLocaleString()} requests (about ${time}) ` +
+    "to the free Arctic Shift API. The most active commenters usually tell you most of what you need.";
+  $("confirm-top").textContent = `Profile the top ${LARGE_SCAN}`;
+  $("confirm-all").textContent = `Profile all ${est.users.toLocaleString()}`;
+  box.hidden = false;
+  $("confirm-top").focus();
+  announce($("confirm-text").textContent);
+  return new Promise((resolve) => {
+    const done = (choice) => {
+      box.hidden = true;
+      for (const [id, fn] of handlers) $(id).removeEventListener("click", fn);
+      signal.removeEventListener("abort", onAbort);
+      resolve(choice);
+    };
+    const handlers = [["confirm-top", () => done("top")], ["confirm-all", () => done("all")],
+      ["confirm-cancel", () => done("cancel")]];
+    for (const [id, fn] of handlers) $(id).addEventListener("click", fn);
+    const onAbort = () => done("cancel");
+    signal.addEventListener("abort", onAbort);
+  });
 }
 
 function stop() {
@@ -586,21 +624,24 @@ async function run({ fromQueue = false } = {}) {
   setProgress(0);
 
   const cache = openCache(opts.cacheDays);
+  // Unattended queued scans go easier on the API.
+  const concurrency = fromQueue ? Math.min(QUEUE_CONCURRENCY, opts.concurrency) : opts.concurrency;
   const client = new ArcticShiftClient({
     sleep: backgroundSleep,
     delay: opts.delay,
-    maxInFlight: opts.concurrency,
+    maxInFlight: concurrency,
     signal: controller.signal,
     onWait: (reason, seconds) => runId === state.runId && onWait(reason, seconds),
     onPause: (until) => runId === state.runId && status.eta?.pause(until),
   });
   const counts = { done: 0, total: 0 };
   let failed = 0;
+  let capped = null; // commenters in the thread, when only the top LARGE_SCAN were profiled
   let outcome = { kind: "failed", message: "" };
   const ended = (kind, message) => {
     outcome = {
       kind, message, post: state.post, profiled: counts.done, total: counts.total, failed,
-      seconds: elapsed().seconds, saved: savedOk,
+      seconds: elapsed().seconds, saved: savedOk, capped,
     };
   };
   let thread = null;
@@ -622,7 +663,10 @@ async function run({ fromQueue = false } = {}) {
       fromSaved: fromCache,
       after,
       beforeKnown: state.beforeKnown,
-      opts: { only: opts.only, years: opts.years, maxUsers: opts.maxUsers, includeOp: opts.includeOp, exclude: opts.exclude },
+      opts: {
+        only: opts.only, years: opts.years, maxUsers: capped ? LARGE_SCAN : opts.maxUsers,
+        includeOp: opts.includeOp, exclude: opts.exclude,
+      },
       stats: scanStats(profiles, state.post, state.beforeKnown, badges),
       facts: badgeFacts(profiles, state.post), // tier counts under whatever badge rules apply later
     };
@@ -670,6 +714,25 @@ async function run({ fromQueue = false } = {}) {
     let ranked = [...commenters].sort((a, b) =>
       b[1].count - a[1].count || a[0].toLowerCase().localeCompare(b[0].toLowerCase()));
     if (opts.maxUsers) ranked = ranked.slice(0, opts.maxUsers);
+    // A big thread asks first (unless a limit was set): all of it can take thousands of
+    // requests. A queued scan has nobody to ask, so it takes the top ones.
+    else if (ranked.length > LARGE_SCAN) {
+      setStatus("Checking saved results…");
+      const est = await estimateScan(cache, ranked.map(([u]) => u), { after, delay: opts.delay, concurrency });
+      if (!fromQueue) setStatus(`Found ${plural(ranked.length, "commenter")}.`);
+      const choice = fromQueue ? "top" : await askLargeScan(est, controller.signal);
+      if (choice === "cancel") {
+        $("bar").hidden = true;
+        const text = `Cancelled. To profile fewer, set “Only the N most active commenters” in Options. Took ${took()}.`;
+        setStatus(text);
+        ended("stopped", "Cancelled before profiling.");
+        return outcome;
+      }
+      if (choice === "top") {
+        capped = ranked.length;
+        ranked = ranked.slice(0, LARGE_SCAN);
+      }
+    }
     if (!ranked.length) {
       $("bar").hidden = true;
       const text = post.numComments
@@ -702,7 +765,7 @@ async function run({ fromQueue = false } = {}) {
     startEta(counts.total);
     profilingAt = performance.now();
     progress();
-    await mapPool(ranked, opts.concurrency, async ([username, { count, last }], i) => {
+    await mapPool(ranked, concurrency, async ([username, { count, last }], i) => {
       inFlight++;
       progress();
       let profile;
@@ -732,7 +795,8 @@ async function run({ fromQueue = false } = {}) {
 
     stopEta();
     const notes = [fromCache && `${fromCache} from saved results`, failed && `${failed} failed`].filter(Boolean);
-    let text = `Done: profiled ${plural(counts.total, "user")}${notes.length ? ` (${notes.join(", ")})` : ""}` +
+    const who = capped ? `the top ${counts.total} of ${plural(capped, "commenter")}` : plural(counts.total, "user");
+    let text = `Done: profiled ${who}${notes.length ? ` (${notes.join(", ")})` : ""}` +
       ` with ${plural(client.requests, "request")}. Took ${took()}.`;
     if (failed && failed < counts.total && opts.cacheDays > 0) {
       text += " Press Analyze to retry the failed ones; the rest are reused.";
@@ -895,9 +959,10 @@ function addToQueue() {
   const notes = [];
   if (r.added) notes.push(`Added ${plural(r.added, "link")}.`);
   if (r.duplicates) notes.push(`${plural(r.duplicates, "link")} already queued.`);
+  if (r.full.length) notes.push(`The queue holds ${MAX_WAITING} scans at a time: ${plural(r.full.length, "link")} not added yet.`);
   if (r.invalid.length) notes.push(`Not a post link: ${r.invalid.join(", ")}`);
   if (!notes.length) notes.push("Paste one or more post links first.");
-  $("queue-input").value = r.invalid.join("\n"); // leave the bad ones to fix
+  $("queue-input").value = [...r.invalid, ...r.full].join("\n"); // leave the bad and unadded ones
   $("queue-add-note").textContent = notes.join(" ");
   renderQueue();
 }
@@ -966,7 +1031,7 @@ async function pumpQueue() {
   if (outcome.kind === "done" || outcome.kind === "empty") {
     patch.status = "done";
     if (outcome.kind === "done") {
-      patch.note = `${plural(outcome.profiled, "user")}${outcome.failed ? `, ${outcome.failed} failed` : ""}` +
+      patch.note = `${outcome.capped ? `top ${outcome.profiled} of ${outcome.capped}` : plural(outcome.profiled, "user")}${outcome.failed ? `, ${outcome.failed} failed` : ""}` +
         ` · took ${formatDuration(outcome.seconds)}`;
     }
   } else if (outcome.kind === "stopped") {
@@ -1035,10 +1100,83 @@ async function renderSaved() {
   const token = ++savedRender;
   const scans = await openScans().list();
   if (token !== savedRender) return; // a newer render started
-  $("saved").hidden = !scans.length;
   $("saved-count").textContent = scans.length ? `(${scans.length})` : "";
+  $("saved-legend").hidden = !scans.length;
+  $("saved-empty").hidden = Boolean(scans.length);
+  $("scans-export").hidden = !scans.length;
+  $("scans-delete-all").hidden = !scans.length;
   $("saved-list").replaceChildren(...scans.map(scanItem));
   markCurrentScan();
+  showStorageUsed();
+}
+
+// How much this site keeps in the browser (saved scans, saved results and the queue).
+async function showStorageUsed() {
+  let usage = null;
+  try {
+    usage = (await navigator.storage?.estimate?.())?.usage ?? null;
+  } catch {
+    // Not available here.
+  }
+  const mb = usage / 1e6;
+  $("storage-used").textContent = usage === null ? ""
+    : `Saved data uses ${mb < 0.1 ? "under 0.1" : mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB of this browser's storage.`;
+}
+
+function savedNote(text) {
+  $("saved-note").textContent = text;
+}
+
+async function exportSaved() {
+  const scans = await openScans().exportAll();
+  if (!scans.length) return savedNote("Nothing to export.");
+  const a = el("a", {
+    href: URL.createObjectURL(new Blob([exportScans(scans)], { type: "application/json" })),
+    download: `reddit-tool-saved-scans-${new Date().toISOString().slice(0, 10)}.json`,
+  });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  savedNote(`Exported ${plural(scans.length, "scan")}.`);
+}
+
+async function importSaved() {
+  const input = $("scans-file");
+  const file = input.files?.[0];
+  input.value = ""; // so choosing the same file again still fires
+  if (!file) return;
+  let parsed;
+  try {
+    if (file.size > 200e6) throw new Error("That file is too big to be a saved-scans export.");
+    parsed = parseScanExport(await file.text());
+  } catch (err) {
+    savedNote(err.message);
+    return;
+  }
+  const r = await openScans().importAll(parsed.scans);
+  const notes = [
+    `Imported ${plural(r.added + r.replaced, "scan")}`,
+    r.replaced && `${r.replaced} replacing older copies`,
+    r.kept && `${r.kept} skipped (the copy here is as new or newer)`,
+    parsed.invalid && `${parsed.invalid} unreadable`,
+    r.failed && `${r.failed} not saved (browser storage is full or blocked)`,
+  ].filter(Boolean);
+  savedNote(`${notes.join("; ")}.`);
+  announce($("saved-note").textContent);
+  await renderSaved();
+}
+
+async function deleteAllSaved() {
+  if (state.controller) return;
+  const n = (await openScans().list()).length;
+  if (!n || !window.confirm(`Delete all ${plural(n, "saved scan")}? This can't be undone. Export them first to keep a copy.`)) return;
+  await openScans().clear();
+  state.savedId = null;
+  savedNote(`Deleted ${plural(n, "saved scan")}.`);
+  announce($("saved-note").textContent);
+  await renderSaved();
+  $("saved-heading").focus();
 }
 
 function scanItem(scan) {
@@ -1179,7 +1317,7 @@ async function deleteSaved(id) {
   announce("Saved scan deleted.");
   await renderSaved();
   // The button is gone; keep keyboard focus nearby.
-  ($("saved").hidden ? $("post") : $("saved-heading")).focus();
+  $("saved-heading").focus();
 }
 
 // ---- Sharing, CSV, saved results ----
@@ -1262,6 +1400,10 @@ function init() {
   $("download").addEventListener("click", downloadCsv);
   $("share").addEventListener("click", copyLink);
   $("clear-cache").addEventListener("click", clearCache);
+  $("scans-export").addEventListener("click", exportSaved);
+  $("scans-import").addEventListener("click", () => $("scans-file").click());
+  $("scans-file").addEventListener("change", importSaved);
+  $("scans-delete-all").addEventListener("click", deleteAllSaved);
   $("badge-fields").addEventListener("input", () => setBadges(readBadges()));
   $("badge-fields").addEventListener("change", showBadges); // tidy up blanks on leaving a box
   $("badge-reset").addEventListener("click", () => {

@@ -266,6 +266,38 @@ export class ScanStore {
     });
   }
 
+  // Every scan as {summary, profiles}, newest first, for exporting.
+  async exportAll() {
+    const out = [];
+    for (const summary of await this.list()) {
+      const rec = await this.load(summary.id);
+      if (rec) out.push(rec);
+    }
+    return out;
+  }
+
+  // Save imported scans ({summary, profiles}, already checked). A scan of a post that's
+  // saved here already replaces it only if it's newer. Returns {added, replaced, kept,
+  // failed}.
+  async importAll(scans) {
+    const have = new Map((await this.list()).map((s) => [s.id, s.scannedAt]));
+    const result = { added: 0, replaced: 0, kept: 0, failed: 0 };
+    for (const [i, { summary, profiles }] of scans.entries()) {
+      const when = have.get(summary.id);
+      if (when !== undefined && when >= summary.scannedAt) {
+        result.kept++;
+        continue;
+      }
+      if (!(await this.save(summary, profiles))) {
+        result.failed = scans.length - i; // storage full or blocked: stop here
+        break;
+      }
+      have.set(summary.id, summary.scannedAt);
+      result[when === undefined ? "added" : "replaced"]++;
+    }
+    return result;
+  }
+
   // Delete every scan; returns how many there were.
   clear() {
     return this._call(async () => {

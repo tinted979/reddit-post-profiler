@@ -5,6 +5,9 @@
 import { parsePostRef } from "./core.js";
 
 const KEY = "reddit-tool-queue";
+// Most scans waiting at once: the queue runs unattended, so keep it from piling up a day's
+// worth of requests on the free API.
+export const MAX_WAITING = 25;
 
 // Statuses: waiting → running → done | failed | stopped.
 const FINISHED = new Set(["done", "failed", "stopped"]);
@@ -75,9 +78,11 @@ export class LinkQueue {
   }
 
   // Add the post links in `text` (one per line, or separated by commas or spaces) with
-  // these options. Links already waiting or running are skipped.
+  // these options. Links already waiting or running are skipped, and links past
+  // MAX_WAITING are returned in `full`.
   add(text, opts) {
-    const result = { added: 0, duplicates: 0, invalid: [] };
+    const result = { added: 0, duplicates: 0, invalid: [], full: [] };
+    let pending = this.items.filter((i) => i.status === "waiting" || i.status === "running").length;
     for (const ref of splitRefs(text)) {
       let postId;
       try {
@@ -90,6 +95,11 @@ export class LinkQueue {
         result.duplicates++;
         continue;
       }
+      if (pending >= MAX_WAITING) {
+        result.full.push(ref);
+        continue;
+      }
+      pending++;
       this.items.push({
         id: String(this._next++), ref, postId, opts, status: "waiting", note: "", addedAt: this._now(),
       });

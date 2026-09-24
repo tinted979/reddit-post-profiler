@@ -4,6 +4,9 @@
 // for the tests.
 
 export const BASE_URL = "https://arctic-shift.photon-reddit.com";
+// Sent with every request (as the Arctic Shift search site sends its own), so the archive's
+// maintainer can tell this tool's traffic apart and get in touch rather than block it.
+export const APP_TAG = "reddit-tool";
 // The first year of Reddit data: where the yearly split starts.
 const ARCHIVE_START_YEAR = 2005;
 // Authors that can't be profiled: deleted accounts, and the moderation bot.
@@ -237,6 +240,7 @@ export class ArcticShiftClient {
   async _get(path, params) {
     const url = new URL(path, this.baseUrl);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
+    url.searchParams.set("meta-app", APP_TAG);
     let failures = 0;
     let slowdowns = 0;
     let rateLimitWaits = 0;
@@ -640,6 +644,35 @@ async function cacheSet(cache, key, value) {
   }
 }
 
+// Round the window start to the day so cache keys stay stable between runs.
+const windowBucket = (after) => (after === null ? "all" : String(Math.floor(after / 86400)));
+const lifetimeKey = (user, bucket) => `${CACHE_VERSION}|life|${user.toLowerCase()}|${bucket}`;
+
+// Scans larger than this many users ask first (or, from the queue, profile only this many).
+export const LARGE_SCAN = 300;
+// Rough requests per user: about 3 without saved totals (two totals, often one "before"
+// search), about 1 with them (the "before" search for this post).
+const REQUESTS_NEW = 3;
+const REQUESTS_SAVED = 1;
+// Rough seconds per request per parallel slot, including the API's own time.
+const SECONDS_PER_REQUEST = 1.5;
+
+// A rough cost for profiling `usernames` before starting: {users, saved, requests,
+// seconds}. `saved` counts users whose lifetime totals are saved (and still fresh).
+export async function estimateScan(cache, usernames, { after = null, delay = 0.5, concurrency = 3 } = {}) {
+  const bucket = windowBucket(after);
+  let saved = 0;
+  // In batches, so a big thread doesn't open thousands of storage reads at once.
+  for (let i = 0; i < usernames.length; i += 100) {
+    const hits = await Promise.all(usernames.slice(i, i + 100)
+      .map((u) => cacheGet(cache, lifetimeKey(u, bucket), isRows)));
+    saved += hits.filter(Boolean).length;
+  }
+  const requests = saved * REQUESTS_SAVED + (usernames.length - saved) * REQUESTS_NEW;
+  const seconds = requests * Math.max(delay, SECONDS_PER_REQUEST / Math.max(1, concurrency));
+  return { users: usernames.length, saved, requests, seconds };
+}
+
 // Build a user's profile. `threadComments` is their comment count in the thread and
 // `lastCommentUtc` when they made the newest one (null if unknown). With `only`, the
 // profile lists just those subreddits (plus the post's own), including ones with no
@@ -662,11 +695,10 @@ export async function buildProfile(client, username, threadComments, post, { onl
     cached: false,
   };
   const user = username.toLowerCase();
-  // Round the window start to the day so cache keys stay stable between runs.
-  const bucket = after === null ? "all" : String(Math.floor(after / 86400));
+  const bucket = windowBucket(after);
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
 
-  const lifeKey = `${CACHE_VERSION}|life|${user}|${bucket}`;
+  const lifeKey = lifetimeKey(user, bucket);
   const hit = await cacheGet(cache, lifeKey, isRows);
   let rows;
   if (hit) {
@@ -1043,4 +1075,129 @@ export function toCsv(profiles, post, minCount = 0, { rules = DEFAULT_BADGES, be
     for (const row of rows) lines.push(CSV_COLUMNS.map((c) => csvCell(row[c])).join(","));
   }
   return lines.join("\r\n") + "\r\n";
+}
+
+// ---- Saved scans as a file ----
+
+export const EXPORT_KIND = "reddit-tool-saved-scans";
+export const EXPORT_VERSION = 1;
+
+// The JSON file "Export" downloads: every saved scan, as stored.
+export function exportScans(scans, now = Date.now() / 1000) {
+  return JSON.stringify({ kind: EXPORT_KIND, version: EXPORT_VERSION, exportedAt: Math.floor(now), scans });
+}
+
+const isNum = (n) => typeof n === "number" && Number.isFinite(n);
+const isCountNum = (n) => isNum(n) && n >= 0;
+const isName = (s, max = 64) => typeof s === "string" && /^[\w-]+$/.test(s) && s.length <= max;
+const orNull = (v, ok) => (v === null || v === undefined ? null : ok(v) ? v : undefined);
+
+// One profile from an imported file, in serializeProfile form, or null if it doesn't look
+// like one. Only the fields the page uses are kept.
+function importProfile(d, index) {
+  if (!d || typeof d !== "object" || !isName(d.username, 40) || !isCountNum(d.threadComments)) return null;
+  if (!isCountNum(d.targetPostsBefore) || !isCountNum(d.targetCommentsBefore)) return null;
+  const first = orNull(d.targetFirstBefore, isNum);
+  const days = orNull(d.targetDaysBefore, isCountNum);
+  if (first === undefined || days === undefined || !Array.isArray(d.subreddits)) return null;
+  const subreddits = [];
+  for (const row of d.subreddits) {
+    if (!Array.isArray(row) || !isName(row[0]) || !isCountNum(row[1]) || !isCountNum(row[2])) return null;
+    subreddits.push([row[0], row[1], row[2]]);
+  }
+  const text = (v) => (typeof v === "string" ? v.slice(0, 500) : null);
+  return {
+    username: d.username,
+    threadComments: d.threadComments,
+    targetPostsBefore: d.targetPostsBefore,
+    targetCommentsBefore: d.targetCommentsBefore,
+    targetFirstBefore: first,
+    targetDaysBefore: days,
+    targetTimelineComplete: d.targetTimelineComplete !== false,
+    subreddits,
+    rank: Number.isInteger(d.rank) && d.rank >= 0 ? d.rank : index,
+    cached: Boolean(d.cached),
+    error: text(d.error),
+    errorDetail: text(d.errorDetail),
+  };
+}
+
+// Check and tidy one scan ({summary, profiles}) from an imported file, which may have been
+// edited or come from someone else. Returns {summary, profiles} ready for ScanStore.save,
+// or null if it isn't a usable scan. The list's stats and badge facts are worked out again
+// from the profiles rather than trusted.
+export function importScan(rec) {
+  const s = rec?.summary;
+  const p = s?.post;
+  if (!s || typeof s !== "object" || !p || typeof p !== "object" || !Array.isArray(rec.profiles)) return null;
+  if (typeof p.id !== "string" || !/^[0-9a-z]{1,13}$/.test(p.id) || s.id !== p.id) return null;
+  if (!isName(p.subreddit, 30) || typeof p.author !== "string" || !isNum(p.createdUtc) || !isNum(s.scannedAt)) return null;
+  const profiles = rec.profiles.map(importProfile);
+  if (profiles.includes(null)) return null;
+  const post = {
+    id: p.id,
+    author: p.author.slice(0, 40),
+    subreddit: p.subreddit,
+    createdUtc: Math.trunc(p.createdUtc),
+    title: typeof p.title === "string" ? p.title.slice(0, 500) : "",
+    numComments: isCountNum(p.numComments) ? p.numComments : 0,
+  };
+  const after = isNum(s.after) ? s.after : null;
+  const beforeKnown = after === null || post.createdUtc > after;
+  const live = profiles.map(deserializeProfile);
+  const o = s.opts && typeof s.opts === "object" ? s.opts : {};
+  const names = (v) => (Array.isArray(v) ? v.filter((x) => isName(x)) : []);
+  const years = [1, 5, 10].includes(o.years) ? o.years : null;
+  const thread = s.thread && isCountNum(s.thread.comments) && isCountNum(s.thread.people)
+    ? { comments: s.thread.comments, people: s.thread.people }
+    : null;
+  const summary = {
+    id: post.id,
+    post,
+    scannedAt: s.scannedAt,
+    complete: s.complete !== false,
+    total: isCountNum(s.total) && s.total >= profiles.length ? s.total : profiles.length,
+    thread,
+    requests: isCountNum(s.requests) ? s.requests : 0,
+    seconds: isCountNum(s.seconds) ? s.seconds : 0,
+    profilingSeconds: isCountNum(s.profilingSeconds) ? s.profilingSeconds : null,
+    fromSaved: isCountNum(s.fromSaved) ? s.fromSaved : 0,
+    after,
+    beforeKnown,
+    opts: {
+      only: names(o.only),
+      years,
+      maxUsers: Number.isInteger(o.maxUsers) && o.maxUsers > 0 ? o.maxUsers : null,
+      includeOp: Boolean(o.includeOp),
+      exclude: names(o.exclude),
+    },
+    stats: scanStats(live, post, beforeKnown),
+    facts: badgeFacts(live, post),
+  };
+  return { summary, profiles };
+}
+
+// The scans in an imported file's text. Throws an Error with a plain message if the file
+// isn't an export from this tool; scans that don't check out are counted in `invalid`.
+export function parseScanExport(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error("That file isn't a saved-scans export (it isn't JSON).");
+  }
+  if (data?.kind !== EXPORT_KIND || !Array.isArray(data.scans)) {
+    throw new Error("That file isn't a saved-scans export from this tool.");
+  }
+  if (data.version > EXPORT_VERSION) {
+    throw new Error("That file was exported by a newer version of this tool. Reload the page and try again.");
+  }
+  const scans = [];
+  let invalid = 0;
+  for (const rec of data.scans) {
+    const scan = importScan(rec);
+    if (scan) scans.push(scan);
+    else invalid++;
+  }
+  return { scans, invalid };
 }

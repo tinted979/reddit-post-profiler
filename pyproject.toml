@@ -3,6 +3,7 @@ name = "reddit-tool"
 version = "0.1.0"
 description = "Profile the commenters of a Reddit post using the Arctic Shift archive"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",

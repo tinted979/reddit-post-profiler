@@ -20,6 +20,11 @@ import {
   arcticSearchUrl,
   collectCommenters,
   deserializeProfile,
+  estimateScan,
+  exportScans,
+  importScan,
+  parseScanExport,
+  LARGE_SCAN,
   mapPool,
   parsePostRef,
   parseSubreddits,
@@ -1001,4 +1006,89 @@ test("saved before facts are reused, old count-only records are not", async () =
   const p2 = await buildProfile(again.client, "alice", 1, POST, { cache });
   assert.equal(again.calls.length, 0);
   assert.deepEqual([p2.targetDaysBefore, p2.targetFirstBefore], [4, POST.createdUtc - 4 * 86400]);
+});
+
+test("every request is tagged with meta-app", async () => {
+  const { client, calls } = makeClient(() => json({ data: [] }));
+  await client.getPost("abc123");
+  await client.timestamps("comments", "alice", { subreddit: "Python" });
+  assert.deepEqual(calls.map((u) => u.searchParams.get("meta-app")), ["reddit-tool", "reddit-tool"]);
+});
+
+test("estimateScan counts saved users and prices the rest", async () => {
+  const { cache } = makeCache();
+  const handler = aggregates({ posts: [["Python", 1]], comments: [["rust", 2]] });
+  await buildProfile(makeClient(handler).client, "alice", 1, POST, { cache });
+  const est = await estimateScan(cache, ["Alice", "bob", "carol"], { delay: 0.5, concurrency: 3 });
+  assert.deepEqual(est, { users: 3, saved: 1, requests: 1 + 2 * 3, seconds: 7 * 0.5 });
+  // The window is part of the key: nothing saved for the last year.
+  const windowed = await estimateScan(cache, ["alice"], { after: POST.createdUtc - 365 * 86400, delay: 2 });
+  assert.deepEqual(windowed, { users: 1, saved: 0, requests: 3, seconds: 6 });
+  assert.equal((await estimateScan(null, ["a"], { concurrency: 1 })).seconds, 3 * 1.5);
+  assert.ok(LARGE_SCAN > 0);
+});
+
+const savedScan = () => {
+  const profiles = sampleProfiles().map(serializeProfile);
+  return {
+    summary: {
+      id: POST.id, post: { ...POST, numComments: 5 }, scannedAt: POST.createdUtc + 86400, complete: true, total: 3,
+      thread: { comments: 5, people: 3 }, requests: 9, seconds: 12.5, profilingSeconds: 10, fromSaved: 1, after: null,
+      beforeKnown: true, opts: { only: [], years: null, maxUsers: null, includeOp: false, exclude: [] },
+      stats: { bogus: true }, facts: "bogus",
+    },
+    profiles,
+  };
+};
+
+test("saved scans round-trip through an export file, with stats worked out again", () => {
+  const text = exportScans([savedScan()], 123);
+  const { scans, invalid } = parseScanExport(text);
+  assert.equal(invalid, 0);
+  assert.equal(scans.length, 1);
+  const [{ summary, profiles }] = scans;
+  assert.deepEqual(profiles, savedScan().profiles);
+  assert.deepEqual(summary.stats, scanStats(sampleProfiles(), summary.post));
+  assert.deepEqual(summary.facts, badgeFacts(sampleProfiles(), summary.post));
+  assert.equal(summary.seconds, 12.5);
+});
+
+test("imported scans are checked", () => {
+  assert.throws(() => parseScanExport("not json"), /isn't JSON/);
+  assert.throws(() => parseScanExport(JSON.stringify({ scans: [] })), /isn't a saved-scans export/);
+  assert.throws(() => parseScanExport(exportScans([]).replace('"version":1', '"version":99')), /newer version/);
+  const bad = [
+    (s) => (s.summary.post.id = "NOT AN ID!"),
+    (s) => (s.summary.id = "other1"),
+    (s) => (s.summary.post.subreddit = "a/b"),
+    (s) => (s.profiles[0].username = "<img>"),
+    (s) => (s.profiles[0].subreddits[0][1] = "3"),
+    (s) => (s.profiles[1].targetFirstBefore = "yesterday"),
+    (s) => (s.profiles = "x"),
+  ];
+  for (const spoil of bad) {
+    const scan = savedScan();
+    spoil(scan);
+    assert.equal(importScan(scan), null, spoil.toString());
+  }
+  const { scans, invalid } = parseScanExport(exportScans([savedScan(), { summary: null }]));
+  assert.deepEqual([scans.length, invalid], [1, 1]);
+  // Odd optional fields are tidied, not trusted.
+  const odd = savedScan();
+  Object.assign(odd.summary, { requests: "lots", total: 1, opts: { years: 3, only: ["ok", "no way"], maxUsers: -1 } });
+  const { summary } = importScan(odd);
+  assert.deepEqual([summary.requests, summary.total, summary.opts.years, summary.opts.only, summary.opts.maxUsers], [0, 3, null, ["ok"], null]);
+});
+
+test("ScanStore exports every scan and imports only newer copies", async () => {
+  const store = new ScanStore();
+  const scan = importScan(savedScan());
+  await store.save(scan.summary, scan.profiles);
+  assert.deepEqual(await store.exportAll(), [scan]);
+  const older = { ...scan, summary: { ...scan.summary, scannedAt: scan.summary.scannedAt - 1 } };
+  const newer = { ...scan, summary: { ...scan.summary, scannedAt: scan.summary.scannedAt + 1 } };
+  const other = { ...scan, summary: { ...scan.summary, id: "zzz999", post: { ...scan.summary.post, id: "zzz999" } } };
+  assert.deepEqual(await store.importAll([older, newer, other]), { added: 1, replaced: 1, kept: 1, failed: 0 });
+  assert.equal((await store.load(POST.id)).summary.scannedAt, newer.summary.scannedAt);
+  assert.equal((await store.list()).length, 2);
 });

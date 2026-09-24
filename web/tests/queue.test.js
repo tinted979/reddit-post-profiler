@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { LinkQueue, splitRefs } from "../queue.js";
+import { LinkQueue, MAX_WAITING, splitRefs } from "../queue.js";
 
 class FakeStorage {
   constructor() {
@@ -18,7 +18,7 @@ class FakeStorage {
 test("adds post links, skipping duplicates and reporting bad ones", () => {
   const q = new LinkQueue({ storage: new FakeStorage() });
   const r = q.add("https://www.reddit.com/r/x/comments/abc123/t/\nhttps://redd.it/def456, abc123\nnonsense!", { years: 5 });
-  assert.deepEqual(r, { added: 2, duplicates: 1, invalid: ["nonsense!"] });
+  assert.deepEqual(r, { added: 2, duplicates: 1, invalid: ["nonsense!"], full: [] });
   assert.deepEqual(q.items.map((i) => [i.postId, i.status, i.opts.years]), [["abc123", "waiting", 5], ["def456", "waiting", 5]]);
   // Once finished, the same post can be queued again.
   q.update(q.items[0].id, { status: "done" });
@@ -78,4 +78,16 @@ test("copes with broken or blocked storage", () => {
 test("splitRefs splits lines, commas, and spaces between links only", () => {
   assert.deepEqual(splitRefs("https://redd.it/a1 https://redd.it/b2\nabc123, def456\n\n  not a link \nghi789 t3_1l7d1e4"),
     ["https://redd.it/a1", "https://redd.it/b2", "abc123", "def456", "not a link", "ghi789", "t3_1l7d1e4"]);
+});
+
+test("holds at most MAX_WAITING scans waiting or running", () => {
+  const q = new LinkQueue({ storage: new FakeStorage() });
+  const ids = Array.from({ length: MAX_WAITING + 2 }, (_, i) => `p${String(i).padStart(5, "0")}`);
+  const r = q.add(ids.join("\n"), {});
+  assert.equal(r.added, MAX_WAITING);
+  assert.deepEqual(r.full, ids.slice(MAX_WAITING));
+  // A finished scan frees a place.
+  q.update(q.items[0].id, { status: "done" });
+  assert.equal(q.add(ids[MAX_WAITING], {}).added, 1);
+  assert.deepEqual(q.add(ids[MAX_WAITING + 1], {}).full, [ids[MAX_WAITING + 1]]);
 });
