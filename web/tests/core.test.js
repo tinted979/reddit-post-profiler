@@ -291,6 +291,30 @@ test("a timed-out aggregate falls back to one query per listed subreddit", async
   assert.ok(!calls.some((u) => u.searchParams.has("after")), "should not split into years");
 });
 
+test("buildProfile passes the history window to every query", async () => {
+  const after = POST.createdUtc - 1000;
+  const { client, calls } = makeClient((u) => {
+    assert.equal(u.searchParams.get("after"), String(after));
+    return json({ data: [{ key: "Python", count: "9" }] });
+  });
+  const p = await buildProfile(client, "alice", 1, POST, { after });
+  assert.equal(calls.length, 4);
+  assert.equal(p.targetCommentsBefore, 9);
+});
+
+test("buildProfile skips before queries for a post older than the window", async () => {
+  const { client, calls } = makeClient(() => json({ data: [{ key: "Python", count: "9" }] }));
+  const p = await buildProfile(client, "alice", 1, POST, { after: POST.createdUtc + 1 });
+  assert.equal(calls.length, 2);
+  assert.equal(p.targetPostsBefore + p.targetCommentsBefore, 0);
+});
+
+test("yearlyRanges starts at the window", () => {
+  const after = Date.UTC(2020, 5, 1) / 1000;
+  const ranges = yearlyRanges(Date.UTC(2022, 0, 1) / 1000, 0, after);
+  assert.deepEqual(ranges, [[after, Date.UTC(2021, 0, 1) / 1000], [Date.UTC(2021, 0, 1) / 1000, Date.UTC(2022, 0, 1) / 1000]]);
+});
+
 test("toCsv matches the CLI layout", () => {
   const profiles = [
     {

@@ -29,6 +29,14 @@
           <label class="check"><input id="include-op" type="checkbox"> Also profile the post's author</label>
           <label>Skip users <input id="exclude" type="text" placeholder="name1, name2"></label>
           <label>Only check subreddits <input id="only-subs" type="text" placeholder="all (e.g. rust, golang)"></label>
+          <label>History to check
+            <select id="years">
+              <option value="">All time</option>
+              <option value="10">Last 10 years</option>
+              <option value="5">Last 5 years</option>
+              <option value="1">Last year</option>
+            </select>
+          </label>
           <label>Only the top N commenters <input id="max-users" type="number" min="1" placeholder="all"></label>
           <label>Hide subreddits with fewer than <input id="min-count" type="number" min="0" value="0"></label>
           <label>Seconds between requests <input id="delay" type="number" min="0.25" step="0.25" value="0.5"></label>
@@ -62,7 +70,7 @@
           <button id="download" type="button">Download CSV</button>
         </div>
       </div>
-      <p class="legend">Sorted by comments in the thread. <b>Before</b> = posts / comments in <span class="target-name"></span> before this post was made. Click a user to see every subreddit they're active in.</p>
+      <p class="legend">Sorted by comments in the thread. <b>Before</b> = posts / comments in <span class="target-name"></span> before this post was made<span id="window-note"></span>. Click a user to see every subreddit they're active in.</p>
       <div id="users"></div>
     </section>
 

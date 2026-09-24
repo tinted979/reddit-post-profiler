@@ -46,15 +46,15 @@ h1 { font-size: 1.6rem; margin: 0 0 6px; letter-spacing: -0.01em; }
 .lede { margin: 0 0 20px; color: var(--muted); }
 a { color: var(--accent); }
 
-input, button { font: inherit; color: inherit; }
-input[type="text"], input[type="search"], input[type="number"] {
+input, button, select { font: inherit; color: inherit; }
+input[type="text"], input[type="search"], input[type="number"], select {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 9px 11px;
   min-width: 0;
 }
-input:focus-visible, button:focus-visible, summary:focus-visible {
+input:focus-visible, button:focus-visible, select:focus-visible, summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }

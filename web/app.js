@@ -36,6 +36,7 @@ function readOptions() {
     includeOp: $("include-op").checked,
     exclude: $("exclude").value.split(/[\s,]+/).filter(Boolean),
     only: parseSubreddits($("only-subs").value.split(/[\s,]+/)),
+    years: [1, 5, 10].includes(Number($("years").value)) ? Number($("years").value) : null,
     maxUsers: Number.isFinite(maxUsers) && maxUsers > 0 ? maxUsers : null,
     delay: Math.max(0.25, parseFloat($("delay").value) || 0.5),
     concurrency: Math.min(5, Math.max(1, parseInt($("concurrency").value, 10) || 3)),
@@ -168,6 +169,7 @@ function shareUrl() {
   if (opts.includeOp) url.searchParams.set("op", "1");
   if (opts.exclude.length) url.searchParams.set("exclude", opts.exclude.join(","));
   if (opts.only.length) url.searchParams.set("subs", opts.only.join(","));
+  if (opts.years) url.searchParams.set("years", String(opts.years));
   if (opts.maxUsers) url.searchParams.set("max", String(opts.maxUsers));
   if (minCount()) url.searchParams.set("min", String(minCount()));
   if (opts.delay !== 0.5) url.searchParams.set("delay", String(opts.delay));
@@ -197,6 +199,12 @@ async function run() {
   $("bar-fill").style.width = "0";
 
   let current = "";
+  // Start of the history window, in epoch seconds (null = all time).
+  const after = opts.years ? Math.floor(Date.now() / 1000 - opts.years * 365.25 * 86400) : null;
+  $("window-note").textContent = after
+    ? ` (counting activity since ${new Date(after * 1000).toLocaleDateString(undefined, { dateStyle: "medium" })})`
+    : "";
+
   const client = new ArcticShiftClient({
     delay: opts.delay,
     signal: state.controller.signal,
@@ -241,7 +249,7 @@ async function run() {
       progress();
       let profile;
       try {
-        profile = await buildProfile(client, username, n, post, { only: opts.only });
+        profile = await buildProfile(client, username, n, post, { only: opts.only, after });
       } catch (err) {
         if (err instanceof Aborted) throw err;
         profile = {
@@ -311,11 +319,12 @@ function init() {
   if (params.get("op") === "1") $("include-op").checked = true;
   if (params.get("exclude")) $("exclude").value = params.get("exclude");
   if (params.get("subs")) $("only-subs").value = params.get("subs");
+  if (params.get("years")) $("years").value = params.get("years");
   if (params.get("max")) $("max-users").value = params.get("max");
   if (params.get("min")) $("min-count").value = params.get("min");
   if (params.get("delay")) $("delay").value = params.get("delay");
   if (params.get("par")) $("concurrency").value = params.get("par");
-  if (["exclude", "subs", "max", "min", "op", "delay", "par"].some((k) => params.has(k))) {
+  if (["exclude", "subs", "years", "max", "min", "op", "delay", "par"].some((k) => params.has(k))) {
     $("options").open = true;
   }
   if (params.get("post")) {

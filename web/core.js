@@ -210,10 +210,11 @@ export class ArcticShiftClient {
   // Map of subreddit -> count for `kind` ("posts" | "comments"). Retries a timed-out
   // aggregation once, then falls back: to one query per subreddit in `only` when given
   // (all we need, and far cheaper for very active users), else to yearly chunks.
-  async subredditCounts(kind, author, { subreddit = null, before = null, only = null } = {}) {
+  // `after`/`before` bound the time window (epoch seconds).
+  async subredditCounts(kind, author, { subreddit = null, after = null, before = null, only = null } = {}) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        return await this._aggregate(kind, author, { subreddit, before });
+        return await this._aggregate(kind, author, { subreddit, after, before });
       } catch (err) {
         if (!(err instanceof QueryTimeout)) throw err;
       }
@@ -221,13 +222,13 @@ export class ArcticShiftClient {
     const total = new Map();
     if (only?.length && subreddit === null) {
       for (const sub of only) {
-        for (const [k, n] of await this.subredditCounts(kind, author, { subreddit: sub, before })) {
+        for (const [k, n] of await this.subredditCounts(kind, author, { subreddit: sub, after, before })) {
           total.set(k, (total.get(k) || 0) + n);
         }
       }
       return total;
     }
-    for (const [start, end] of yearlyRanges(before, this._now())) {
+    for (const [start, end] of yearlyRanges(before, this._now(), after)) {
       const part = await this._aggregate(kind, author, { subreddit, after: start, before: end });
       for (const [k, n] of part) total.set(k, (total.get(k) || 0) + n);
     }
@@ -246,12 +247,12 @@ export class ArcticShiftClient {
   }
 }
 
-export function yearlyRanges(before, nowSeconds) {
+export function yearlyRanges(before, nowSeconds, after = null) {
   const endTs = before ?? Math.trunc(nowSeconds) + 1;
   const endYear = new Date(endTs * 1000).getUTCFullYear();
   const ranges = [];
   for (let year = ARCHIVE_START_YEAR; year <= endYear; year++) {
-    const start = Date.UTC(year, 0, 1) / 1000;
+    const start = Math.max(Date.UTC(year, 0, 1) / 1000, after ?? 0);
     const stop = Math.min(Date.UTC(year + 1, 0, 1) / 1000, endTs);
     if (start < stop) ranges.push([start, stop]);
   }
@@ -288,8 +289,9 @@ export function parseSubreddits(names) {
 }
 
 // Build a user's profile. With `only`, the profile lists just those subreddits (plus the
-// post's own), including ones with no activity so the answer is explicit.
-export async function buildProfile(client, username, threadComments, post, { only = null } = {}) {
+// post's own), including ones with no activity so the answer is explicit. With `after`
+// (epoch seconds), only activity from then on is counted, "before the post" included.
+export async function buildProfile(client, username, threadComments, post, { only = null, after = null } = {}) {
   const profile = {
     username,
     threadComments,
@@ -301,8 +303,8 @@ export async function buildProfile(client, username, threadComments, post, { onl
   const byKey = new Map();
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
   const lifetime = await Promise.all([
-    client.subredditCounts("posts", username, { only: wanted }),
-    client.subredditCounts("comments", username, { only: wanted }),
+    client.subredditCounts("posts", username, { only: wanted, after }),
+    client.subredditCounts("comments", username, { only: wanted, after }),
   ]);
   for (const [i, kind] of ["posts", "comments"].entries()) {
     for (const [sub, n] of lifetime[i]) {
@@ -333,12 +335,14 @@ export async function buildProfile(client, username, threadComments, post, { onl
 
   // Only ask for "before the post" counts when the lifetime totals leave room for any:
   // the OP's own post and every comment in the thread came after the post was made.
+  // A post older than the window has no "before" inside it at all.
   const target = byKey.get(post.subreddit.toLowerCase()) ?? { posts: 0, comments: 0 };
   const isOp = username.toLowerCase() === post.author.toLowerCase();
-  const before = { subreddit: post.subreddit, before: post.createdUtc };
+  const inWindow = after === null || post.createdUtc > after;
+  const before = { subreddit: post.subreddit, after, before: post.createdUtc };
   const [postsBefore, commentsBefore] = await Promise.all([
-    target.posts > (isOp ? 1 : 0) ? client.subredditCounts("posts", username, before) : null,
-    target.comments > threadComments ? client.subredditCounts("comments", username, before) : null,
+    inWindow && target.posts > (isOp ? 1 : 0) ? client.subredditCounts("posts", username, before) : null,
+    inWindow && target.comments > threadComments ? client.subredditCounts("comments", username, before) : null,
   ]);
   profile.targetPostsBefore = postsBefore ? sum(postsBefore) : 0;
   profile.targetCommentsBefore = commentsBefore ? sum(commentsBefore) : 0;
