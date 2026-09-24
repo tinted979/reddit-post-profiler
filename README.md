@@ -250,8 +250,9 @@ only changes when a pull request is merged.
 
 `.github/workflows/code-review.yml` has Claude review each pull request once when it's
 opened, reopened or marked ready for review (drafts wait), and post its findings as inline
-comments. It needs the Claude GitHub App installed on the repo and an
-`ANTHROPIC_API_KEY` secret. The review checks changes against the rules in
+comments. It needs the Claude GitHub App installed on the repo and a
+`CLAUDE_CODE_OAUTH_TOKEN` secret (from `claude setup-token`), so reviews use the Claude
+subscription's usage rather than API billing. The review checks changes against the rules in
 [CLAUDE.md](CLAUDE.md#rules-for-changes).
 
 ## License

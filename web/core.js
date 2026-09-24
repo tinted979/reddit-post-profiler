@@ -509,8 +509,6 @@ export async function collectCommenters(client, post, { exclude = [], includeOp 
   return commenters;
 }
 
-// Normalise subreddit names ("r/Foo", "/r/foo/", "reddit.com/r/Foo/…", "Foo") to bare
-// names, dropping duplicates (ignoring case) and anything that can't be a subreddit.
 // Usernames as typed into "Skip users": "u/name", "/u/name" and profile links become "name";
 // anything with characters outside a Reddit username is dropped, and repeats (in any case)
 // are removed.
@@ -520,7 +518,7 @@ export function parseUsernames(names) {
   for (const raw of names) {
     const name = String(raw)
       .trim()
-      .replace(/^(?:(?:https?:)?\/\/)?(?:(?:www|old)\.)?reddit\.com(?=\/|$)/i, "")
+      .replace(/^(?:(?:https?:)?\/\/)?(?:(?:www|old|new|m|np)\.)?reddit\.com(?=\/|$)/i, "")
       .replace(/^\/?u(?:ser)?\//i, "")
       .replace(/\/.*$/, "");
     if (/^[\w-]+$/.test(name) && !seen.has(name.toLowerCase())) {
@@ -531,6 +529,8 @@ export function parseUsernames(names) {
   return out;
 }
 
+// Normalise subreddit names ("r/Foo", "/r/foo/", "reddit.com/r/Foo/…", "Foo") to bare
+// names, dropping duplicates (ignoring case) and anything that can't be a subreddit.
 export function parseSubreddits(names) {
   const seen = new Set();
   const out = [];
