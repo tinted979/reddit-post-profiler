@@ -1166,3 +1166,11 @@ test("parseUsernames strips u/ prefixes and profile links, and drops repeats and
     ["Alice", "bob_2", "Carol-X", "Eve_1", "Faythe", "Grace", "abcdefghijklmnopqrstu", "dave"],
   );
 });
+
+test("imported scan options are cleaned like the form's, keeping u/-prefixed skipped users", () => {
+  const scan = savedScan();
+  scan.summary.opts = { only: ["r/rust", "rust", "no way", 7], exclude: ["u/Alice", "/u/bob", "alice", "not a name!", null] };
+  const { summary } = importScan(scan);
+  assert.deepEqual(summary.opts.only, ["rust"]);
+  assert.deepEqual(summary.opts.exclude, ["Alice", "bob"]);
+});
