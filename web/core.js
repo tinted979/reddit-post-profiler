@@ -649,16 +649,19 @@ const lifetimeKey = (user, bucket) => `${CACHE_VERSION}|life|${user.toLowerCase(
 
 // Scans larger than this many users ask first (or, from the queue, profile only this many).
 export const LARGE_SCAN = 300;
-// Rough requests per user: about 3 without saved totals (two totals, often one "before"
-// search), about 1 with them (the "before" search for this post).
-const REQUESTS_NEW = 3;
+// Rough requests per user: about 4 without saved totals (two totals, "before" searches
+// and the odd retry), about 1 with them (the "before" search for this post).
+const REQUESTS_NEW = 4;
 const REQUESTS_SAVED = 1;
-// Rough seconds per request per parallel slot, including the API's own time.
-const SECONDS_PER_REQUEST = 1.5;
+// Rough seconds per request, measured against the live API: 1.8 one user at a time and
+// 1.3 with 2 or more in parallel. The server is the bottleneck, so past 2 in parallel
+// it only answers "slow down" more often and gets no faster.
+const SECONDS_PER_REQUEST = 1.8;
+const SECONDS_PER_REQUEST_PARALLEL = 1.3;
 
 // A rough cost for profiling `usernames` before starting: {users, saved, requests,
 // seconds}. `saved` counts users whose lifetime totals are saved (and still fresh).
-export async function estimateScan(cache, usernames, { after = null, delay = 0.5, concurrency = 3 } = {}) {
+export async function estimateScan(cache, usernames, { after = null, delay = 0.75, concurrency = 2 } = {}) {
   const bucket = windowBucket(after);
   let saved = 0;
   // In batches, so a big thread doesn't open thousands of storage reads at once.
@@ -668,7 +671,8 @@ export async function estimateScan(cache, usernames, { after = null, delay = 0.5
     saved += hits.filter(Boolean).length;
   }
   const requests = saved * REQUESTS_SAVED + (usernames.length - saved) * REQUESTS_NEW;
-  const seconds = requests * Math.max(delay, SECONDS_PER_REQUEST / Math.max(1, concurrency));
+  const perRequest = concurrency > 1 ? SECONDS_PER_REQUEST_PARALLEL : SECONDS_PER_REQUEST;
+  const seconds = requests * Math.max(delay, perRequest);
   return { users: usernames.length, saved, requests, seconds };
 }
 

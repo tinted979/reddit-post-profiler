@@ -1020,11 +1020,11 @@ test("estimateScan counts saved users and prices the rest", async () => {
   const handler = aggregates({ posts: [["Python", 1]], comments: [["rust", 2]] });
   await buildProfile(makeClient(handler).client, "alice", 1, POST, { cache });
   const est = await estimateScan(cache, ["Alice", "bob", "carol"], { delay: 0.5, concurrency: 3 });
-  assert.deepEqual(est, { users: 3, saved: 1, requests: 1 + 2 * 3, seconds: 7 * 0.5 });
+  assert.deepEqual(est, { users: 3, saved: 1, requests: 1 + 2 * 4, seconds: 9 * 1.3 });
   // The window is part of the key: nothing saved for the last year.
   const windowed = await estimateScan(cache, ["alice"], { after: POST.createdUtc - 365 * 86400, delay: 2 });
-  assert.deepEqual(windowed, { users: 1, saved: 0, requests: 3, seconds: 6 });
-  assert.equal((await estimateScan(null, ["a"], { concurrency: 1 })).seconds, 3 * 1.5);
+  assert.deepEqual(windowed, { users: 1, saved: 0, requests: 4, seconds: 8 });
+  assert.equal((await estimateScan(null, ["a"], { concurrency: 1 })).seconds, 4 * 1.8);
   assert.ok(LARGE_SCAN > 0);
 });
 

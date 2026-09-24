@@ -119,8 +119,8 @@ https://tinted979.github.io/reddit-post-profiler/?post=https://redd.it/1l7d1e4&m
 | `subs` | comma-separated subreddits to limit results to; the post's subreddit is always included, and listed ones are shown even with no activity. For very active users it also means far fewer requests |
 | `years` | only count activity from the last 1, 5 or 10 years, counted back from today (default: all time) |
 | `min` | hide subreddits with fewer than N posts + comments, on the page and in the CSV (the post's subreddit is always kept) |
-| `delay` | seconds between request starts (default 0.5, minimum 0.25) |
-| `par` | users profiled in parallel, 1–5 (default 3); also the most requests in flight at once |
+| `delay` | seconds between request starts (default 0.75, minimum 0.25) |
+| `par` | users profiled in parallel, 1–5 (default 2); also the most requests in flight at once |
 | `cache` | days to keep and reuse saved results (default 7, `0` = don't save) |
 | `badges` | badge thresholds, see [Badges](#badges) |
 

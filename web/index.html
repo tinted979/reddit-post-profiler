@@ -63,11 +63,11 @@
             </div>
             <div class="field">
               <label for="delay">Seconds between requests</label>
-              <input id="delay" type="number" min="0.25" step="any" inputmode="decimal" value="0.5">
+              <input id="delay" type="number" min="0.25" step="any" inputmode="decimal" value="0.75">
             </div>
             <div class="field">
               <label for="concurrency">Users in parallel (1–5)</label>
-              <input id="concurrency" type="number" min="1" max="5" step="1" inputmode="numeric" value="3">
+              <input id="concurrency" type="number" min="1" max="5" step="1" inputmode="numeric" value="2">
             </div>
           </div>
           <p class="hint">AutoModerator and deleted accounts are always skipped. Most commenters take 2 requests to the free Arctic Shift API, 3–4 if they're active in the post's subreddit outside this thread, and none when saved results can be reused. Threads with more than 300 commenters ask before profiling them all. If Arctic Shift rate-limits, every request pauses; if it asks us to slow down, fewer requests run at once.</p>

@@ -38,7 +38,7 @@ import { LinkQueue, MAX_WAITING } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
 const TITLE = document.title;
-const DEFAULTS = { delay: 0.5, concurrency: 3, cacheDays: 7 };
+const DEFAULTS = { delay: 0.75, concurrency: 2, cacheDays: 7 };
 // Most users profiled in parallel by a queued scan, which runs unattended.
 const QUEUE_CONCURRENCY = 2;
 
