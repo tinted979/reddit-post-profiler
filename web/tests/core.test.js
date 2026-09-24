@@ -9,6 +9,7 @@ import {
   ServerBusy,
   Unsupported,
   buildProfile,
+  arcticSearchUrl,
   collectCommenters,
   mapPool,
   parsePostRef,
@@ -756,4 +757,15 @@ test("prune deletes old and broken records", async () => {
   await backend.set("broken", { value: 1 });
   assert.equal(await cache.prune(), 2); // older than max(7, 30) days, and no fetchedAt
   assert.deepEqual([...backend.map.keys()], ["new"]);
+});
+
+test("arcticSearchUrl links to an author's items in a subreddit", () => {
+  const u = new URL(arcticSearchUrl("comments", "Some-User_1", "AskReddit"));
+  assert.equal(u.origin + u.pathname, "https://arctic-shift.photon-reddit.com/search");
+  assert.deepEqual(Object.fromEntries(u.searchParams), {
+    fun: "comments_search", author: "Some-User_1", subreddit: "AskReddit", limit: "100", sort: "desc",
+  });
+  const p = new URL(arcticSearchUrl("posts", "a", "rust", 1600000000));
+  assert.equal(p.searchParams.get("fun"), "posts_search");
+  assert.equal(p.searchParams.get("after"), "1600000000");
 });

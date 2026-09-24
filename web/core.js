@@ -713,6 +713,16 @@ export function sortedSubreddits(profile, post, minCount = 0) {
     .sort((a, b) => b.total - a.total || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 }
 
+// Link to the Arctic Shift search page listing an author's posts or comments in a
+// subreddit, newest first. kind: "posts" | "comments"; after: epoch seconds or null.
+export function arcticSearchUrl(kind, author, subreddit, after = null) {
+  const q = new URLSearchParams({ fun: `${kind}_search`, author, subreddit });
+  if (after !== null) q.set("after", String(after));
+  q.set("limit", "100");
+  q.set("sort", "desc");
+  return `https://arctic-shift.photon-reddit.com/search?${q}`;
+}
+
 export const CSV_COLUMNS = [
   "username",
   "thread_comments",

@@ -9,6 +9,7 @@ import {
   QueryTimeout,
   ServerBusy,
   buildProfile,
+  arcticSearchUrl,
   collectCommenters,
   mapPool,
   parsePostRef,
@@ -30,6 +31,7 @@ const state = {
   slots: [], // profiles by rank (thread activity); has gaps while a run is going
   shown: 0, // cards passing the filter
   beforeKnown: true, // false when the post is older than the history window
+  after: null, // start of the history window (epoch seconds), null = all time
 };
 
 function el(tag, attrs = {}, ...children) {
@@ -293,21 +295,29 @@ function userCard(profile, post) {
         el("a", { href: profileUrl, target: "_blank", rel: "noopener" }, `u/${profile.username} on Reddit ↗`)));
     if (profile.error) panel.append(el("p", { class: "empty" }, profile.errorDetail || profile.error));
     else if (!subs.length) panel.append(el("p", { class: "empty" }, "No archived activity."));
-    else panel.append(subredditTable(subs, post));
+    else panel.append(subredditTable(subs, post, profile.username));
     card.append(panel);
   });
   return card;
 }
 
-function subredditTable(subs, post) {
+function subredditTable(subs, post, username) {
   const target = post.subreddit.toLowerCase();
+  // A count links to those posts or comments on Arctic Shift, over the same history window.
+  const countCell = (kind, n, sub) => el("td", {}, !n ? "0" :
+    el("a", {
+      href: arcticSearchUrl(kind, username, sub, state.after),
+      target: "_blank",
+      rel: "noopener",
+      "aria-label": `${n} ${n === 1 ? kind.slice(0, -1) : kind} in r/${sub} on Arctic Shift`,
+    }, String(n)));
   const body = el("tbody");
   for (const s of subs) {
     body.append(
       el("tr", { class: s.name.toLowerCase() === target ? "target" : "" },
         el("td", {}, el("a", { href: `https://www.reddit.com/r/${s.name}/`, target: "_blank", rel: "noopener" }, `r/${s.name}`)),
-        el("td", {}, String(s.posts)),
-        el("td", {}, String(s.comments)),
+        countCell("posts", s.posts, s.name),
+        countCell("comments", s.comments, s.name),
         el("td", {}, String(s.total))),
     );
   }
@@ -400,9 +410,11 @@ async function run() {
   }
   history.replaceState(null, "", shareUrl(postId, opts));
 
+  // Start of the history window, in epoch seconds (null = all time).
+  const after = opts.years ? Math.floor(Date.now() / 1000 - opts.years * 365.25 * 86400) : null;
   const runId = ++state.runId;
   const controller = new AbortController();
-  Object.assign(state, { controller, post: null, slots: [], shown: 0, beforeKnown: true });
+  Object.assign(state, { controller, post: null, slots: [], shown: 0, beforeKnown: true, after });
   $("post-card").hidden = true;
   $("results").hidden = true;
   $("users").replaceChildren();
@@ -411,8 +423,6 @@ async function run() {
   setRunning(true);
   setProgress(0);
 
-  // Start of the history window, in epoch seconds (null = all time).
-  const after = opts.years ? Math.floor(Date.now() / 1000 - opts.years * 365.25 * 86400) : null;
   const cache = openCache(opts.cacheDays);
   const client = new ArcticShiftClient({
     delay: opts.delay,

@@ -35,6 +35,8 @@ some of the same people, reuses them instead of asking the API again.
 
 The line under a name lists their most active subreddits. Opening a card shows the full
 table, with the post's own subreddit highlighted, and a link to their Reddit profile.
+Each post and comment count links to the Arctic Shift search page listing those posts or
+comments (newest first, within the `years` window if set).
 
 ### Options and share links
 
