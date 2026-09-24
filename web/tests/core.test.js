@@ -5,6 +5,7 @@ import {
   Aborted,
   ArcticShiftClient,
   ArcticShiftError,
+  QueryTimeout,
   buildProfile,
   collectCommenters,
   mapPool,
@@ -120,7 +121,7 @@ test("slow down is retried with backoff", async () => {
   const slow = () => json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422);
   const { client, sleeps } = makeClient(sequence(slow, slow, () => json({ data: [{ key: "a", count: "1" }] })));
   assert.deepEqual([...(await client.subredditCounts("posts", "alice"))], [["a", 1]]);
-  assert.deepEqual(sleeps, [5, 10]);
+  assert.deepEqual(sleeps, [2, 4]);
 });
 
 test("network errors retry, then fail", async () => {
@@ -232,6 +233,51 @@ test("a rate limit pauses every request on the client", async () => {
   assert.equal(starts[0], 1000);
   assert.ok(starts.slice(2).every((t) => t >= 1030), `starts: ${starts}`);
   assert.ok(sleeps.includes(30));
+});
+
+// A client whose responses resolve only when the test says so, to observe concurrency.
+function makeGatedClient(maxInFlight) {
+  const pending = [];
+  let active = 0;
+  let peak = 0;
+  const clock = { t: 0 };
+  const client = new ArcticShiftClient({
+    delay: 0,
+    maxInFlight,
+    fetchFn: () => {
+      active++;
+      peak = Math.max(peak, active);
+      return new Promise((resolve) => pending.push((r) => { active--; resolve(r); }));
+    },
+    sleep: async (s) => { clock.t += s; },
+    now: () => clock.t,
+  });
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  return { client, pending, tick, peak: () => peak };
+}
+
+test("requests in flight never exceed the cap", async () => {
+  const { client, pending, tick, peak } = makeGatedClient(2);
+  const all = Promise.all([1, 2, 3, 4, 5].map(() => client.subredditCounts("posts", "a")));
+  for (let i = 0; i < 5; i++) {
+    await tick();
+    pending.shift()(json({ data: [] }));
+  }
+  await all;
+  assert.equal(peak(), 2);
+});
+
+test("slow down halves the cap, and successes raise it again", async () => {
+  let slow = true;
+  const { client } = makeClient(() =>
+    slow ? json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422) : json({ data: [] }),
+  );
+  client.maxInFlight = client._limit = 4;
+  await assert.rejects(client._get("/api/posts/ids", {}), QueryTimeout);
+  assert.equal(client._limit, 1);
+  slow = false;
+  for (let i = 0; i < 30; i++) await client._get("/api/posts/ids", {});
+  assert.equal(client._limit, 4);
 });
 
 test("mapPool limits concurrency and passes indexes", async () => {

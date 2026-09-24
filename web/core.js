@@ -34,6 +34,7 @@ export function parsePostRef(ref) {
 export class ArcticShiftClient {
   constructor({
     delay = 2.0,
+    maxInFlight = 3,
     maxRetries = 4,
     maxRateLimitWaits = 10,
     baseUrl = BASE_URL,
@@ -43,16 +44,21 @@ export class ArcticShiftClient {
     signal = null,
     onWait = () => {},
   } = {}) {
-    Object.assign(this, { delay, maxRetries, maxRateLimitWaits, baseUrl, signal, onWait });
+    Object.assign(this, { delay, maxInFlight, maxRetries, maxRateLimitWaits, baseUrl, signal, onWait });
     this._fetch = fetchFn;
     this._sleepFn = sleep;
     this._now = now;
-    // Request starts are spaced `_interval` apart (never below `delay`); back-offs widen
-    // it and push `_pausedUntil` forward for every caller sharing this client.
-    this._interval = delay;
+    // Request starts are spaced `delay` apart; a 429 pushes `_pausedUntil` forward for
+    // every caller sharing this client.
     this._nextSlot = 0;
     this._pausedUntil = 0;
     this._pauseReason = null;
+    // The server struggles with several heavy queries at once (it answers "slow down"),
+    // so cap how many are in flight: halve the cap when it complains, and raise it
+    // again one step at a time after a run of successes.
+    this._limit = Math.max(1, maxInFlight);
+    this._inFlight = 0;
+    this._waiters = [];
     this._streak = 0;
     this.requests = 0;
   }
@@ -64,38 +70,80 @@ export class ArcticShiftClient {
   async _sleep(seconds, reason) {
     if (reason) this.onWait(reason, seconds);
     await this._sleepFn(seconds);
+    if (reason) this.onWait(null, 0);
     this._checkAbort();
   }
 
   // Reserve the next start slot synchronously, so concurrent callers can't grab the
-  // same one, then wait for it. Re-check afterwards in case a back-off began meanwhile.
+  // same one, then wait for it. Re-check afterwards in case a pause began meanwhile.
   async _throttle() {
     for (;;) {
       const now = this._now();
       const start = Math.max(now, this._nextSlot, this._pausedUntil);
-      this._nextSlot = start + this._interval;
+      this._nextSlot = start + this.delay;
       if (start <= now) return;
       await this._sleep(start - now, this._pausedUntil > now ? this._pauseReason : null);
       if (this._pausedUntil <= this._now()) return;
     }
   }
 
-  // Pause every request on this client for `seconds` and slow the pace down.
-  _backoff(seconds, reason) {
+  async _acquire() {
+    while (this._inFlight >= this._limit) {
+      await new Promise((resolve) => this._waiters.push(resolve));
+    }
+    this._inFlight++;
+  }
+
+  _release() {
+    this._inFlight--;
+    this._wake();
+  }
+
+  _wake() {
+    for (let free = this._limit - this._inFlight; free > 0 && this._waiters.length; free--) {
+      this._waiters.shift()();
+    }
+  }
+
+  // Pause every request on this client for `seconds`.
+  _pause(seconds, reason) {
     const until = this._now() + seconds;
     if (until > this._pausedUntil) {
       this._pausedUntil = until;
       this._pauseReason = reason;
     }
-    this._interval = Math.min(Math.max(this._interval * 2, 1), Math.max(5, this.delay));
+  }
+
+  _congested() {
+    this._limit = Math.max(1, Math.floor(this._limit / 2));
     this._streak = 0;
   }
 
-  // After a run of successes, speed back up towards the configured delay.
   _succeeded() {
-    if (++this._streak >= 20 && this._interval > this.delay) {
-      this._interval = Math.max(this.delay, this._interval / 2);
+    if (++this._streak >= 10 && this._limit < this.maxInFlight) {
+      this._limit++;
       this._streak = 0;
+      this._wake();
+    }
+  }
+
+  // One attempt: wait for a slot, fetch and parse. Returns {resp, payload}; throws the
+  // fetch error on network failure.
+  async _attempt(url) {
+    await this._acquire();
+    try {
+      await this._throttle();
+      this.requests++;
+      const resp = await this._fetch(url, { signal: this.signal ?? undefined });
+      let payload = null;
+      try {
+        payload = await resp.json();
+      } catch {
+        payload = null;
+      }
+      return { resp, payload };
+    } finally {
+      this._release();
     }
   }
 
@@ -107,11 +155,10 @@ export class ArcticShiftClient {
     let rateLimitWaits = 0;
     for (;;) {
       this._checkAbort();
-      await this._throttle();
       let resp;
+      let payload;
       try {
-        this.requests++;
-        resp = await this._fetch(url.toString(), { signal: this.signal ?? undefined });
+        ({ resp, payload } = await this._attempt(url.toString()));
       } catch (err) {
         this._checkAbort();
         // Browsers surface CORS-less error responses (e.g. some 429s) as network
@@ -120,7 +167,8 @@ export class ArcticShiftClient {
         if (failures > this.maxRetries) {
           throw new ArcticShiftError(`network error on ${path}: ${err.message ?? err}`);
         }
-        this._backoff(5 * 2 ** (failures - 1), "network error, retrying");
+        this._congested();
+        this._pause(5 * 2 ** (failures - 1), "network error, retrying");
         continue;
       }
 
@@ -131,24 +179,21 @@ export class ArcticShiftClient {
         }
         // X-RateLimit-Reset isn't exposed to browsers via CORS; fall back to 30s.
         const reset = Number(resp.headers.get("X-RateLimit-Reset"));
-        this._backoff(Number.isFinite(reset) && reset > 0 ? reset + 1 : 30, "rate limited");
+        this._congested();
+        this._pause(Number.isFinite(reset) && reset > 0 ? reset + 1 : 30, "rate limited");
         continue;
       }
 
-      let payload = null;
-      try {
-        payload = await resp.json();
-      } catch {
-        payload = null;
-      }
       const error = payload && typeof payload === "object" ? payload.error : null;
       if (error && /timed out/i.test(error)) throw new QueryTimeout(error);
       if (error && /slow down/i.test(error)) {
         // Undocumented: under load the server answers 422 "Timeout. Maybe slow down
-        // a bit"; the same query usually succeeds after a pause.
+        // a bit"; the same query usually succeeds after a pause. Only this request
+        // waits; the lower in-flight cap is what eases the load.
         slowdowns++;
         if (slowdowns > this.maxRetries) throw new QueryTimeout(error);
-        this._backoff(5 * 2 ** (slowdowns - 1), "server busy");
+        this._congested();
+        await this._sleep(2 * 2 ** (slowdowns - 1), "server busy");
         continue;
       }
       if (resp.status >= 500 || payload === null) {
@@ -156,7 +201,7 @@ export class ArcticShiftClient {
         if (failures > this.maxRetries) {
           throw new ArcticShiftError(`HTTP ${resp.status} on ${path}: ${error ?? "bad response"}`);
         }
-        this._backoff(2 ** failures, "server error, retrying");
+        await this._sleep(2 ** failures, "server error, retrying");
         continue;
       }
       if (error || resp.status >= 400) {

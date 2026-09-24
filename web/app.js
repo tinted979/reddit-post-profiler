@@ -208,7 +208,10 @@ async function run() {
   const client = new ArcticShiftClient({
     delay: opts.delay,
     signal: state.controller.signal,
-    onWait: (reason, seconds) => setStatus(`${current} (${reason}, waiting ${Math.round(seconds)}s…)`),
+    maxInFlight: opts.concurrency,
+    // A null reason means the wait is over; drop the stale "waiting" note.
+    onWait: (reason, seconds) =>
+      setStatus(reason ? `${current} (${reason}, waiting ${Math.round(seconds)}s…)` : current),
   });
 
   try {
