@@ -598,6 +598,49 @@ async function lifetimeCounts(client, username, { wanted, after }) {
   return { counts: mergeKinds(parts), partial: Boolean(wanted) };
 }
 
+// Lifetime counts from the archive, for a scan limited (`only`) to subreddits it covers:
+// each wanted subreddit's items up to one cutoff (the earliest point every file can be
+// trusted to), plus one interactions query for everything after it, posts and comments
+// together (its `after` is exclusive, so nothing is counted twice). One request instead
+// of two aggregates. Returns {counts, partial: true} (only the wanted subreddits, so it's
+// never saved as a profile), or null when the archive doesn't cover them all or can't be
+// read, or interactions can't answer: the aggregates then answer as usual.
+async function archiveLifetime(client, dumps, username, wanted, after) {
+  const covered = wanted.map((sub) => dumps.covers(sub));
+  if (covered.some((c) => !c)) return null;
+  const cutoff = minOf(covered.flatMap((c) => [c.postsThrough, c.commentsThrough]));
+  const counts = new Map();
+  const byKey = new Map();
+  const upToCutoff = (times) => times.filter((t) => t <= cutoff && (after === null || t > after)).length;
+  try {
+    const perSub = await settleAll(covered.map(async (c) => {
+      const [posts, comments] = await settleAll(KINDS.map((k) => dumps.timestamps(k, c.name, username)));
+      return [c.name, { posts: upToCutoff(posts), comments: upToCutoff(comments) }];
+    }));
+    for (const [name, c] of perSub) {
+      counts.set(name, c);
+      byKey.set(name.toLowerCase(), c);
+    }
+  } catch (err) {
+    if (err instanceof Aborted) throw err;
+    return null;
+  }
+  let recent;
+  try {
+    recent = await client.interactionCounts(username, { after: after === null ? cutoff : Math.max(after, cutoff) });
+  } catch (err) {
+    if (err instanceof QueryTimeout || err instanceof Unsupported) return null;
+    throw err;
+  }
+  for (const [sub, c] of recent) {
+    const mine = byKey.get(sub.toLowerCase());
+    if (!mine) continue;
+    mine.posts += c.posts;
+    mine.comments += c.comments;
+  }
+  return { counts, partial: true };
+}
+
 // [posts map, comments map] -> Map<subreddit, {posts, comments}>
 function mergeKinds(parts) {
   const counts = new Map();
@@ -773,7 +816,9 @@ export function emptyProfile(username, threadComments) {
 // then on is counted, "before the post" included. With `cache` ({get(key) -> {value,
 // fetchedAt} | null, set(key, value)}), earlier results are reused and new ones saved.
 // With `dumps` (a DumpSource, see dumps.js), "before" facts for a covered subreddit
-// come from its archive files.
+// come from its archive files. With `only` and `dumps`, when the archive covers every
+// wanted subreddit, lifetime counts come from it plus one interactions query (see
+// archiveLifetime).
 export async function buildProfile(client, username, threadComments, post, { only = null, after = null, lastCommentUtc = null, cache = null, dumps = null } = {}) {
   const profile = emptyProfile(username, threadComments);
   const user = username.toLowerCase();
@@ -786,7 +831,8 @@ export async function buildProfile(client, username, threadComments, post, { onl
   if (hit) {
     rows = hit.value;
   } else {
-    const life = await lifetimeCounts(client, username, { wanted, after });
+    const life = (wanted && dumps && await archiveLifetime(client, dumps, username, wanted, after))
+      ?? await lifetimeCounts(client, username, { wanted, after });
     rows = [...life.counts].map(([sub, c]) => [sub, c.posts, c.comments]);
     if (!life.partial) await cacheSet(cache, lifeKey, rows);
   }

@@ -1372,3 +1372,103 @@ test("tens of thousands of items don't overflow the stack", async () => {
   assert.equal(p.targetCommentsBefore, 150_000);
   assert.equal(p.targetFirstBefore, many.at(-1));
 });
+
+// Lifetime aggregates (every subreddit), interactions (`recent`, for the window after its
+// `after`), and "before" searches (none needed when the archive covers the post). Records URLs.
+function apiForLifetime({ lifetime = { posts: [], comments: [] }, recent = [], recentAfter = null, interactionsFail = null }) {
+  return (u) => {
+    if (isInteractions(u)) {
+      if (interactionsFail) return interactionsFail();
+      if (recentAfter !== null) assert.equal(u.searchParams.get("after"), String(recentAfter));
+      return interactions(recent);
+    }
+    const kind = u.pathname.includes("/posts/") ? "posts" : "comments";
+    if (u.pathname.endsWith("/aggregate") && !u.searchParams.has("subreddit")) {
+      return json({ data: lifetime[kind].map(([key, n]) => ({ key, count: String(n) })) });
+    }
+    return searchTimes(u, []);
+  };
+}
+const lifetimeAggregates = (calls) => calls.filter((u) => u.pathname.endsWith("/aggregate") && !u.searchParams.has("subreddit"));
+
+test("only covered subreddits: lifetime counts from the archive plus one interactions query", async () => {
+  const through = T - 86400;
+  const { client, calls } = makeClient(apiForLifetime({ recent: [["Python", 1, 2], ["rust", 9, 9]], recentAfter: through }));
+  const dumps = fakeDumps({
+    postsThrough: through, commentsThrough: through,
+    times: { posts: { alice: [T - 10 * 86400] }, comments: { alice: [T - 30 * 86400, T - 2 * 86400, through] } },
+  });
+  const p = await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps });
+  assert.equal(lifetimeAggregates(calls).length, 0);
+  assert.equal(calls.filter(isInteractions).length, 1);
+  assert.deepEqual([...p.subreddits], [["Python", { posts: 1 + 1, comments: 3 + 2 }]]); // rust ignored
+  assert.deepEqual([p.targetPostsBefore, p.targetCommentsBefore], [1, 3]);
+});
+
+test("one cutoff for both kinds: nothing between the two ends is counted twice", async () => {
+  const postsThrough = T - 5 * 86400;
+  const commentsThrough = T - 86400;
+  const between = T - 3 * 86400; // after postsThrough, before commentsThrough: interactions' job
+  const { client } = makeClient(apiForLifetime({ recent: [["Python", 0, 1]], recentAfter: postsThrough }));
+  const dumps = fakeDumps({ postsThrough, commentsThrough, times: { comments: { alice: [T - 20 * 86400, between] } } });
+  const p = await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps });
+  assert.equal(p.subreddits.get("Python").comments, 2); // 1 archived up to the cutoff + 1 recent
+});
+
+test("a subreddit the archive doesn't cover in only: the aggregates answer for everything", async () => {
+  const { client, calls } = makeClient(apiForLifetime({ lifetime: { posts: [], comments: [["Python", 4], ["rust", 2]] } }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, times: { comments: { alice: daily(3) } } });
+  const p = await buildProfile(client, "alice", 1, POST, { only: ["Python", "rust"], dumps });
+  assert.equal(calls.filter(isInteractions).length, 0);
+  assert.equal(lifetimeAggregates(calls).length, 2);
+  assert.equal(p.subreddits.get("rust").comments, 2);
+});
+
+test("without only, lifetime counts come from the aggregates as before", async () => {
+  const { client, calls } = makeClient(apiForLifetime({ lifetime: { posts: [], comments: [["Python", 4]] } }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, times: { comments: { alice: daily(3) } } });
+  await buildProfile(client, "alice", 1, POST, { dumps });
+  assert.equal(calls.filter(isInteractions).length, 0);
+  assert.equal(lifetimeAggregates(calls).length, 2);
+});
+
+test("if interactions can't answer, the aggregates do", async () => {
+  const { client, calls } = makeClient(apiForLifetime({ lifetime: { posts: [], comments: [["Python", 7]] }, interactionsFail: notSupported }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, times: { comments: { alice: daily(3) } } });
+  const p = await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps });
+  assert.equal(lifetimeAggregates(calls).length, 2);
+  assert.equal(p.subreddits.get("Python").comments, 7);
+});
+
+test("if the archive can't be read, the aggregates answer", async () => {
+  const { client, calls } = makeClient(apiForLifetime({ lifetime: { posts: [], comments: [["Python", 7]] }, before: {} }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, fail: new Error("Failed to fetch") });
+  const p = await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps });
+  assert.equal(calls.filter(isInteractions).length, 0);
+  assert.equal(p.subreddits.get("Python").comments, 7);
+});
+
+test("Stop while reading the archive for lifetime counts stops the profile", async () => {
+  const { client, calls } = makeClient(apiForLifetime({}));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, fail: new Aborted("stopped") });
+  await assert.rejects(buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps }), Aborted);
+  assert.equal(calls.length, 0);
+});
+
+test("a window after the archive's end: everything comes from interactions after the window start", async () => {
+  const through = T - 20 * 86400;
+  const after = T - 10 * 86400;
+  const { client } = makeClient(apiForLifetime({ recent: [["Python", 0, 2]], recentAfter: after }));
+  const dumps = fakeDumps({ postsThrough: through, commentsThrough: through, times: { comments: { alice: [T - 30 * 86400, through] } } });
+  const p = await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps, after });
+  assert.equal(p.subreddits.get("Python").comments, 2);
+});
+
+test("archive lifetime counts aren't saved as the user's profile", async () => {
+  const { client } = makeClient(apiForLifetime({ recent: [["Python", 0, 1]] }));
+  const backend = new MemoryBackend();
+  const cache = new ProfileCache({ backend, ttlDays: 7 });
+  const dumps = fakeDumps({ postsThrough: T - 86400, commentsThrough: T - 86400, times: { comments: { alice: [T - 2 * 86400] } } });
+  await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps, cache });
+  assert.equal((await backend.getPrefix("v1|life|")).length, 0);
+});

@@ -46,7 +46,7 @@ The default branch is `main`, and only `main` deploys. Work on a feature branch 
   - **Commenters:** `collectCommenters` fetches the whole thread in one `/api/comments/tree` request. It falls back to paging `/api/comments/search` if the tree has `more` stubs, fails, or the thread has at least `TREE_LIMIT` comments.
   - **`buildProfile`:**
     - Lifetime counts come from two parallel `/api/{posts,comments}/search/aggregate` calls.
-    - If those time out, it falls back to `/api/users/interactions/subreddits`. That endpoint encodes posts×1e6 + comments in one count via `weight_posts`. After that it falls back to yearly or per-subreddit splits of only the kind that timed out.
+    - If those time out, it falls back to `/api/users/interactions/subreddits`. That endpoint encodes posts×1e6 + comments in one count via `weight_posts`. After that it falls back to yearly or per-subreddit splits of only the kind that timed out. With `only` limited to subreddits the archive covers, they come from the archive up to one cutoff plus a single `interactions` query after it (`after` is exclusive; checked live), and aren't cached, since they're partial.
     - "Before" facts (`beforeFacts`) come from timestamp searches (`client.timestamps`: `/api/{kind}/search?fields=created_utc&limit=100`), giving the count, distinct days active and first date in one request per kind; past 100 items the aggregate gives the exact count and an `asc` search the first date, and days become a lower bound (`targetTimelineComplete: false`). If the search fails, the aggregate count is used with no timeline. They're skipped when the lifetime totals already prove the answer. For a subreddit the archive covers, they come from its files up to an hour before their newest item, and the API is asked only about the gap from there to the post; if the files fail, the API answers for the whole window.
     - It reads and writes the optional cache. Lifetime totals are trusted only if fetched at least `INGEST_LAG` after the post and after the user's last comment in the thread.
   - **Badges** (`DEFAULT_BADGES`, `profileFacts`, `activityTier`, `parseBadges`/`formatBadges`, `badgeFacts`/`tierCounts`): new here / occasional / regular from posts+comments, days active and tenure, each with a configurable threshold (0 = off; unknown facts skip their check). Tiers are never stored: `app.js` works them out when rendering from the stored facts, so changing the rules re-rates results and saved scans (their summaries keep `facts`) with no requests.
@@ -104,6 +104,7 @@ Known debt is tracked in the RPP Debt Ledger, a claude.ai artifact: https://clau
 - `/api/comments/tree` accepts `limit` up to 25000 and does not support `fields`.
 - `aggregate=created_utc&frequency=…` answers all-zero counts (even with only a subreddit filter), so it can't give a timeline; search with `fields=created_utc` can.
 - `interactions` has no `subreddit` parameter. It returns 400 "not supported" for huge accounts such as AutoModerator.
+- `/api/users/interactions/subreddits`'s `after` is exclusive, like search's (an item at exactly `after` isn't counted).
 - The search website (`/search?fun=posts_search|comments_search&author=&subreddit=&after=`) is a front end over the same API, so scraping it saves nothing.
 
 ## Sandbox testing notes
