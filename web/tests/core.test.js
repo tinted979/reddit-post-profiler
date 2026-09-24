@@ -1153,6 +1153,7 @@ test("parseUsernames strips u/ prefixes and profile links, and drops repeats and
       "/u/bob_2",
       "https://www.reddit.com/user/Carol-X/",
       "https://old.reddit.com/u/Eve_1/",
+      "//reddit.com/user/Faythe",
       "abcdefghijklmnopqrstu",
       "https://reddit.com.evil.com/user/alice",
       "https://evil.reddit.com/user/frank",
@@ -1161,6 +1162,6 @@ test("parseUsernames strips u/ prefixes and profile links, and drops repeats and
       "not a name!",
       "dave",
     ]),
-    ["Alice", "bob_2", "Carol-X", "Eve_1", "abcdefghijklmnopqrstu", "dave"],
+    ["Alice", "bob_2", "Carol-X", "Eve_1", "Faythe", "abcdefghijklmnopqrstu", "dave"],
   );
 });
