@@ -78,6 +78,10 @@ The automatic pull request review (`.github/workflows/code-review.yml`) checks c
 - **Tests:** logic in `core.js`, `cache.js` and `queue.js` gets a test in `web/tests/`; `npm test` must pass.
 - **Git workflow:** for any code change, create a `claude/<topic>` branch before editing. When the work is done and `npm test` passes, commit, push, and open a PR into `main` with `gh pr create`. Never push to `main` directly or merge PRs yourself.
 
+## Tech debt
+
+Known debt is tracked in the RPP Debt Ledger, a claude.ai artifact: https://claude.ai/artifact/NjkGa4wzYbRHb4oxZb3jcd. Its items are in the artifact's database, collection `items` (fields include `status`: `open` | `active` | `done` | `dropped`, `phase`, `pr`, `note`), readable and writable with the `ArtifactData` tool. Before refactoring or cleanup, check whether a ledger item covers it; when a PR addresses one, set its `status` and `pr` there. Add newly found debt as a new item rather than republishing the page.
+
 ## Arctic Shift API facts (verified live)
 
 - The rate-limit header `x-ratelimit-reset` isn't exposed to browsers because there's no CORS expose header, so the web app waits 30 s on a 429.
