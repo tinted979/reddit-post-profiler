@@ -65,6 +65,7 @@ export class DumpSource {
     this.signal = signal;
     this.broken = false; // a read failed: leave the files alone for the rest of the scan
     this.reads = 0; // successful timestamps() calls, for the end-of-scan note
+    this.lifetimeReads = 0; // times core.js's archiveLifetime answered, for the end-of-scan note
     this.readTimeoutMs = readTimeoutMs;
     this._subs = subs;
     this._openFile = openFile;

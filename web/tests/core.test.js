@@ -1464,11 +1464,120 @@ test("a window after the archive's end: everything comes from interactions after
   assert.equal(p.subreddits.get("Python").comments, 2);
 });
 
-test("archive lifetime counts aren't saved as the user's profile", async () => {
+test("a cutoff the archive can't give a finite value for falls back to the aggregates", async () => {
+  const { client, calls } = makeClient(apiForLifetime({ lifetime: { posts: [], comments: [["Python", 4]] } }));
+  const dumps = fakeDumps({ postsThrough: NaN, commentsThrough: NaN, times: { comments: { alice: daily(3) } } });
+  const p = await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps });
+  assert.equal(calls.filter(isInteractions).length, 0);
+  assert.equal(lifetimeAggregates(calls).length, 2);
+  assert.equal(p.subreddits.get("Python").comments, 4);
+});
+
+test("archive lifetime counts aren't saved under the full lifetime key", async () => {
   const { client } = makeClient(apiForLifetime({ recent: [["Python", 0, 1]] }));
   const backend = new MemoryBackend();
   const cache = new ProfileCache({ backend, ttlDays: 7 });
   const dumps = fakeDumps({ postsThrough: T - 86400, commentsThrough: T - 86400, times: { comments: { alice: [T - 2 * 86400] } } });
   await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps, cache });
   assert.equal((await backend.getPrefix("v1|life|")).length, 0);
+  // Cached separately, under its own key, so a re-scan with the same `only` costs nothing.
+  assert.equal((await backend.getPrefix("v1|lifeonly|")).length, 1);
+});
+
+test("a re-scan with the same only and cache reuses the archive lifetime counts with no requests", async () => {
+  const through = T - 86400;
+  const { cache, clock } = makeCache();
+  const dumps = fakeDumps({
+    postsThrough: through, commentsThrough: through,
+    times: { comments: { alice: [T - 2 * 86400] } },
+  });
+  const handler = apiForLifetime({ recent: [["Python", 0, 1]], recentAfter: through });
+  const first = makeClient(handler);
+  const p1 = await buildProfile(first.client, "alice", 1, POST, { only: ["Python"], dumps, cache });
+  assert.equal(first.calls.filter(isInteractions).length, 1);
+  assert.equal(lifetimeAggregates(first.calls).length, 0);
+  assert.equal(p1.cached, false);
+
+  clock.t += 60; // still well within the cache's TTL and INGEST_LAG
+  const second = makeClient(handler);
+  const p2 = await buildProfile(second.client, "Alice", 1, POST, { only: ["Python"], dumps, cache });
+  assert.equal(second.calls.length, 0, "no interactions or lifetime aggregate requests");
+  assert.equal(p2.cached, true);
+  assert.deepEqual(Object.fromEntries(p2.subreddits), Object.fromEntries(p1.subreddits));
+});
+
+test("a scan without only doesn't read a saved lifeonly record", async () => {
+  const through = T - 86400;
+  const { cache } = makeCache();
+  const dumps = fakeDumps({ postsThrough: through, commentsThrough: through, times: {} });
+  await buildProfile(makeClient(apiForLifetime({ recent: [["Python", 0, 1]], recentAfter: through })).client,
+    "alice", 1, POST, { only: ["Python"], dumps, cache });
+  assert.equal((await cache.backend.getPrefix("v1|lifeonly|")).length, 1);
+
+  const second = makeClient(apiForLifetime({ lifetime: { posts: [], comments: [["Python", 5], ["rust", 3]] } }));
+  const p = await buildProfile(second.client, "alice", 1, POST, { dumps, cache });
+  assert.equal(lifetimeAggregates(second.calls).length, 2);
+  assert.equal(second.calls.filter(isInteractions).length, 0);
+  assert.ok(p.subreddits.has("rust"), "used the real (unrestricted) totals, not the narrower lifeonly record");
+});
+
+test("the lifeonly key ignores case and order in only", async () => {
+  const { cache } = makeCache();
+  await cache.set("v1|lifeonly|alice|all|python,rust", [["Python", 0, 1], ["rust", 2, 3]]);
+  const { client, calls } = makeClient(() => {
+    throw new Error("unexpected request");
+  });
+  const p = await buildProfile(client, "alice", 1, POST, {
+    only: ["RUST", "Python"], dumps: {}, cache, lastCommentUtc: POST.createdUtc,
+  });
+  assert.equal(calls.length, 0);
+  assert.deepEqual(p.subreddits.get("rust"), { posts: 2, comments: 3 });
+  assert.deepEqual(p.subreddits.get("Python"), { posts: 0, comments: 1 });
+});
+
+test("an aggregate timeout after archive interactions failed doesn't retry interactions", async () => {
+  const dumps = fakeDumps({ postsThrough: T - 86400, commentsThrough: T - 86400, times: {} });
+  const handler = (u) => {
+    if (isInteractions(u)) return notSupported();
+    const kind = u.pathname.includes("/posts/") ? "posts" : "comments";
+    if (u.searchParams.has("subreddit")) return json({ data: [{ key: u.searchParams.get("subreddit"), count: "5" }] });
+    if (kind === "posts") return json({ data: [{ key: "Python", count: "3" }] });
+    return json({ error: "Query timed out" }); // the comments aggregate always times out
+  };
+  const { client, calls } = makeClient(handler);
+  const p = await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps });
+  assert.equal(calls.filter(isInteractions).length, 1);
+  assert.equal(p.subreddits.get("Python").comments, 5); // came from the per-subreddit split, not another interactions call
+  assert.equal(p.subreddits.get("Python").posts, 3);
+  assert.equal(dumps.lifetimeReads ?? 0, 0); // the archive never answered, so no note about it
+});
+
+test("archiveLifetime bumps dumps.lifetimeReads for the end-of-scan note, only when it answers", async () => {
+  const through = T - 86400;
+  const dumps = fakeDumps({
+    postsThrough: through, commentsThrough: through, times: { comments: { alice: [T - 2 * 86400] } },
+  });
+  await buildProfile(makeClient(apiForLifetime({ recent: [["Python", 0, 1]], recentAfter: through })).client,
+    "alice", 1, POST, { only: ["Python"], dumps });
+  assert.equal(dumps.lifetimeReads, 1);
+
+  // rust isn't covered, so the archive can't answer and the aggregates take over instead.
+  const dumps2 = fakeDumps({ postsThrough: through, commentsThrough: through, times: {} });
+  await buildProfile(makeClient(apiForLifetime({ lifetime: { posts: [], comments: [["Python", 2]] } })).client,
+    "alice", 1, POST, { only: ["Python", "rust"], dumps: dumps2 });
+  assert.equal(dumps2.lifetimeReads ?? 0, 0);
+});
+
+test("interactions repeatedly busy during archive lifetime rejects without falling back to the aggregates", async () => {
+  const dumps = fakeDumps({ postsThrough: T - 86400, commentsThrough: T - 86400, times: {} });
+  const slow = () => json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422);
+  const busy = makeClient((u) => (isInteractions(u) ? slow() : json({ data: [] })));
+  await assert.rejects(buildProfile(busy.client, "alice", 1, POST, { only: ["Python"], dumps }), ServerBusy);
+  assert.equal(busy.calls.filter(isInteractions).length, busy.client.maxRetries + 1);
+  assert.ok(!busy.calls.some((u) => u.pathname.endsWith("/aggregate") && !u.searchParams.has("subreddit")));
+
+  const limited = makeClient((u) => (isInteractions(u) ? json({}, 429) : json({ data: [] })));
+  const err = await buildProfile(limited.client, "alice", 1, POST, { only: ["Python"], dumps }).catch((e) => e);
+  assert.equal(err.status, 429);
+  assert.ok(!limited.calls.some((u) => u.pathname.endsWith("/aggregate") && !u.searchParams.has("subreddit")));
 });
