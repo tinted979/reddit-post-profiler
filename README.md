@@ -7,7 +7,38 @@ Profile everyone who commented on a Reddit post, using the
   post was created**. This shows whether they're a regular or a newcomer.
 - **every subreddit** they're active in, with their post and comment counts in each.
 
-## Install / run
+## Use it in your browser
+
+**https://tinted979.github.io/reddit-tool/**
+
+Nothing to install. Paste a post URL and press *Analyze*. Results appear as each user is
+profiled; click a user to see every subreddit they're active in, or download the same CSV
+as the command-line version. Everything runs in the visitor's browser and talks to Arctic
+Shift directly, so there's no server to maintain.
+
+You can share a link that starts an analysis as soon as it opens (*Copy link* builds one
+with the current options):
+
+```
+https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=1
+```
+
+| Parameter | Meaning |
+|---|---|
+| `post` | post URL or id (starts the analysis automatically) |
+| `max` | only profile the top N commenters |
+| `op=1` | also profile the post's author |
+| `exclude` | comma-separated usernames to skip |
+| `min` | hide subreddits with fewer than N posts+comments |
+
+The site lives in `web/`. `.github/workflows/pages.yml` runs both test suites on every
+push and deploys `web/` to GitHub Pages from the default branch. One-time setup: in the
+repo's **Settings → Pages**, set *Source* to **GitHub Actions**. On a free GitHub plan,
+Pages only works for public repositories.
+
+## Command-line version
+
+### Install / run
 
 Requires [uv](https://docs.astral.sh/uv/).
 
@@ -19,7 +50,7 @@ uv run reddit-tool https://www.reddit.com/r/learnpython/comments/1l7d1e4/running
 The post can be given as a full reddit URL, a `redd.it/<id>` link, a `t3_<id>` fullname or
 the bare post id.
 
-### Options
+#### Options
 
 | Option | Meaning |
 |---|---|
@@ -35,7 +66,7 @@ minutes at the default delay. Arctic Shift is a free service, so please don't lo
 delay aggressively. Press Ctrl-C to stop early; the profiles collected so far are still
 written.
 
-## Output
+### Output
 
 One CSV row per (user, subreddit), sorted by the user's comment count in the thread, then
 by activity in each subreddit:
@@ -67,5 +98,9 @@ Aggregations that time out for very active users are split into yearly chunks an
 ## Development
 
 ```sh
-uv run pytest
+uv run pytest            # Python CLI
+cd web && npm test       # web app core (Node 22+, no dependencies)
 ```
+
+To try the web app locally, serve `web/` with any static server, e.g.
+`python3 -m http.server -d web`, and open http://localhost:8000.

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reddit Commenter Profiler</title>
+  <meta name="description" content="See how active a Reddit thread's commenters were in that subreddit before, and where else they post. Powered by the Arctic Shift archive.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Reddit Commenter Profiler</h1>
+      <p class="lede">Paste a Reddit post. For everyone who commented, see how active they were in that subreddit <em>before</em> the post, and which other subreddits they post and comment in.</p>
+    </header>
+
+    <form id="form" autocomplete="off">
+      <div class="row">
+        <input id="post" name="post" type="text" required
+               placeholder="https://www.reddit.com/r/…/comments/abc123/…"
+               aria-label="Reddit post URL or id">
+        <button id="run" type="submit" class="primary">Analyze</button>
+      </div>
+      <details id="options">
+        <summary>Options</summary>
+        <div class="grid">
+          <label class="check"><input id="include-op" type="checkbox"> Also profile the post's author</label>
+          <label>Skip users <input id="exclude" type="text" placeholder="name1, name2"></label>
+          <label>Only the top N commenters <input id="max-users" type="number" min="1" placeholder="all"></label>
+          <label>Hide subreddits with fewer than <input id="min-count" type="number" min="0" value="0"></label>
+          <label>Seconds between requests <input id="delay" type="number" min="0.5" step="0.5" value="2"></label>
+        </div>
+        <p class="hint">AutoModerator and deleted accounts are always skipped. Each commenter takes 4 requests to the free Arctic Shift API, so large threads take a while. Please keep the delay polite.</p>
+      </details>
+    </form>
+
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <section id="status" hidden aria-live="polite">
+      <div class="status-line">
+        <span id="status-text"></span>
+        <button id="stop" type="button">Stop</button>
+      </div>
+      <div class="bar"><div id="bar-fill"></div></div>
+    </section>
+
+    <section id="post-card" class="card" hidden>
+      <div class="post-sub" id="post-sub"></div>
+      <a id="post-title" class="post-title" target="_blank" rel="noopener"></a>
+      <div class="post-meta" id="post-meta"></div>
+    </section>
+
+    <section id="results" hidden>
+      <div class="toolbar">
+        <input id="filter" type="search" placeholder="Filter users or subreddits" aria-label="Filter">
+        <div class="actions">
+          <button id="share" type="button">Copy link</button>
+          <button id="download" type="button">Download CSV</button>
+        </div>
+      </div>
+      <p class="legend">Sorted by comments in the thread. <b>Before</b> = posts / comments in <span class="target-name"></span> before this post was made. Click a user to see every subreddit they're active in.</p>
+      <div id="users"></div>
+    </section>
+
+    <footer>
+      Data from the <a href="https://arctic-shift.photon-reddit.com/search" target="_blank" rel="noopener">Arctic Shift</a> Reddit archive. Counts only include archived content and may lag Reddit by a day or so.
+      Runs entirely in your browser.
+    </footer>
+  </main>
+</body>
+</html>

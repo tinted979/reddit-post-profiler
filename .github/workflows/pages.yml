@@ -1,0 +1,51 @@
+name: Test and deploy web app
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Python tests
+        run: uv run pytest -q
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Web tests
+        working-directory: web
+        run: npm test
+
+  deploy:
+    # Publish only from the default branch, after the tests pass.
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+      - name: Assemble site
+        run: |
+          mkdir _site
+          cp web/index.html web/app.js web/core.js web/style.css _site/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
