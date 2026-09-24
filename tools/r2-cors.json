@@ -1,0 +1,9 @@
+[
+  {
+    "AllowedOrigins": ["https://tinted979.github.io", "http://localhost:8000"],
+    "AllowedMethods": ["GET", "HEAD"],
+    "AllowedHeaders": ["Range"],
+    "ExposeHeaders": ["Content-Range", "Content-Length", "Accept-Ranges", "ETag"],
+    "MaxAgeSeconds": 86400
+  }
+]

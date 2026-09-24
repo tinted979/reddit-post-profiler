@@ -1,0 +1,2 @@
+# Shell scripts break under bash with CRLF line endings, which Windows checkouts would add.
+*.sh text eol=lf
