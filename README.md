@@ -34,6 +34,7 @@ https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=
 | `max` | only profile the top N commenters |
 | `op=1` | also profile the post's author |
 | `exclude` | comma-separated usernames to skip |
+| `subs` | comma-separated subreddits to limit results to (the post's subreddit is always included) |
 | `min` | hide subreddits with fewer than N posts+comments |
 | `delay` | seconds between request starts (default 0.5) |
 | `par` | users profiled in parallel, 1–5 (default 3) |

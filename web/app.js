@@ -5,6 +5,7 @@ import {
   collectCommenters,
   mapPool,
   parsePostRef,
+  parseSubreddits,
   sortedSubreddits,
   toCsv,
 } from "./core.js";
@@ -34,6 +35,7 @@ function readOptions() {
   return {
     includeOp: $("include-op").checked,
     exclude: $("exclude").value.split(/[\s,]+/).filter(Boolean),
+    only: parseSubreddits($("only-subs").value.split(/[\s,]+/)),
     maxUsers: Number.isFinite(maxUsers) && maxUsers > 0 ? maxUsers : null,
     delay: Math.max(0.25, parseFloat($("delay").value) || 0.5),
     concurrency: Math.min(5, Math.max(1, parseInt($("concurrency").value, 10) || 3)),
@@ -91,7 +93,7 @@ function userCard(profile, post) {
       el("span", { class: "pill", title: `posts / comments in r/${post.subreddit} before this post` },
         `before: ${profile.targetPostsBefore} / ${profile.targetCommentsBefore}`),
       el("span", { class: before === 0 ? "pill new" : "pill regular" }, before === 0 ? "new here" : "regular"),
-      el("span", { class: "pill" }, `${profile.subreddits.size} subreddits`),
+      el("span", { class: "pill" }, `${[...profile.subreddits.values()].filter((c) => c.posts + c.comments > 0).length} subreddits`),
     );
   }
 
@@ -165,6 +167,7 @@ function shareUrl() {
   url.searchParams.set("post", $("post").value.trim());
   if (opts.includeOp) url.searchParams.set("op", "1");
   if (opts.exclude.length) url.searchParams.set("exclude", opts.exclude.join(","));
+  if (opts.only.length) url.searchParams.set("subs", opts.only.join(","));
   if (opts.maxUsers) url.searchParams.set("max", String(opts.maxUsers));
   if (minCount()) url.searchParams.set("min", String(minCount()));
   if (opts.delay !== 0.5) url.searchParams.set("delay", String(opts.delay));
@@ -238,7 +241,7 @@ async function run() {
       progress();
       let profile;
       try {
-        profile = await buildProfile(client, username, n, post);
+        profile = await buildProfile(client, username, n, post, { only: opts.only });
       } catch (err) {
         if (err instanceof Aborted) throw err;
         profile = {
@@ -307,11 +310,12 @@ function init() {
   const params = new URLSearchParams(window.location.search);
   if (params.get("op") === "1") $("include-op").checked = true;
   if (params.get("exclude")) $("exclude").value = params.get("exclude");
+  if (params.get("subs")) $("only-subs").value = params.get("subs");
   if (params.get("max")) $("max-users").value = params.get("max");
   if (params.get("min")) $("min-count").value = params.get("min");
   if (params.get("delay")) $("delay").value = params.get("delay");
   if (params.get("par")) $("concurrency").value = params.get("par");
-  if (["exclude", "max", "min", "op", "delay", "par"].some((k) => params.has(k))) {
+  if (["exclude", "subs", "max", "min", "op", "delay", "par"].some((k) => params.has(k))) {
     $("options").open = true;
   }
   if (params.get("post")) {

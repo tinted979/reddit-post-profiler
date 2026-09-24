@@ -208,8 +208,9 @@ export class ArcticShiftClient {
   }
 
   // Map of subreddit -> count for `kind` ("posts" | "comments"). Retries a timed-out
-  // aggregation once, then splits it into yearly chunks.
-  async subredditCounts(kind, author, { subreddit = null, before = null } = {}) {
+  // aggregation once, then falls back: to one query per subreddit in `only` when given
+  // (all we need, and far cheaper for very active users), else to yearly chunks.
+  async subredditCounts(kind, author, { subreddit = null, before = null, only = null } = {}) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         return await this._aggregate(kind, author, { subreddit, before });
@@ -218,6 +219,14 @@ export class ArcticShiftClient {
       }
     }
     const total = new Map();
+    if (only?.length && subreddit === null) {
+      for (const sub of only) {
+        for (const [k, n] of await this.subredditCounts(kind, author, { subreddit: sub, before })) {
+          total.set(k, (total.get(k) || 0) + n);
+        }
+      }
+      return total;
+    }
     for (const [start, end] of yearlyRanges(before, this._now())) {
       const part = await this._aggregate(kind, author, { subreddit, after: start, before: end });
       for (const [k, n] of part) total.set(k, (total.get(k) || 0) + n);
@@ -264,7 +273,23 @@ export async function collectCommenters(client, post, { exclude = [], includeOp 
   return counts;
 }
 
-export async function buildProfile(client, username, threadComments, post) {
+// Normalise a list of subreddit names ("r/Foo", "/r/foo", "Foo") to bare names.
+export function parseSubreddits(names) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of names) {
+    const name = raw.trim().replace(/^\/?r\//i, "");
+    if (name && !seen.has(name.toLowerCase())) {
+      seen.add(name.toLowerCase());
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+// Build a user's profile. With `only`, the profile lists just those subreddits (plus the
+// post's own), including ones with no activity so the answer is explicit.
+export async function buildProfile(client, username, threadComments, post, { only = null } = {}) {
   const profile = {
     username,
     threadComments,
@@ -274,9 +299,10 @@ export async function buildProfile(client, username, threadComments, post) {
     error: null,
   };
   const byKey = new Map();
+  const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
   const lifetime = await Promise.all([
-    client.subredditCounts("posts", username),
-    client.subredditCounts("comments", username),
+    client.subredditCounts("posts", username, { only: wanted }),
+    client.subredditCounts("comments", username, { only: wanted }),
   ]);
   for (const [i, kind] of ["posts", "comments"].entries()) {
     for (const [sub, n] of lifetime[i]) {
@@ -288,6 +314,20 @@ export async function buildProfile(client, username, threadComments, post) {
         profile.subreddits.set(sub, counts);
       }
       counts[kind] += n;
+    }
+  }
+
+  if (wanted) {
+    const keep = new Set(wanted.map((s) => s.toLowerCase()));
+    for (const name of [...profile.subreddits.keys()]) {
+      if (!keep.has(name.toLowerCase())) profile.subreddits.delete(name);
+    }
+    for (const name of wanted) {
+      if (!byKey.has(name.toLowerCase())) {
+        const counts = { posts: 0, comments: 0 };
+        byKey.set(name.toLowerCase(), counts);
+        profile.subreddits.set(name, counts);
+      }
     }
   }
 

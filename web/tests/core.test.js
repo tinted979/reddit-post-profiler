@@ -9,6 +9,7 @@ import {
   collectCommenters,
   mapPool,
   parsePostRef,
+  parseSubreddits,
   toCsv,
   yearlyRanges,
 } from "../core.js";
@@ -259,6 +260,35 @@ test("mapPool stops starting work once aborted", async () => {
     Aborted,
   );
   assert.deepEqual(started, [1, 2]);
+});
+
+test("parseSubreddits strips prefixes and dedupes", () => {
+  assert.deepEqual(parseSubreddits(["r/rust", "/r/Golang", " ", "Rust", "python"]), ["rust", "Golang", "python"]);
+});
+
+test("buildProfile with only keeps listed subreddits and adds empty ones", async () => {
+  const { client, calls } = makeClient((u) =>
+    u.pathname.includes("/posts/")
+      ? json({ data: [{ key: "rust", count: "4" }, { key: "funny", count: "1" }] })
+      : json({ data: [{ key: "python", count: "2" }, { key: "AskReddit", count: "9" }] }),
+  );
+  const p = await buildProfile(client, "bob", 2, POST, { only: ["r/Rust", "golang"] });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(Object.fromEntries(p.subreddits), {
+    rust: { posts: 4, comments: 0 }, python: { posts: 0, comments: 2 }, golang: { posts: 0, comments: 0 },
+  });
+});
+
+test("a timed-out aggregate falls back to one query per listed subreddit", async () => {
+  const { client, calls } = makeClient((u) => {
+    const sub = u.searchParams.get("subreddit");
+    if (!sub) return json({ error: "Query timed out" });
+    return json({ data: sub === "rust" ? [{ key: "rust", count: "3" }] : [] });
+  });
+  const counts = await client.subredditCounts("comments", "busy", { only: ["Python", "rust"] });
+  assert.deepEqual([...counts], [["rust", 3]]);
+  assert.equal(calls.length, 4); // 2 full attempts + 1 per listed subreddit
+  assert.ok(!calls.some((u) => u.searchParams.has("after")), "should not split into years");
 });
 
 test("toCsv matches the CLI layout", () => {
