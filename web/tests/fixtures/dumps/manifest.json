@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "subreddits": {
+    "python": {
+      "name": "Python",
+      "version": "v1",
+      "built_utc": 1790284694,
+      "posts_to_utc": 1699950000,
+      "comments_to_utc": 1699990000,
+      "files": {
+        "posts_by_author": {
+          "path": "r/python/v1/posts_by_author.parquet",
+          "bytes": 360,
+          "rows": 2,
+          "row_groups": 1,
+          "key": "author",
+          "from_utc": 1699900000,
+          "to_utc": 1699950000
+        },
+        "comments_by_author": {
+          "path": "r/python/v1/comments_by_author.parquet",
+          "bytes": 380,
+          "rows": 4,
+          "row_groups": 1,
+          "key": "author",
+          "from_utc": 1698000000,
+          "to_utc": 1699990000
+        },
+        "comments_by_link": {
+          "path": "r/python/v1/comments_by_link.parquet",
+          "bytes": 496,
+          "rows": 4,
+          "row_groups": 1,
+          "key": "link_id",
+          "from_utc": 1698000000,
+          "to_utc": 1699990000
+        }
+      }
+    }
+  }
+}

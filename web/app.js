@@ -41,6 +41,7 @@ import {
   wait,
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
+import { DumpSource } from "./dumps.js";
 import { LinkQueue, MAX_WAITING, QUEUE_KEY } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
@@ -723,6 +724,11 @@ async function run({ fromQueue = false } = {}) {
     renderPost(post, null);
     renderWindowNote(after);
 
+    // Archive files for the post's subreddit, if there are any: "before" facts come from
+    // them rather than Arctic Shift searches. No manifest, or a broken one, means the API.
+    const dumps = await DumpSource.open({ signal: controller.signal });
+    const archive = dumps?.covers(post.subreddit) ?? null;
+
     setStatus("Collecting commenters…");
     const commenters = await collectCommenters(client, post, opts);
     thread = threadStats(commenters);
@@ -788,7 +794,7 @@ async function run({ fromQueue = false } = {}) {
       let profile;
       try {
         profile = await buildProfile(client, username, count, post, {
-          only: opts.only, after, lastCommentUtc: last, cache,
+          only: opts.only, after, lastCommentUtc: last, cache, dumps,
         });
       } catch (err) {
         if (err instanceof Aborted) throw err;
@@ -812,6 +818,15 @@ async function run({ fromQueue = false } = {}) {
     const who = capped ? `the top ${counts.total} of ${plural(capped, "commenter")}` : plural(counts.total, "user");
     let text = `Done: profiled ${who}${notes.length ? ` (${notes.join(", ")})` : ""}` +
       ` with ${plural(client.requests, "request")}. Took ${took()}.`;
+    if (archive) {
+      if (dumps.broken) {
+        text += ` The r/${archive.name} archive files stopped answering partway, so Arctic Shift answered for the rest.`;
+      } else if (dumps.reads > 0) {
+        const upTo = new Date(Math.min(archive.postsThrough, archive.commentsThrough) * 1000)
+          .toLocaleDateString(undefined, { dateStyle: "medium" });
+        text += ` Activity in r/${archive.name} before the post, up to ${upTo}, came from archive files.`;
+      }
+    }
     if (failed && failed < counts.total && opts.cacheDays > 0) {
       text += " Press Analyze to retry the failed ones; the rest are reused.";
     }

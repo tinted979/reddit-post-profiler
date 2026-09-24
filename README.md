@@ -215,7 +215,10 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    currently answers all zeros). Past 100 items it adds the aggregate for the exact count
    and one more search for the first date. These run in parallel, and it skips a
    "before" query when the lifetime counts leave no room for one, e.g. when all of a
-   user's comments in the subreddit are in this thread.
+   user's comments in the subreddit are in this thread. For a subreddit with archive files on
+   the project's R2 bucket, listed in the bucket's manifest
+   (`https://rpp-db.tinted979.dev/manifest.json`), those come from the files instead, with
+   Arctic Shift asked only about the days since the files were built.
 
 Aggregations can time out for very active users. The page then tries
 `GET /api/users/interactions/subreddits`, which answers for posts and comments in one query

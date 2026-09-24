@@ -1219,3 +1219,156 @@ test("a failed lookup's profile serializes like any other", () => {
   assert.deepEqual(back, { ...p, subreddits: new Map() });
   assert.deepEqual(toCsv([p], POST).split("\r\n")[1].split(",").slice(0, 3), ["gone_user", "3", "Python"]);
 });
+
+// A stand-in for dumps.js's DumpSource: `times[kind][lowercase author]`, covering r/Python
+// with the given trust times. Records reads; `fail` makes reads throw like a network error.
+function fakeDumps({ postsThrough, commentsThrough, times = {}, fail = null }) {
+  const reads = [];
+  return {
+    reads,
+    covers: (sub) => (sub.toLowerCase() === "python" ? { name: "Python", postsThrough, commentsThrough } : null),
+    timestamps: async (kind, sub, author) => {
+      reads.push([kind, sub, author]);
+      if (fail) throw fail;
+      return times[kind]?.[author.toLowerCase()] ?? [];
+    },
+  };
+}
+
+// Lifetime aggregates (all in `sub`), and "before" searches honouring after/before/sort/limit.
+function apiWithBefore({ comments = 0, posts = 0, before = {}, sub = "Python" }) {
+  return (u) => {
+    const kind = u.pathname.includes("/posts/") ? "posts" : "comments";
+    if (!u.searchParams.has("subreddit")) {
+      const n = kind === "posts" ? posts : comments;
+      return json({ data: n ? [{ key: sub, count: String(n) }] : [] });
+    }
+    const after = Number(u.searchParams.get("after") ?? -Infinity);
+    const beforeTs = Number(u.searchParams.get("before") ?? Infinity);
+    const times = (before[kind] ?? []).filter((t) => t > after && t < beforeTs);
+    if (u.pathname.endsWith("/aggregate")) return json({ data: [{ key: sub, count: String(times.length) }] });
+    return searchTimes(u, times);
+  };
+}
+
+const T = POST.createdUtc;
+
+test("with archive files past the post, before facts come from them with no searches", async () => {
+  const { client, calls } = makeClient(apiWithBefore({ comments: 10, posts: 3 }));
+  const dumps = fakeDumps({
+    postsThrough: T + 86400, commentsThrough: T + 86400,
+    times: {
+      comments: { alice: [T - 30 * 86400, T - 2 * 86400, T - 2 * 86400 + 60, T + 100] }, // the last is after the post
+      posts: { alice: [T - 10 * 86400] },
+    },
+  });
+  const p = await buildProfile(client, "Alice", 1, POST, { dumps });
+  assert.equal(calls.filter((u) => u.searchParams.has("before")).length, 0);
+  assert.deepEqual([p.targetPostsBefore, p.targetCommentsBefore], [1, 3]);
+  assert.equal(p.targetFirstBefore, T - 30 * 86400);
+  assert.equal(p.targetDaysBefore, 3);
+  assert.equal(p.targetTimelineComplete, true);
+  assert.deepEqual(dumps.reads.map((r) => r[0]).sort(), ["comments", "posts"]);
+});
+
+test("the archive gives the whole timeline, not just the newest 100", async () => {
+  const many = daily(250);
+  const { client } = makeClient(apiWithBefore({ comments: 300 }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, times: { comments: { alice: many } } });
+  const p = await buildProfile(client, "alice", 1, POST, { dumps });
+  assert.equal(p.targetCommentsBefore, 250);
+  assert.equal(p.targetDaysBefore, 250);
+  assert.equal(p.targetTimelineComplete, true);
+});
+
+test("a post newer than the files adds the API's gap after them, counting the edge once", async () => {
+  const through = T - 5 * 86400;
+  const fileTimes = [T - 20 * 86400, through]; // `through` itself is still the files'
+  const apiTimes = [through, through + 1, T - 86400]; // the API only answers after `through`
+  const { client, calls } = makeClient(apiWithBefore({ comments: 9, before: { comments: [...fileTimes, ...apiTimes] } }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: through, times: { comments: { alice: fileTimes } } });
+  const p = await buildProfile(client, "alice", 1, POST, { dumps });
+  const gap = calls.filter((u) => u.searchParams.has("before"));
+  assert.equal(gap.length, 1);
+  assert.equal(gap[0].searchParams.get("after"), String(through));
+  assert.equal(p.targetCommentsBefore, 4); // 2 from the files + (through + 1) and (T − 1 day)
+  assert.equal(p.targetFirstBefore, T - 20 * 86400);
+  assert.equal(p.targetTimelineComplete, true);
+});
+
+test("if the gap's timestamp search fails, the aggregate answers the count with only the files' timeline", async () => {
+  const through = T - 5 * 86400;
+  const fileTimes = [T - 20 * 86400, through];
+  const gapCount = 3;
+  const handler = (u) => {
+    const kind = u.pathname.includes("/posts/") ? "posts" : "comments";
+    if (!u.searchParams.has("subreddit")) return json({ data: kind === "comments" ? [{ key: "Python", count: "9" }] : [] });
+    if (u.pathname.endsWith("/aggregate")) return json({ data: [{ key: "Python", count: String(gapCount) }] });
+    return json({ error: "internal error" }, 500); // the gap's timestamp search fails
+  };
+  const { client } = makeClient(handler);
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: through, times: { comments: { alice: fileTimes } } });
+  const p = await buildProfile(client, "alice", 1, POST, { dumps });
+  assert.equal(p.targetCommentsBefore, fileTimes.length + gapCount); // files + the aggregate's gap count
+  assert.equal(p.targetFirstBefore, Math.min(...fileTimes)); // the files' earliest
+  assert.equal(p.targetDaysBefore, 2); // the files' days only
+  assert.equal(p.targetTimelineComplete, false);
+});
+
+test("a window start after the files' trust cutoff skips the files and asks the API from `after`", async () => {
+  const after = T - 10 * 86400;
+  const through = T - 30 * 86400; // earlier than `after`: the files can't answer any of the window
+  const apiTimes = [after + 1, T - 86400];
+  const { client, calls } = makeClient(apiWithBefore({ comments: 5, before: { comments: apiTimes } }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: through, times: { comments: { alice: [T - 40 * 86400, through] } } });
+  const p = await buildProfile(client, "alice", 1, POST, { dumps, after });
+  const gap = calls.filter((u) => u.searchParams.has("before"));
+  assert.ok(gap.length > 0);
+  assert.equal(gap[0].searchParams.get("after"), String(after)); // not `through`
+  assert.equal(p.targetCommentsBefore, apiTimes.length); // no file rows counted
+});
+
+test("the history window applies to archive rows too", async () => {
+  const after = T - 10 * 86400;
+  const { client } = makeClient(apiWithBefore({ comments: 5 }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, times: { comments: { alice: [T - 40 * 86400, after, after + 1, T - 1] } } });
+  const p = await buildProfile(client, "alice", 1, POST, { dumps, after });
+  assert.equal(p.targetCommentsBefore, 2); // `after` is exclusive, like the API's
+  assert.equal(p.targetFirstBefore, after + 1);
+});
+
+test("if the archive fails, that user's before facts come from the API as before", async () => {
+  const apiTimes = [T - 3 * 86400, T - 86400];
+  const { client, calls } = makeClient(apiWithBefore({ comments: 4, before: { comments: apiTimes } }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, fail: new Error("Failed to fetch") });
+  const p = await buildProfile(client, "alice", 1, POST, { dumps });
+  assert.equal(p.error, null);
+  assert.equal(p.targetCommentsBefore, 2);
+  const search = calls.find((u) => u.pathname === "/api/comments/search");
+  assert.equal(search.searchParams.get("after"), null); // the whole history, not just a gap
+});
+
+test("Stop while reading the archive stops the profile", async () => {
+  const { client, calls } = makeClient(apiWithBefore({ comments: 4 }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, fail: new Aborted("stopped") });
+  await assert.rejects(buildProfile(client, "alice", 1, POST, { dumps }), Aborted);
+  assert.equal(calls.filter((u) => u.searchParams.has("before")).length, 0);
+});
+
+test("a subreddit the archive doesn't cover uses the API", async () => {
+  const { client, calls } = makeClient(apiWithBefore({ comments: 3, before: { comments: [T - 86400] }, sub: "rust" }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T });
+  const p = await buildProfile(client, "alice", 1, { ...POST, subreddit: "rust" }, { dumps });
+  assert.equal(dumps.reads.length, 0);
+  assert.ok(calls.some((u) => u.pathname === "/api/comments/search"));
+  assert.equal(p.targetCommentsBefore, 1);
+});
+
+test("tens of thousands of items don't overflow the stack", async () => {
+  const many = Array.from({ length: 150_000 }, (_, i) => T - 1 - i * 60);
+  const { client } = makeClient(apiWithBefore({ comments: 200_000 }));
+  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, times: { comments: { alice: many } } });
+  const p = await buildProfile(client, "alice", 1, POST, { dumps });
+  assert.equal(p.targetCommentsBefore, 150_000);
+  assert.equal(p.targetFirstBefore, many.at(-1));
+});
