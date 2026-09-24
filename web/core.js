@@ -5,9 +5,16 @@
 export const BASE_URL = "https://arctic-shift.photon-reddit.com";
 const ARCHIVE_START_YEAR = 2005;
 const DEFAULT_EXCLUDED = new Set(["[deleted]", "[removed]", "automoderator"]);
+// The interactions endpoint returns posts * weight_posts + comments * weight_comments per
+// subreddit, so a large post weight packs both counts into one number.
+const POST_WEIGHT = 1_000_000;
+const TREE_LIMIT = 25_000;
 
 export class ArcticShiftError extends Error {}
 export class QueryTimeout extends ArcticShiftError {}
+// The interactions endpoint can't answer for this user: too much data, or an answer we
+// can't decode.
+export class Unsupported extends ArcticShiftError {}
 export class Aborted extends Error {}
 
 const ID = "[0-9a-z]{1,13}";
@@ -205,7 +212,9 @@ export class ArcticShiftClient {
         continue;
       }
       if (error || resp.status >= 400) {
-        throw new ArcticShiftError(`HTTP ${resp.status} on ${path}: ${error}`);
+        const err = new ArcticShiftError(`HTTP ${resp.status} on ${path}: ${error}`);
+        err.status = resp.status;
+        throw err;
       }
       this._succeeded();
       return payload.data;
@@ -228,15 +237,51 @@ export class ArcticShiftClient {
     };
   }
 
+  // Every archived comment under a post, in one request, from the comment tree. Returns
+  // null when the tree can't be trusted to be complete (collapsed "more" stubs, the size
+  // limit reached, nothing returned, or an error), so the caller pages instead.
+  async threadCommentsTree(postId, limit = TREE_LIMIT) {
+    let data;
+    try {
+      data = await this._get("/api/comments/tree", { link_id: postId, limit });
+    } catch (err) {
+      if (err instanceof ArcticShiftError) return null;
+      throw err;
+    }
+    const seen = new Set();
+    const out = [];
+    let complete = true;
+    const walk = (nodes) => {
+      for (const node of Array.isArray(nodes) ? nodes : []) {
+        if (!node || typeof node !== "object") continue;
+        if (node.kind === "more") {
+          complete = false;
+          continue;
+        }
+        const d = node.data ?? {};
+        if (node.kind === "t1" && d.id && !seen.has(d.id)) {
+          seen.add(d.id);
+          out.push({ id: d.id, author: d.author, created_utc: d.created_utc });
+        }
+        if (d.replies && typeof d.replies === "object") walk(d.replies.data?.children);
+      }
+    };
+    walk(data);
+    return complete && out.length > 0 && out.length < limit ? out : null;
+  }
+
   // Every archived comment under a post. The search endpoint has no cursor, so page
-  // on created_utc and dedupe by id.
-  async *iterThreadComments(postId, pageSize = 100) {
+  // on created_utc and dedupe by id. With pageSize "auto" the server picks the page
+  // size, so only an empty page marks the end.
+  async *iterThreadComments(postId, pageSize = "auto") {
     const seen = new Set();
     let cursor = null;
+    let stale = 0;
     for (;;) {
       const params = { link_id: postId, limit: pageSize, sort: "asc", fields: "id,author,created_utc" };
       if (cursor !== null) params.after = cursor;
       const page = (await this._get("/api/comments/search", params)) || [];
+      if (!page.length) return;
       let fresh = 0;
       for (const c of page) {
         if (seen.has(c.id)) continue;
@@ -244,7 +289,10 @@ export class ArcticShiftClient {
         fresh++;
         yield c;
       }
-      if (page.length < pageSize) return;
+      if (typeof pageSize === "number" && page.length < pageSize) return;
+      // Two pages in a row with nothing new: the cursor isn't moving us forward.
+      stale = fresh ? 0 : stale + 1;
+      if (stale >= 2) return;
       const lastTs = Math.trunc(Number(page[page.length - 1].created_utc));
       let next = fresh ? lastTs - 1 : lastTs + 1;
       if (cursor !== null && next <= cursor) next = cursor + 1;
@@ -252,16 +300,43 @@ export class ArcticShiftClient {
     }
   }
 
+  // Map of subreddit -> {posts, comments} from one interactions query. `after`/`before`
+  // bound the time window (epoch seconds). Throws Unsupported when the server refuses the
+  // user or the packed counts can't be decoded.
+  async interactionCounts(author, { after = null, before = null } = {}) {
+    const params = { author, limit: "", weight_posts: POST_WEIGHT, weight_comments: 1 };
+    if (after !== null) params.after = after;
+    if (before !== null) params.before = before;
+    let data;
+    try {
+      data = (await this._get("/api/users/interactions/subreddits", params)) || [];
+    } catch (err) {
+      if (err instanceof ArcticShiftError && err.status >= 400 && err.status < 500) throw new Unsupported(err.message);
+      throw err;
+    }
+    const counts = new Map();
+    for (const row of data) {
+      const n = Number(row.count);
+      if (!Number.isSafeInteger(n) || n < 0) throw new Unsupported(`can't decode count ${row.count}`);
+      const c = counts.get(row.subreddit) ?? { posts: 0, comments: 0 };
+      c.posts += Math.floor(n / POST_WEIGHT);
+      c.comments += n % POST_WEIGHT;
+      counts.set(row.subreddit, c);
+    }
+    return counts;
+  }
+
   // Map of subreddit -> count for `kind` ("posts" | "comments"). Retries a timed-out
   // aggregation once, then falls back: to one query per subreddit in `only` when given
-  // (all we need, and far cheaper for very active users), else to yearly chunks.
+  // (all we need, and far cheaper for very active users), else to yearly chunks. With
+  // `split: false` it throws QueryTimeout instead of falling back.
   // `after`/`before` bound the time window (epoch seconds).
-  async subredditCounts(kind, author, { subreddit = null, after = null, before = null, only = null } = {}) {
+  async subredditCounts(kind, author, { subreddit = null, after = null, before = null, only = null, split = true } = {}) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         return await this._aggregate(kind, author, { subreddit, after, before });
       } catch (err) {
-        if (!(err instanceof QueryTimeout)) throw err;
+        if (!(err instanceof QueryTimeout) || (!split && attempt === 1)) throw err;
       }
     }
     const total = new Map();
@@ -309,7 +384,8 @@ export async function collectCommenters(client, post, { exclude = [], includeOp 
   const excluded = new Set(DEFAULT_EXCLUDED);
   for (const name of exclude) excluded.add(name.toLowerCase().replace(/^\/?u\//, ""));
   const counts = new Map();
-  for await (const c of client.iterThreadComments(post.id)) {
+  const comments = (await client.threadCommentsTree(post.id)) ?? client.iterThreadComments(post.id);
+  for await (const c of comments) {
     const author = c.author;
     if (author && !excluded.has(author.toLowerCase())) counts.set(author, (counts.get(author) || 0) + 1);
   }
@@ -333,10 +409,82 @@ export function parseSubreddits(names) {
   return out;
 }
 
+const KINDS = ["posts", "comments"];
+
+// Lifetime counts as Map<subreddit, {posts, comments}>. The per-kind aggregates are the
+// quickest answer for most users. When they time out (a very active user), one
+// interactions query usually still answers; failing that, split the aggregates up.
+// `partial` marks a result limited to `wanted`, which mustn't be cached.
+async function lifetimeCounts(client, username, { wanted, after }) {
+  const first = await Promise.allSettled(
+    KINDS.map((kind) => client.subredditCounts(kind, username, { after, split: false })),
+  );
+  for (const r of first) {
+    if (r.status === "rejected" && !(r.reason instanceof QueryTimeout)) throw r.reason;
+  }
+  const done = (i) => first[i].status === "fulfilled";
+  if (done(0) && done(1)) return { counts: mergeKinds(first.map((r) => r.value)), partial: false };
+  try {
+    return { counts: await client.interactionCounts(username, { after }), partial: false };
+  } catch (err) {
+    if (!(err instanceof QueryTimeout || err instanceof Unsupported)) throw err;
+  }
+  const parts = await Promise.all(
+    KINDS.map((kind, i) => (done(i) ? first[i].value : client.subredditCounts(kind, username, { after, only: wanted }))),
+  );
+  return { counts: mergeKinds(parts), partial: Boolean(wanted) };
+}
+
+// [posts map, comments map] -> Map<subreddit, {posts, comments}>
+function mergeKinds(parts) {
+  const counts = new Map();
+  for (const [i, kind] of KINDS.entries()) {
+    for (const [sub, n] of parts[i]) {
+      const c = counts.get(sub) ?? { posts: 0, comments: 0 };
+      c[kind] += n;
+      counts.set(sub, c);
+    }
+  }
+  return counts;
+}
+
+// Posts and comments in the post's subreddit before it was made, within the window.
+// Aggregates filtered to one subreddit are quick, so ask only for the kinds needed.
+async function beforeCounts(client, username, post, { after, needPosts, needComments }) {
+  const opts = { subreddit: post.subreddit, after, before: post.createdUtc };
+  const [posts, comments] = await Promise.all([
+    needPosts ? client.subredditCounts("posts", username, opts) : null,
+    needComments ? client.subredditCounts("comments", username, opts) : null,
+  ]);
+  return { posts: posts ? sum(posts) : 0, comments: comments ? sum(comments) : 0 };
+}
+
+// Arctic Shift takes about 36 hours to settle, so lifetime counts fetched sooner than
+// this after the post may not include the thread's comments yet.
+const SETTLE_SECONDS = 2 * 86400;
+
+async function cacheGet(cache, key) {
+  try {
+    return (await cache?.get(key)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheSet(cache, key, value) {
+  try {
+    await cache?.set(key, value);
+  } catch {
+    // Caching is best-effort.
+  }
+}
+
 // Build a user's profile. With `only`, the profile lists just those subreddits (plus the
 // post's own), including ones with no activity so the answer is explicit. With `after`
 // (epoch seconds), only activity from then on is counted, "before the post" included.
-export async function buildProfile(client, username, threadComments, post, { only = null, after = null } = {}) {
+// With `cache` ({get(key) -> {value, fetchedAt} | null, set(key, value)}), results of
+// earlier runs are reused and new ones stored.
+export async function buildProfile(client, username, threadComments, post, { only = null, after = null, cache = null } = {}) {
   const profile = {
     username,
     threadComments,
@@ -344,24 +492,38 @@ export async function buildProfile(client, username, threadComments, post, { onl
     targetCommentsBefore: 0,
     subreddits: new Map(), // display name -> {posts, comments}
     error: null,
+    cached: false,
   };
-  const byKey = new Map();
+  const user = username.toLowerCase();
+  // Round the window start to the day so cache keys stay stable between runs.
+  const bucket = after === null ? "all" : String(Math.floor(after / 86400));
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
-  const lifetime = await Promise.all([
-    client.subredditCounts("posts", username, { only: wanted, after }),
-    client.subredditCounts("comments", username, { only: wanted, after }),
-  ]);
-  for (const [i, kind] of ["posts", "comments"].entries()) {
-    for (const [sub, n] of lifetime[i]) {
-      // Merge case-insensitively, keeping the first spelling we saw.
-      let counts = byKey.get(sub.toLowerCase());
-      if (!counts) {
-        counts = { posts: 0, comments: 0 };
-        byKey.set(sub.toLowerCase(), counts);
-        profile.subreddits.set(sub, counts);
-      }
-      counts[kind] += n;
+
+  const lifeKey = `life|${user}|${bucket}`;
+  const hit = await cacheGet(cache, lifeKey);
+  let rows;
+  // Whether the lifetime totals are known to include this thread's comments.
+  let settled = true;
+  if (hit) {
+    rows = hit.value;
+    settled = hit.fetchedAt >= post.createdUtc + SETTLE_SECONDS;
+  } else {
+    const life = await lifetimeCounts(client, username, { wanted, after });
+    rows = [...life.counts].map(([sub, c]) => [sub, c.posts, c.comments]);
+    if (!life.partial) await cacheSet(cache, lifeKey, rows);
+  }
+
+  const byKey = new Map();
+  for (const [sub, posts, comments] of rows) {
+    // Merge case-insensitively, keeping the first spelling we saw.
+    let counts = byKey.get(sub.toLowerCase());
+    if (!counts) {
+      counts = { posts: 0, comments: 0 };
+      byKey.set(sub.toLowerCase(), counts);
+      profile.subreddits.set(sub, counts);
     }
+    counts.posts += posts;
+    counts.comments += comments;
   }
 
   if (wanted) {
@@ -382,15 +544,24 @@ export async function buildProfile(client, username, threadComments, post, { onl
   // the OP's own post and every comment in the thread came after the post was made.
   // A post older than the window has no "before" inside it at all.
   const target = byKey.get(post.subreddit.toLowerCase()) ?? { posts: 0, comments: 0 };
-  const isOp = username.toLowerCase() === post.author.toLowerCase();
+  const isOp = user === post.author.toLowerCase();
   const inWindow = after === null || post.createdUtc > after;
-  const before = { subreddit: post.subreddit, after, before: post.createdUtc };
-  const [postsBefore, commentsBefore] = await Promise.all([
-    inWindow && target.posts > (isOp ? 1 : 0) ? client.subredditCounts("posts", username, before) : null,
-    inWindow && target.comments > threadComments ? client.subredditCounts("comments", username, before) : null,
-  ]);
-  profile.targetPostsBefore = postsBefore ? sum(postsBefore) : 0;
-  profile.targetCommentsBefore = commentsBefore ? sum(commentsBefore) : 0;
+  const needPosts = inWindow && (!settled || target.posts > (isOp ? 1 : 0));
+  const needComments = inWindow && (!settled || target.comments > threadComments);
+  let beforeFromCache = true;
+  if (needPosts || needComments) {
+    const beforeKey = `before|${user}|${post.subreddit.toLowerCase()}|${post.createdUtc}|${bucket}`;
+    const saved = await cacheGet(cache, beforeKey);
+    let before = saved?.value;
+    if (!before) {
+      beforeFromCache = false;
+      before = await beforeCounts(client, username, post, { after, needPosts, needComments });
+      await cacheSet(cache, beforeKey, before);
+    }
+    profile.targetPostsBefore = before.posts;
+    profile.targetCommentsBefore = before.comments;
+  }
+  profile.cached = Boolean(hit) && beforeFromCache;
   return profile;
 }
 

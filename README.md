@@ -18,8 +18,11 @@ Shift directly, so there's no server to maintain.
 
 The web version profiles several users at once and skips the "before this post" lookups
 when a user's lifetime counts show there can't be any, so most commenters cost 2 requests
-instead of 4. If Arctic Shift rate-limits or asks to slow down, all requests pause and the
-pace eases off automatically.
+instead of 4. It fetches a thread's whole comment tree in one request, and saves results in
+your browser (IndexedDB): rescanning a thread, or scanning another one with the same people,
+reuses them for 7 days by default instead of asking the API again. *Clear saved results*
+in the options empties the store. If Arctic Shift rate-limits or asks to slow down, all
+requests pause and the pace eases off automatically.
 
 You can share a link that starts an analysis as soon as it opens (*Copy link* builds one
 with the current options):
@@ -39,6 +42,7 @@ https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=
 | `min` | hide subreddits with fewer than N posts+comments |
 | `delay` | seconds between request starts (default 0.5) |
 | `par` | users profiled in parallel, 1–5 (default 3) |
+| `cache` | days to reuse saved results (default 7, `0` = off) |
 
 The site lives in `web/`. `.github/workflows/pages.yml` runs both test suites on every
 push and deploys `web/` to GitHub Pages from the default branch. One-time setup: in the
@@ -103,6 +107,16 @@ A user with no archived activity, or whose lookup failed (see `error`), still ge
 
 Rate limits (HTTP 429) and the server's "slow down" responses are retried with backoff.
 Aggregations that time out for very active users are split into yearly chunks and summed.
+
+The web version differs in a few places:
+
+- Commenters come from `GET /api/comments/tree?link_id=…` in one request. If the tree is
+  incomplete or fails, it falls back to paging the search with `limit=auto`.
+- When a very active user's aggregations time out, it first tries
+  `GET /api/users/interactions/subreddits`. This endpoint answers with posts and comments
+  combined in one query (`weight_posts=1000000&weight_comments=1` packs both counts into
+  one number). Only if that fails too does it split the aggregations into yearly chunks.
+  For ordinary users the two aggregations are quicker, so they stay the first choice.
 
 ## Development
 

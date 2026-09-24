@@ -6,6 +6,7 @@ import {
   ArcticShiftClient,
   ArcticShiftError,
   QueryTimeout,
+  Unsupported,
   buildProfile,
   collectCommenters,
   mapPool,
@@ -14,6 +15,7 @@ import {
   toCsv,
   yearlyRanges,
 } from "../core.js";
+import { MemoryBackend, ProfileCache } from "../cache.js";
 
 const POST = { id: "abc123", author: "op_user", subreddit: "Python", createdUtc: 1_700_000_000, title: "t" };
 
@@ -47,6 +49,24 @@ function makeClient(handler, { delay = 0 } = {}) {
 
 function sequence(...responses) {
   return (_u, n) => responses[Math.min(n, responses.length) - 1]();
+}
+
+const W = 1_000_000; // POST_WEIGHT: an interactions count of p * W + c is p posts, c comments
+const isInteractions = (u) => u.pathname === "/api/users/interactions/subreddits";
+const interactions = (rows) => json({ data: rows.map(([subreddit, posts, comments]) => ({ subreddit, count: posts * W + comments })) });
+const notSupported = () => json({ data: null, error: "This user is currently not supported (too much data)" }, 400);
+
+// Aggregate responses: lifetime `posts`/`comments` rows, and "before" counts for
+// subreddit-filtered queries. Records which kinds of query were made.
+function aggregates({ posts = [], comments = [], before = { posts: 0, comments: 0 } }) {
+  return (u) => {
+    assert.ok(!isInteractions(u), "unexpected interactions query");
+    const kind = u.pathname.includes("/posts/") ? "posts" : "comments";
+    if (u.searchParams.has("subreddit")) {
+      return json({ data: [{ key: u.searchParams.get("subreddit"), count: String(before[kind]) }] });
+    }
+    return json({ data: (kind === "posts" ? posts : comments).map(([key, n]) => ({ key, count: String(n) })) });
+  };
 }
 
 async function collect(iter) {
@@ -96,7 +116,8 @@ test("stuck page terminates", async () => {
     sequence(() => json({ data: page }), () => json({ data: page }), () => json({ data: page }), () => json({ data: [] })),
   );
   assert.equal((await collect(client.iterThreadComments("abc123", 2))).length, 2);
-  assert.deepEqual(calls.map((u) => u.searchParams.get("after")), [null, "499", "501", "502"]);
+  // Two pages in a row with nothing new end the scan.
+  assert.deepEqual(calls.map((u) => u.searchParams.get("after")), [null, "499", "501"]);
 });
 
 test("subredditCounts parses string counts and passes filters", async () => {
@@ -162,20 +183,35 @@ test("collectCommenters counts and filters", async () => {
   assert.deepEqual([...counts], [["alice", 2], ["bob", 1], ["op_user", 0]]);
 });
 
+test("interactionCounts unpacks posts and comments", async () => {
+  const { client, calls } = makeClient(() => json({ data: [{ subreddit: "laos", count: 4_000_017 }, { subreddit: "rust", count: 3 }] }));
+  const counts = await client.interactionCounts("alice", { after: 5, before: 9 });
+  assert.deepEqual([...counts], [["laos", { posts: 4, comments: 17 }], ["rust", { posts: 0, comments: 3 }]]);
+  const p = calls[0].searchParams;
+  assert.equal(calls[0].pathname, "/api/users/interactions/subreddits");
+  assert.deepEqual([p.get("author"), p.get("limit"), p.get("weight_posts"), p.get("weight_comments"), p.get("after"), p.get("before")],
+    ["alice", "", String(W), "1", "5", "9"]);
+});
+
+test("interactionCounts rejects refused users and undecodable counts", async () => {
+  await assert.rejects(makeClient(notSupported).client.interactionCounts("AutoModerator"), Unsupported);
+  for (const count of [-5, 1.5]) {
+    const { client } = makeClient(() => json({ data: [{ subreddit: "x", count }] }));
+    await assert.rejects(client.interactionCounts("bot"), Unsupported);
+  }
+});
+
 test("buildProfile merges case-insensitively and fetches before counts", async () => {
-  const { client } = makeClient((u) => {
-    const kind = u.pathname.includes("/posts/") ? "posts" : "comments";
-    if (u.searchParams.has("subreddit")) {
-      assert.equal(u.searchParams.get("before"), String(POST.createdUtc));
-      return json({ data: kind === "posts" ? [{ key: "Python", count: "1" }] : [{ key: "Python", count: "4" }] });
-    }
-    return json({
-      data: kind === "posts"
-        ? [{ key: "Python", count: "2" }, { key: "rust", count: "1" }]
-        : [{ key: "python", count: "10" }, { key: "AskReddit", count: "5" }],
-    });
+  const { client, calls } = makeClient((u) => {
+    if (u.searchParams.has("subreddit")) assert.equal(u.searchParams.get("before"), String(POST.createdUtc));
+    return aggregates({
+      posts: [["Python", 2], ["rust", 1]],
+      comments: [["python", 10], ["AskReddit", 5]],
+      before: { posts: 1, comments: 4 },
+    })(u);
   });
   const p = await buildProfile(client, "alice", 3, POST);
+  assert.equal(calls.length, 4);
   assert.equal(p.targetPostsBefore, 1);
   assert.equal(p.targetCommentsBefore, 4);
   assert.deepEqual(Object.fromEntries(p.subreddits), {
@@ -186,9 +222,7 @@ test("buildProfile merges case-insensitively and fetches before counts", async (
 test("buildProfile skips before queries the lifetime counts rule out", async () => {
   const { client, calls } = makeClient((u) => {
     assert.ok(!u.searchParams.has("before"), "unexpected before query");
-    return u.pathname.includes("/posts/")
-      ? json({ data: [{ key: "rust", count: "4" }] })
-      : json({ data: [{ key: "python", count: "2" }, { key: "rust", count: "9" }] });
+    return aggregates({ posts: [["rust", 4]], comments: [["python", 2], ["rust", 9]] })(u);
   });
   const p = await buildProfile(client, "bob", 2, POST);
   assert.equal(calls.length, 2);
@@ -201,18 +235,39 @@ test("buildProfile skips before queries the lifetime counts rule out", async () 
 
 test("buildProfile skips the OP's posts-before query when their only post is this one", async () => {
   const { client, calls } = makeClient((u) => {
-    if (u.searchParams.has("before")) {
-      assert.ok(u.pathname.includes("/comments/"));
-      return json({ data: [{ key: "Python", count: "3" }] });
-    }
-    return u.pathname.includes("/posts/")
-      ? json({ data: [{ key: "Python", count: "1" }] })
-      : json({ data: [{ key: "Python", count: "5" }] });
+    if (u.searchParams.has("before")) assert.ok(u.pathname.includes("/comments/"));
+    return aggregates({ posts: [["Python", 1]], comments: [["Python", 5]], before: { posts: 0, comments: 3 } })(u);
   });
   const p = await buildProfile(client, "OP_User", 2, POST);
   assert.equal(calls.length, 3);
   assert.equal(p.targetPostsBefore, 0);
   assert.equal(p.targetCommentsBefore, 3);
+});
+
+test("timed-out lifetime aggregates fall back to one interactions query", async () => {
+  const { client, calls } = makeClient((u) => {
+    if (isInteractions(u)) return interactions([["Python", 2, 40], ["rust", 0, 7]]);
+    if (u.searchParams.has("subreddit")) return json({ data: [{ key: "Python", count: "30" }] });
+    return u.pathname.includes("/posts/") ? json({ data: [{ key: "Python", count: "2" }] }) : json({ error: "Query timed out" });
+  });
+  const p = await buildProfile(client, "busy", 1, POST);
+  assert.deepEqual(Object.fromEntries(p.subreddits), { Python: { posts: 2, comments: 40 }, rust: { posts: 0, comments: 7 } });
+  assert.equal(p.targetCommentsBefore, 30);
+  assert.equal(calls.filter(isInteractions).length, 1);
+  assert.ok(!calls.some((u) => u.searchParams.has("after")), "should not split into years");
+});
+
+test("when interactions can't answer either, only the timed-out kind is split into years", async () => {
+  const { client, calls } = makeClient((u) => {
+    if (isInteractions(u)) return notSupported();
+    if (u.pathname.includes("/posts/")) return json({ data: [{ key: "rust", count: "1" }] });
+    return u.searchParams.has("after") ? json({ data: [{ key: "rust", count: "1" }] }) : json({ error: "Query timed out" });
+  });
+  const p = await buildProfile(client, "busy", 1, POST);
+  const years = yearlyRanges(null, client._now()).length;
+  assert.equal(calls.filter((u) => u.pathname.includes("/posts/")).length, 1);
+  assert.equal(p.subreddits.get("rust").comments, years);
+  assert.equal(p.subreddits.get("rust").posts, 1);
 });
 
 test("concurrent requests are spaced by the delay", async () => {
@@ -313,11 +368,10 @@ test("parseSubreddits strips prefixes and dedupes", () => {
 });
 
 test("buildProfile with only keeps listed subreddits and adds empty ones", async () => {
-  const { client, calls } = makeClient((u) =>
-    u.pathname.includes("/posts/")
-      ? json({ data: [{ key: "rust", count: "4" }, { key: "funny", count: "1" }] })
-      : json({ data: [{ key: "python", count: "2" }, { key: "AskReddit", count: "9" }] }),
-  );
+  const { client, calls } = makeClient(aggregates({
+    posts: [["rust", 4], ["funny", 1]],
+    comments: [["python", 2], ["AskReddit", 9]],
+  }));
   const p = await buildProfile(client, "bob", 2, POST, { only: ["r/Rust", "golang"] });
   assert.equal(calls.length, 2);
   assert.deepEqual(Object.fromEntries(p.subreddits), {
@@ -341,7 +395,7 @@ test("buildProfile passes the history window to every query", async () => {
   const after = POST.createdUtc - 1000;
   const { client, calls } = makeClient((u) => {
     assert.equal(u.searchParams.get("after"), String(after));
-    return json({ data: [{ key: "Python", count: "9" }] });
+    return aggregates({ posts: [["Python", 9]], comments: [["Python", 9]], before: { posts: 9, comments: 9 } })(u);
   });
   const p = await buildProfile(client, "alice", 1, POST, { after });
   assert.equal(calls.length, 4);
@@ -349,7 +403,7 @@ test("buildProfile passes the history window to every query", async () => {
 });
 
 test("buildProfile skips before queries for a post older than the window", async () => {
-  const { client, calls } = makeClient(() => json({ data: [{ key: "Python", count: "9" }] }));
+  const { client, calls } = makeClient(aggregates({ posts: [["Python", 3]], comments: [["Python", 9]] }));
   const p = await buildProfile(client, "alice", 1, POST, { after: POST.createdUtc + 1 });
   assert.equal(calls.length, 2);
   assert.equal(p.targetPostsBefore + p.targetCommentsBefore, 0);
@@ -359,6 +413,115 @@ test("yearlyRanges starts at the window", () => {
   const after = Date.UTC(2020, 5, 1) / 1000;
   const ranges = yearlyRanges(Date.UTC(2022, 0, 1) / 1000, 0, after);
   assert.deepEqual(ranges, [[after, Date.UTC(2021, 0, 1) / 1000], [Date.UTC(2021, 0, 1) / 1000, Date.UTC(2022, 0, 1) / 1000]]);
+});
+
+const t1 = (id, author, replies = []) => ({
+  kind: "t1",
+  data: { id, author, created_utc: 1, replies: replies.length ? { kind: "Listing", data: { children: replies } } : "" },
+});
+
+test("collectCommenters reads the whole thread from one comment tree request", async () => {
+  const tree = [
+    t1("a", "alice", [t1("b", "bob", [t1("c", "alice")]), t1("d", "[deleted]")]),
+    t1("e", "carol"),
+    t1("a", "alice"), // duplicates are counted once
+  ];
+  const { client, calls } = makeClient(() => json({ data: tree }));
+  const counts = await collectCommenters(client, POST);
+  assert.deepEqual([...counts], [["alice", 2], ["bob", 1], ["carol", 1]]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].pathname, "/api/comments/tree");
+  assert.equal(calls[0].searchParams.get("link_id"), POST.id);
+});
+
+test("an incomplete or failed comment tree falls back to paging", async () => {
+  const page = [{ id: "x", author: "dave", created_utc: 5 }];
+  for (const treeResponse of [
+    () => json({ data: [t1("a", "alice"), { kind: "more", data: { children: ["q"] } }] }),
+    () => json({ data: [] }),
+    () => json({ error: "Query timed out" }),
+    () => json({ error: "Invalid parameter" }, 400),
+  ]) {
+    let pages = 0;
+    const { client, calls } = makeClient((u) =>
+      u.pathname === "/api/comments/tree" ? treeResponse() : json({ data: pages++ ? [] : page }),
+    );
+    assert.deepEqual([...(await collectCommenters(client, POST))], [["dave", 1]]);
+    assert.equal(calls[1].searchParams.get("limit"), "auto");
+    assert.equal(calls.length, 3); // tree, one page, one empty page
+  }
+});
+
+function makeCache(t = POST.createdUtc + 30 * 86400) {
+  const clock = { t };
+  return { cache: new ProfileCache({ backend: new MemoryBackend(), ttlDays: 7, now: () => clock.t }), clock };
+}
+
+test("a cached profile makes no requests", async () => {
+  const handler = aggregates({ posts: [["Python", 3]], comments: [["Python", 9], ["rust", 4]], before: { posts: 1, comments: 2 } });
+  const { cache } = makeCache();
+  const first = makeClient(handler);
+  const p1 = await buildProfile(first.client, "alice", 1, POST, { cache });
+  assert.equal(first.calls.length, 4);
+  assert.equal(p1.cached, false);
+
+  const second = makeClient(handler);
+  const p2 = await buildProfile(second.client, "Alice", 1, POST, { cache });
+  assert.equal(second.calls.length, 0);
+  assert.equal(p2.cached, true);
+  assert.deepEqual([p2.targetPostsBefore, p2.targetCommentsBefore], [1, 2]);
+  assert.deepEqual(Object.fromEntries(p2.subreddits), Object.fromEntries(p1.subreddits));
+
+  // A different history window is a different question.
+  const third = makeClient(handler);
+  await buildProfile(third.client, "alice", 1, POST, { cache, after: POST.createdUtc - 86400 * 400 });
+  assert.equal(third.calls.length, 4);
+});
+
+test("cached results expire", async () => {
+  const { cache, clock } = makeCache();
+  const handler = aggregates({ comments: [["rust", 4]] });
+  await buildProfile(makeClient(handler).client, "alice", 1, POST, { cache });
+  clock.t += 8 * 86400;
+  const again = makeClient(handler);
+  const p = await buildProfile(again.client, "alice", 1, POST, { cache });
+  assert.equal(again.calls.length, 2);
+  assert.equal(p.cached, false);
+});
+
+test("lifetime counts cached before the thread settled don't justify skipping", async () => {
+  // Saved an hour after the post: the thread's comments may be missing from the totals.
+  const { cache, clock } = makeCache(POST.createdUtc + 3600);
+  const handler = aggregates({ comments: [["Python", 2]], before: { posts: 0, comments: 2 } });
+  await buildProfile(makeClient(handler).client, "alice", 5, POST, { cache });
+  clock.t += 86400;
+  const later = makeClient(handler);
+  const p = await buildProfile(later.client, "alice", 5, POST, { cache });
+  assert.equal(later.calls.length, 2); // both before queries, nothing else
+  assert.ok(later.calls.every((u) => u.searchParams.has("before")));
+  assert.equal(p.targetCommentsBefore, 2);
+});
+
+test("partial lifetime counts from the only fallback aren't cached", async () => {
+  const { cache } = makeCache();
+  const handler = (u) => {
+    if (isInteractions(u)) return notSupported();
+    return u.searchParams.get("subreddit") ? json({ data: [] }) : json({ error: "Query timed out" });
+  };
+  await buildProfile(makeClient(handler).client, "busy", 1, POST, { cache, only: ["rust"] });
+  assert.equal(await cache.get("life|busy|all"), null);
+});
+
+test("ProfileCache is off with 0 days and clears", async () => {
+  const off = new ProfileCache({ ttlDays: 0 });
+  await off.set("k", 1);
+  assert.equal(await off.get("k"), null);
+  const on = new ProfileCache({ ttlDays: 1 });
+  await on.set("a", [1]);
+  await on.set("b", [2]);
+  assert.deepEqual((await on.get("a")).value, [1]);
+  assert.equal(await on.clear(), 2);
+  assert.equal(await on.get("a"), null);
 });
 
 test("toCsv matches the CLI layout", () => {

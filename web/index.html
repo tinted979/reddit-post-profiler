@@ -41,8 +41,10 @@
           <label>Hide subreddits with fewer than <input id="min-count" type="number" min="0" value="0"></label>
           <label>Seconds between requests <input id="delay" type="number" min="0.25" step="0.25" value="0.5"></label>
           <label>Users in parallel <input id="concurrency" type="number" min="1" max="5" value="3"></label>
+          <label>Reuse results for (days) <input id="cache-days" type="number" min="0" step="1" value="7"></label>
+          <div class="cache-actions"><button id="clear-cache" type="button">Clear saved results</button></div>
         </div>
-        <p class="hint">AutoModerator and deleted accounts are always skipped. Most commenters take 2 requests to the free Arctic Shift API (4 if they were active in the subreddit before the post). If the server asks us to slow down, every request pauses and the pace eases off automatically. "Only check subreddits" limits results to those subreddits (the post's own is always included); for very active users whose full history times out, it also means one small query per listed subreddit instead of dozens of yearly ones.</p>
+        <p class="hint">AutoModerator and deleted accounts are always skipped. Most commenters take 2 requests to the free Arctic Shift API (up to 4 if they were active in the subreddit before the post), and none if they were looked up recently: results are saved in this browser and reused for the number of days you set (0 turns this off). If the server asks us to slow down, every request pauses and the pace eases off automatically. "Only check subreddits" limits results to those subreddits (the post's own is always included); for very active users whose full history times out, it also means one small query per listed subreddit instead of dozens of yearly ones.</p>
       </details>
     </form>
 

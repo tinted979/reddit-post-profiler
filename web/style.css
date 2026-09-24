@@ -83,6 +83,7 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .grid label { display: flex; flex-direction: column; gap: 4px; font-size: .9rem; color: var(--muted); }
 .grid label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+.cache-actions { display: flex; align-items: flex-end; }
 .hint { font-size: .85rem; color: var(--muted); margin: 10px 0 0; }
 
 .error { background: var(--error-soft); color: var(--error); padding: 10px 12px; border-radius: 8px; margin-top: 16px; }
@@ -125,6 +126,7 @@ button:disabled { opacity: .55; cursor: default; }
 .pill.new { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .pill.regular { background: var(--good-soft); color: var(--good); font-weight: 600; }
 .pill.err { background: var(--error-soft); color: var(--error); }
+.pill.cached { border: 1px dashed var(--border); background: transparent; }
 .top { grid-column: 1 / -1; font-size: .85rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .subs { width: 100%; border-collapse: collapse; font-size: .9rem; font-variant-numeric: tabular-nums; }

@@ -9,6 +9,7 @@ import {
   sortedSubreddits,
   toCsv,
 } from "./core.js";
+import { openCache } from "./cache.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -40,7 +41,13 @@ function readOptions() {
     maxUsers: Number.isFinite(maxUsers) && maxUsers > 0 ? maxUsers : null,
     delay: Math.max(0.25, parseFloat($("delay").value) || 0.5),
     concurrency: Math.min(5, Math.max(1, parseInt($("concurrency").value, 10) || 3)),
+    cacheDays: cacheDays(),
   };
+}
+
+function cacheDays() {
+  const n = parseFloat($("cache-days").value);
+  return Number.isFinite(n) && n >= 0 ? n : 7;
 }
 
 function minCount() {
@@ -87,6 +94,9 @@ function userCard(profile, post) {
   const before = profile.targetPostsBefore + profile.targetCommentsBefore;
   const pills = el("div", { class: "stats" });
   pills.append(el("span", { class: "pill" }, `${profile.threadComments} in thread`));
+  if (profile.cached) {
+    pills.append(el("span", { class: "pill cached", title: "Reused from an earlier scan" }, "cached"));
+  }
   if (profile.error) {
     pills.append(el("span", { class: "pill err", title: profile.error }, "lookup failed"));
   } else {
@@ -174,6 +184,7 @@ function shareUrl() {
   if (minCount()) url.searchParams.set("min", String(minCount()));
   if (opts.delay !== 0.5) url.searchParams.set("delay", String(opts.delay));
   if (opts.concurrency !== 3) url.searchParams.set("par", String(opts.concurrency));
+  if (opts.cacheDays !== 7) url.searchParams.set("cache", String(opts.cacheDays));
   return url.toString();
 }
 
@@ -205,6 +216,7 @@ async function run() {
     ? ` (counting activity since ${new Date(after * 1000).toLocaleDateString(undefined, { dateStyle: "medium" })})`
     : "";
 
+  const cache = openCache(opts.cacheDays);
   const client = new ArcticShiftClient({
     delay: opts.delay,
     signal: state.controller.signal,
@@ -242,8 +254,11 @@ async function run() {
     const slots = [];
     let done = 0;
     let inFlight = 0;
+    let fromCache = 0;
     const progress = () => {
-      current = `Profiled ${done} of ${ranked.length}` + (inFlight ? ` (${inFlight} in progress)` : "");
+      current = `Profiled ${done} of ${ranked.length}` +
+        (fromCache ? `, ${fromCache} from cache` : "") +
+        (inFlight ? ` (${inFlight} in progress)` : "");
       setStatus(current, done / ranked.length);
     };
     progress();
@@ -252,7 +267,7 @@ async function run() {
       progress();
       let profile;
       try {
-        profile = await buildProfile(client, username, n, post, { only: opts.only, after });
+        profile = await buildProfile(client, username, n, post, { only: opts.only, after, cache });
       } catch (err) {
         if (err instanceof Aborted) throw err;
         profile = {
@@ -263,6 +278,7 @@ async function run() {
         inFlight--;
       }
       profile.rank = i;
+      if (profile.cached) fromCache++;
       slots[i] = profile;
       state.profiles = slots.filter(Boolean);
       done++;
@@ -271,7 +287,8 @@ async function run() {
       applyFilter();
     }, state.controller.signal);
     const failed = state.profiles.filter((p) => p.error).length;
-    setStatus(`Done: profiled ${state.profiles.length} users${failed ? ` (${failed} failed)` : ""}.`, 1);
+    const notes = [fromCache && `${fromCache} from cache`, failed && `${failed} failed`].filter(Boolean);
+    setStatus(`Done: profiled ${state.profiles.length} users${notes.length ? ` (${notes.join(", ")})` : ""}.`, 1);
   } catch (err) {
     if (err instanceof Aborted) {
       setStatus(`Stopped after ${state.profiles.length} users.`);
@@ -295,6 +312,12 @@ function downloadCsv() {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+async function clearCache() {
+  const n = await openCache(0).clear();
+  $("clear-cache").textContent = `Cleared ${n} saved ${n === 1 ? "result" : "results"}`;
+  setTimeout(() => ($("clear-cache").textContent = "Clear saved results"), 2000);
+}
+
 async function copyLink() {
   const url = shareUrl();
   try {
@@ -316,6 +339,7 @@ function init() {
   $("min-count").addEventListener("change", () => state.post && renderUsers());
   $("download").addEventListener("click", downloadCsv);
   $("share").addEventListener("click", copyLink);
+  $("clear-cache").addEventListener("click", clearCache);
 
   // Pre-fill from a shared link and start straight away.
   const params = new URLSearchParams(window.location.search);
@@ -327,7 +351,8 @@ function init() {
   if (params.get("min")) $("min-count").value = params.get("min");
   if (params.get("delay")) $("delay").value = params.get("delay");
   if (params.get("par")) $("concurrency").value = params.get("par");
-  if (["exclude", "subs", "years", "max", "min", "op", "delay", "par"].some((k) => params.has(k))) {
+  if (params.get("cache")) $("cache-days").value = params.get("cache");
+  if (["exclude", "subs", "years", "max", "min", "op", "delay", "par", "cache"].some((k) => params.has(k))) {
     $("options").open = true;
   }
   if (params.get("post")) {
