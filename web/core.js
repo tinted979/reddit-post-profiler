@@ -520,7 +520,7 @@ export function parseUsernames(names) {
   for (const raw of names) {
     const name = String(raw)
       .trim()
-      .replace(/^(?:https?:\/\/)?(?:[\w-]+\.)*reddit\.com/i, "")
+      .replace(/^(?:https?:\/\/)?(?:[\w-]+\.)*reddit\.com(?=\/|$)/i, "")
       .replace(/^\/?u(?:ser)?\//i, "")
       .replace(/\/.*$/, "");
     if (/^[\w-]+$/.test(name) && !seen.has(name.toLowerCase())) {

@@ -1148,7 +1148,17 @@ test("ScanStore saves a scan's two records together, and export counts scans it 
 
 test("parseUsernames strips u/ prefixes and profile links, and drops repeats and junk", () => {
   assert.deepEqual(
-    parseUsernames(["u/Alice", "/u/bob_2", "https://www.reddit.com/user/Carol-X/", "abcdefghijklmnopqrstu", "alice", " ", "not a name!", "dave"]),
+    parseUsernames([
+      "u/Alice",
+      "/u/bob_2",
+      "https://www.reddit.com/user/Carol-X/",
+      "abcdefghijklmnopqrstu",
+      "https://reddit.com.evil.com/user/alice",
+      "alice",
+      " ",
+      "not a name!",
+      "dave",
+    ]),
     ["Alice", "bob_2", "Carol-X", "abcdefghijklmnopqrstu", "dave"],
   );
 });
