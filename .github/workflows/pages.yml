@@ -49,6 +49,13 @@ jobs:
           for f in $(grep -ho 'from "\./[^"]*"' _site/*.js | sed 's/from "\.\/\(.*\)"/\1/' | sort -u); do
             test -f "_site/$f" || { echo "missing from site: $f"; exit 1; }
           done
+          # Pages lets browsers cache each file for 10 minutes, so after a deploy a browser
+          # could mix new and old modules. Tag every local import, script and stylesheet
+          # with the commit so one page load always gets one version.
+          v="${GITHUB_SHA::8}"
+          sed -i -E "s#(from \"\./[^\"?]+\.js)\"#\1?v=$v\"#g" _site/*.js
+          sed -i -E "s#(src=\"app\.js|href=\"style\.css)\"#\1?v=$v\"#g" _site/index.html
+          grep -q "app.js?v=$v" _site/index.html || { echo "cache-busting failed"; exit 1; }
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:

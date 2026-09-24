@@ -182,7 +182,8 @@ from `file://`), e.g. `python3 -m http.server -d web`, and open http://localhost
 
 `.github/workflows/pages.yml` runs both test suites on every push and pull request. On the
 default branch it then publishes the page files at the top of `web/` (`*.html`, `*.js`,
-`*.css`) to GitHub Pages, failing if a module imports a file that isn't among them; any
+`*.css`) to GitHub Pages, failing if a module imports a file that isn't among them, and tags each script and stylesheet
+with the commit so browsers don't mix cached versions; any
 other kind of file the page needs must be added to its copy step. One-time setup: in the
 repo's **Settings → Pages**, set *Source* to **GitHub Actions**. On a free GitHub plan,
 Pages only works for public repositories.

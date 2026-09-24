@@ -30,7 +30,7 @@ There is no linter or formatter configured.
 
 ## Deployment
 
-`.github/workflows/pages.yml` runs both test suites on every push and PR. On the default branch it copies `web/*.html web/*.js web/*.css` into the site and publishes it to Pages. It fails if a module imports a file that wasn't copied, so a new file of another type (such as images or JSON) must be added to that copy step.
+`.github/workflows/pages.yml` runs both test suites on every push and PR. On the default branch it copies `web/*.html web/*.js web/*.css` into the site and publishes it to Pages. It fails if a module imports a file that wasn't copied, so a new file of another type (such as images or JSON) must be added to that copy step. It also tags local imports, `app.js` and `style.css` with `?v=<commit>`, so browsers never mix cached old and new modules. Keep imports in the form `from "./x.js"` for that rewrite.
 
 The working branch is also the repo's default branch, so **every push deploys**. After pushing, check that the live `https://tinted979.github.io/reddit-tool/*.js` serves the new code.
 
