@@ -1,2 +1,4 @@
 *_activity.csv
 node_modules/
+dumps/
+__pycache__/

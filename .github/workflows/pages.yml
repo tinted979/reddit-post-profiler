@@ -19,6 +19,13 @@ jobs:
       - name: Web tests
         working-directory: web
         run: npm test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dump build script tests
+        run: |
+          python -m pip install --quiet "duckdb>=1.1" pytest
+          python -m pytest tools -q
 
   deploy:
     # Publish only from the default branch, after the tests pass.
