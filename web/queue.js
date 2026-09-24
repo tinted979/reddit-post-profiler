@@ -13,6 +13,8 @@ export const MAX_WAITING = 25;
 
 // Statuses: waiting → running → done | failed | stopped.
 const FINISHED = new Set(["done", "failed", "stopped"]);
+// Items that count against MAX_WAITING, and that a post can't be queued twice among.
+const isPending = (item) => item.status === "waiting" || item.status === "running";
 
 function browserStorage() {
   try {
@@ -89,7 +91,7 @@ export class LinkQueue {
   // MAX_WAITING are returned in `full`.
   add(text, opts) {
     const result = { added: 0, duplicates: 0, invalid: [], full: [] };
-    let pending = this.items.filter((i) => i.status === "waiting" || i.status === "running").length;
+    let pending = this.items.filter(isPending).length;
     for (const ref of splitRefs(text)) {
       let postId;
       try {
@@ -98,7 +100,7 @@ export class LinkQueue {
         result.invalid.push(ref);
         continue;
       }
-      if (this.items.some((i) => i.postId === postId && (i.status === "waiting" || i.status === "running"))) {
+      if (this.items.some((i) => i.postId === postId && isPending(i))) {
         result.duplicates++;
         continue;
       }
@@ -137,7 +139,7 @@ export class LinkQueue {
   retry(id) {
     const item = this.get(id);
     if (!item || !FINISHED.has(item.status)) return null;
-    const pending = this.items.filter((i) => i.status === "waiting" || i.status === "running");
+    const pending = this.items.filter(isPending);
     if (pending.some((i) => i.postId === item.postId)) return "duplicate";
     if (pending.length >= MAX_WAITING) return "full";
     this.items = this.items.filter((i) => i !== item);

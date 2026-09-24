@@ -26,6 +26,14 @@ const CACHE_VERSION = "v1";
 const BEFORE_VERSION = "v2";
 // Timestamps fetched per kind for the "before" timeline (the search endpoint's maximum).
 const TIMELINE_LIMIT = 100;
+// Pacing a scan starts with, and the range the page accepts. The server tops out at about
+// 0.8 requests/s whatever the settings, so going faster only brings more "slow down"
+// replies (see SECONDS_PER_REQUEST).
+export const SCAN_DEFAULTS = Object.freeze({ delay: 0.75, concurrency: 2 });
+export const SCAN_LIMITS = Object.freeze({
+  delay: Object.freeze({ min: 0.25, max: 30 }),
+  concurrency: Object.freeze({ min: 1, max: 5 }),
+});
 
 export class ArcticShiftError extends Error {
   // `status` is the HTTP status, or null when the request never got a response.
@@ -74,16 +82,23 @@ export function parsePostRef(ref) {
   );
 }
 
-// Resolves after `seconds`, or as soon as `signal` aborts.
-function wait(seconds, signal) {
+// A timer: calls `done` after `ms` and returns a function that cancels it.
+const plainTimer = (ms, done) => {
+  const t = setTimeout(done, ms);
+  return () => clearTimeout(t);
+};
+
+// Resolves after `seconds`, or as soon as `signal` aborts. `timer` can be swapped for one
+// that a hidden tab doesn't throttle (see backgroundSleep in app.js).
+export function wait(seconds, signal = null, timer = plainTimer) {
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve();
     const done = () => {
-      clearTimeout(timer);
+      cancel();
       signal?.removeEventListener("abort", done);
       resolve();
     };
-    const timer = setTimeout(done, seconds * 1000);
+    const cancel = timer(seconds * 1000, done);
     signal?.addEventListener("abort", done);
   });
 }
@@ -93,8 +108,8 @@ const monotonicNow = () => (performance.timeOrigin + performance.now()) / 1000;
 
 export class ArcticShiftClient {
   constructor({
-    delay = 2.0,
-    maxInFlight = 3,
+    delay = SCAN_DEFAULTS.delay,
+    maxInFlight = SCAN_DEFAULTS.concurrency,
     maxRetries = 4,
     maxRateLimitWaits = 10,
     baseUrl = BASE_URL,
@@ -640,6 +655,8 @@ async function beforeFacts(client, username, post, { after, needPosts, needComme
   };
 }
 
+// A non-negative number. (Number.isFinite, unlike isFinite, rejects strings and other
+// non-numbers.)
 const isCount = (n) => Number.isFinite(n) && n >= 0;
 // [[subreddit, posts, comments], …]
 const isRows = (v) =>
@@ -685,7 +702,7 @@ const SECONDS_PER_REQUEST_PARALLEL = 1.3;
 
 // A rough cost for profiling `usernames` before starting: {users, saved, requests,
 // seconds}. `saved` counts users whose lifetime totals are saved (and still fresh).
-export async function estimateScan(cache, usernames, { after = null, delay = 0.75, concurrency = 2 } = {}) {
+export async function estimateScan(cache, usernames, { after = null, delay = SCAN_DEFAULTS.delay, concurrency = SCAN_DEFAULTS.concurrency } = {}) {
   const bucket = windowBucket(after);
   let saved = 0;
   // In batches, so a big thread doesn't open thousands of storage reads at once.
@@ -700,14 +717,10 @@ export async function estimateScan(cache, usernames, { after = null, delay = 0.7
   return { users: usernames.length, saved, requests, seconds };
 }
 
-// Build a user's profile. `threadComments` is their comment count in the thread and
-// `lastCommentUtc` when they made the newest one (null if unknown). With `only`, the
-// profile lists just those subreddits (plus the post's own), including ones with no
-// activity so the answer is explicit. With `after` (epoch seconds), only activity from
-// then on is counted, "before the post" included. With `cache` ({get(key) -> {value,
-// fetchedAt} | null, set(key, value)}), earlier results are reused and new ones saved.
-export async function buildProfile(client, username, threadComments, post, { only = null, after = null, lastCommentUtc = null, cache = null } = {}) {
-  const profile = {
+// A profile with no activity found yet: what buildProfile starts from, and (with `error`
+// set) what the page shows for a user whose lookup failed.
+export function emptyProfile(username, threadComments) {
+  return {
     username,
     threadComments,
     targetPostsBefore: 0,
@@ -721,6 +734,16 @@ export async function buildProfile(client, username, threadComments, post, { onl
     error: null,
     cached: false,
   };
+}
+
+// Build a user's profile. `threadComments` is their comment count in the thread and
+// `lastCommentUtc` when they made the newest one (null if unknown). With `only`, the
+// profile lists just those subreddits (plus the post's own), including ones with no
+// activity so the answer is explicit. With `after` (epoch seconds), only activity from
+// then on is counted, "before the post" included. With `cache` ({get(key) -> {value,
+// fetchedAt} | null, set(key, value)}), earlier results are reused and new ones saved.
+export async function buildProfile(client, username, threadComments, post, { only = null, after = null, lastCommentUtc = null, cache = null } = {}) {
+  const profile = emptyProfile(username, threadComments);
   const user = username.toLowerCase();
   const bucket = windowBucket(after);
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
@@ -927,8 +950,8 @@ export const DEFAULT_BADGES = Object.freeze({
   occasional: Object.freeze({ count: 3, days: 2, tenure: 14 }),
   regular: Object.freeze({ count: 20, days: 8, tenure: 90 }),
 });
-const BADGE_TIERS = ["occasional", "regular"];
-const BADGE_FIELDS = ["count", "days", "tenure"];
+export const BADGE_TIERS = Object.freeze(["occasional", "regular"]);
+export const BADGE_FIELDS = Object.freeze(["count", "days", "tenure"]);
 
 // The facts a badge is decided on. days: null if unknown; exact: false if days is only a
 // lower bound; tenureDays: null if unknown or there's no activity.
@@ -1047,7 +1070,7 @@ export function arcticSearchUrl(kind, author, subreddit, after = null) {
   if (after !== null) q.set("after", String(after));
   q.set("limit", "100");
   q.set("sort", "desc");
-  return `https://arctic-shift.photon-reddit.com/search?${q}`;
+  return `${BASE_URL}/search?${q}`;
 }
 
 export const CSV_COLUMNS = [
@@ -1118,24 +1141,22 @@ export function exportScans(scans, now = Date.now() / 1000) {
   return JSON.stringify({ kind: EXPORT_KIND, version: EXPORT_VERSION, exportedAt: Math.floor(now), scans });
 }
 
-const isNum = (n) => typeof n === "number" && Number.isFinite(n);
 // Epoch seconds a Date can hold and format (up to the year 5138).
-const isEpoch = (n) => isNum(n) && n >= 0 && n < 1e11;
-const isCountNum = (n) => isNum(n) && n >= 0;
+const isEpoch = (n) => isCount(n) && n < 1e11;
 const isName = (s, max = 64) => typeof s === "string" && /^[\w-]+$/.test(s) && s.length <= max;
 const orNull = (v, ok) => (v === null || v === undefined ? null : ok(v) ? v : undefined);
 
 // One profile from an imported file, in serializeProfile form, or null if it doesn't look
 // like one. Only the fields the page uses are kept.
 function importProfile(d, index) {
-  if (!d || typeof d !== "object" || !isName(d.username, 40) || !isCountNum(d.threadComments)) return null;
-  if (!isCountNum(d.targetPostsBefore) || !isCountNum(d.targetCommentsBefore)) return null;
+  if (!d || typeof d !== "object" || !isName(d.username, 40) || !isCount(d.threadComments)) return null;
+  if (!isCount(d.targetPostsBefore) || !isCount(d.targetCommentsBefore)) return null;
   const first = orNull(d.targetFirstBefore, isEpoch);
-  const days = orNull(d.targetDaysBefore, isCountNum);
+  const days = orNull(d.targetDaysBefore, isCount);
   if (first === undefined || days === undefined || !Array.isArray(d.subreddits)) return null;
   const subreddits = [];
   for (const row of d.subreddits) {
-    if (!Array.isArray(row) || !isName(row[0]) || !isCountNum(row[1]) || !isCountNum(row[2])) return null;
+    if (!Array.isArray(row) || !isName(row[0]) || !isCount(row[1]) || !isCount(row[2])) return null;
     subreddits.push([row[0], row[1], row[2]]);
   }
   const text = (v) => (typeof v === "string" ? v.slice(0, 500) : null);
@@ -1173,7 +1194,7 @@ export function importScan(rec) {
     subreddit: p.subreddit,
     createdUtc: Math.trunc(p.createdUtc),
     title: typeof p.title === "string" ? p.title.slice(0, 500) : "",
-    numComments: isCountNum(p.numComments) ? p.numComments : 0,
+    numComments: isCount(p.numComments) ? p.numComments : 0,
   };
   const after = isEpoch(s.after) ? s.after : null;
   const beforeKnown = after === null || post.createdUtc > after;
@@ -1183,7 +1204,7 @@ export function importScan(rec) {
   // "u/" prefixes keep those names.
   const list = (v, parse) => (Array.isArray(v) ? parse(v.filter((x) => typeof x === "string")) : []);
   const years = [1, 5, 10].includes(o.years) ? o.years : null;
-  const thread = s.thread && isCountNum(s.thread.comments) && isCountNum(s.thread.people)
+  const thread = s.thread && isCount(s.thread.comments) && isCount(s.thread.people)
     ? { comments: s.thread.comments, people: s.thread.people }
     : null;
   const summary = {
@@ -1191,12 +1212,12 @@ export function importScan(rec) {
     post,
     scannedAt: s.scannedAt,
     complete: s.complete !== false,
-    total: isCountNum(s.total) && s.total >= profiles.length ? s.total : profiles.length,
+    total: isCount(s.total) && s.total >= profiles.length ? s.total : profiles.length,
     thread,
-    requests: isCountNum(s.requests) ? s.requests : 0,
-    seconds: isCountNum(s.seconds) ? s.seconds : 0,
-    profilingSeconds: isCountNum(s.profilingSeconds) ? s.profilingSeconds : null,
-    fromSaved: isCountNum(s.fromSaved) ? s.fromSaved : 0,
+    requests: isCount(s.requests) ? s.requests : 0,
+    seconds: isCount(s.seconds) ? s.seconds : 0,
+    profilingSeconds: isCount(s.profilingSeconds) ? s.profilingSeconds : null,
+    fromSaved: isCount(s.fromSaved) ? s.fromSaved : 0,
     after,
     beforeKnown,
     opts: {

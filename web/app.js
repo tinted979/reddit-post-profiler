@@ -6,6 +6,8 @@ import {
   Aborted,
   ArcticShiftClient,
   ArcticShiftError,
+  BADGE_FIELDS,
+  BADGE_TIERS,
   Eta,
   QueryTimeout,
   ServerBusy,
@@ -21,6 +23,7 @@ import {
   arcticSearchUrl,
   collectCommenters,
   deserializeProfile,
+  emptyProfile,
   estimateScan,
   exportScans,
   parseScanExport,
@@ -29,17 +32,20 @@ import {
   parsePostRef,
   parseSubreddits,
   parseUsernames,
+  SCAN_DEFAULTS,
+  SCAN_LIMITS,
   scanStats,
   serializeProfile,
   sortedSubreddits,
   toCsv,
+  wait,
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
 import { LinkQueue, MAX_WAITING, QUEUE_KEY } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
 const TITLE = document.title;
-const DEFAULTS = { delay: 0.75, concurrency: 2, cacheDays: 7 };
+const DEFAULTS = { ...SCAN_DEFAULTS, cacheDays: 7 };
 // Most users profiled in parallel by a queued scan, which runs unattended.
 const QUEUE_CONCURRENCY = 2;
 
@@ -87,14 +93,15 @@ function readOptions() {
   const delay = num("delay");
   const concurrency = Math.round(num("concurrency"));
   const cacheDays = num("cache-days");
+  const clamp = (n, { min, max }) => Math.min(max, Math.max(min, n));
   return {
     includeOp: $("include-op").checked,
     exclude: parseUsernames($("exclude").value.split(/[\s,]+/)),
     only: parseSubreddits($("only-subs").value.split(/[\s,]+/)),
     years: [1, 5, 10].includes(years) ? years : null,
     maxUsers: maxUsers > 0 ? maxUsers : null,
-    delay: Number.isFinite(delay) ? Math.min(30, Math.max(0.25, delay)) : DEFAULTS.delay,
-    concurrency: Number.isFinite(concurrency) ? Math.min(5, Math.max(1, concurrency)) : DEFAULTS.concurrency,
+    delay: Number.isFinite(delay) ? clamp(delay, SCAN_LIMITS.delay) : DEFAULTS.delay,
+    concurrency: Number.isFinite(concurrency) ? clamp(concurrency, SCAN_LIMITS.concurrency) : DEFAULTS.concurrency,
     cacheDays: cacheDays >= 0 ? cacheDays : DEFAULTS.cacheDays,
   };
 }
@@ -152,8 +159,8 @@ function storedBadges() {
 }
 
 function showBadges() {
-  for (const tier of ["occasional", "regular"]) {
-    for (const field of ["count", "days", "tenure"]) $(`badge-${tier}-${field}`).value = badges[tier][field];
+  for (const tier of BADGE_TIERS) {
+    for (const field of BADGE_FIELDS) $(`badge-${tier}-${field}`).value = badges[tier][field];
   }
   renderBadgeLegend();
 }
@@ -176,8 +183,8 @@ function renderBadgeLegend() {
 // Read the inputs; a blank or invalid one keeps its current value.
 function readBadges() {
   const rules = { occasional: { ...badges.occasional }, regular: { ...badges.regular } };
-  for (const tier of ["occasional", "regular"]) {
-    for (const field of ["count", "days", "tenure"]) {
+  for (const tier of BADGE_TIERS) {
+    for (const field of BADGE_FIELDS) {
       const n = Math.floor(Number.parseFloat($(`badge-${tier}-${field}`).value));
       if (Number.isFinite(n) && n >= 0) rules[tier][field] = Math.min(n, 99999);
     }
@@ -787,10 +794,7 @@ async function run({ fromQueue = false } = {}) {
         if (err instanceof Aborted) throw err;
         failed++;
         firstError ??= err;
-        profile = {
-          username, threadComments: count, targetPostsBefore: 0, targetCommentsBefore: 0,
-          subreddits: new Map(), error: explain(err), errorDetail: err.message,
-        };
+        profile = { ...emptyProfile(username, count), error: explain(err), errorDetail: err.message };
       } finally {
         inFlight--;
       }
@@ -882,24 +886,10 @@ const workerTimer = (() => {
   return timer;
 })();
 
-// Like core.js's wait(): resolves after `seconds`, or at once when `signal` aborts.
+// core.js's wait() on the worker's timer once it's ready: resolves after `seconds`, or at
+// once when `signal` aborts.
 function backgroundSleep(seconds, signal = null) {
-  return new Promise((resolve) => {
-    if (signal?.aborted) return resolve();
-    let cancel;
-    const done = () => {
-      cancel();
-      signal?.removeEventListener("abort", done);
-      resolve();
-    };
-    if (workerTimer.ready) {
-      cancel = workerTimer.start(seconds * 1000, done);
-    } else {
-      const t = setTimeout(done, seconds * 1000);
-      cancel = () => clearTimeout(t);
-    }
-    signal?.addEventListener("abort", done);
-  });
+  return wait(seconds, signal, workerTimer.ready ? workerTimer.start : undefined);
 }
 
 // ---- Scheduler ----
@@ -1185,14 +1175,8 @@ function savedNote(text) {
 async function exportSaved() {
   const { scans, failed } = await openScans().exportAll();
   if (!scans.length) return savedNote(failed ? "The saved scans couldn't be read, so nothing was exported." : "Nothing to export.");
-  const a = el("a", {
-    href: URL.createObjectURL(new Blob([exportScans(scans)], { type: "application/json" })),
-    download: `rpp-saved-scans-${new Date().toISOString().slice(0, 10)}.json`,
-  });
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  offerDownload(new Blob([exportScans(scans)], { type: "application/json" }),
+    `rpp-saved-scans-${new Date().toISOString().slice(0, 10)}.json`);
   savedNote(`Exported ${plural(scans.length, "scan")}.` +
     (failed ? ` ${plural(failed, "scan")} couldn't be read and ${failed === 1 ? "isn't" : "aren't"} in the file.` : ""));
 }
@@ -1426,10 +1410,12 @@ function downloadCsv() {
   if (!state.post) return;
   const partial = state.controller !== null;
   const csv = toCsv(state.slots.filter(Boolean), state.post, minCount(), { rules: badges, beforeKnown: state.beforeKnown });
-  const a = el("a", {
-    href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })),
-    download: `${state.post.id}_activity${partial ? "_partial" : ""}.csv`,
-  });
+  offerDownload(new Blob([csv], { type: "text/csv" }), `${state.post.id}_activity${partial ? "_partial" : ""}.csv`);
+}
+
+// Save `blob` as a file named `filename`.
+function offerDownload(blob, filename) {
+  const a = el("a", { href: URL.createObjectURL(blob), download: filename });
   document.body.append(a);
   a.click();
   a.remove();

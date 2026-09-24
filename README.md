@@ -213,7 +213,7 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    for the timestamps themselves, which gives the count, the days active and the first
    date in one small request (the `created_utc` aggregate would be cheaper, but it
    currently answers all zeros). Past 100 items it adds the aggregate for the exact count
-   and one more search for the first date. These run in parallel, and it and skips a
+   and one more search for the first date. These run in parallel, and it skips a
    "before" query when the lifetime counts leave no room for one, e.g. when all of a
    user's comments in the subreddit are in this thread.
 
