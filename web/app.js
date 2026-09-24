@@ -394,7 +394,7 @@ const TIER_LABELS = { new: "new here", occasional: "occasional", regular: "regul
 // ", on 12 different days, the first 5 months before" (or why there's no timeline).
 function timelineText(f) {
   if (f.days === null) return " (no timeline saved, so the badge goes by the count alone)";
-  let text = `, on ${f.exact ? "" : "at least "}${plural(f.days, "different day")}`;
+  let text = `, on ${f.exact ? "" : "at least "}${f.days === 1 ? "1 day" : `${f.days} different days`}`;
   if (f.tenureDays !== null) text += `, the first ${formatAge(f.tenureDays)} before`;
   return text;
 }
