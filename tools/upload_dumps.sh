@@ -61,6 +61,9 @@ check() { echo "  $*" >&2; problems=$((problems + 1)); }
 headers=$(curl -s -D - -o /dev/null -H "Origin: $ORIGIN" "$PUBLIC/manifest.json?check=$(date +%s)")
 grep -q "^HTTP/[0-9.]* 200" <<< "$headers" || check "manifest.json: not 200: $(head -1 <<< "$headers")"
 grep -qi "^access-control-allow-origin: $ORIGIN" <<< "$headers" || check "manifest.json: no CORS header for $ORIGIN"
+# ...and not from anywhere else (CORS widened to "*" or another origin by mistake).
+headers=$(curl -s -D - -o /dev/null -H "Origin: https://example.com" "$PUBLIC/manifest.json?check=$(date +%s)")
+grep -qi "^access-control-allow-origin:" <<< "$headers" && check "manifest.json: CORS allows https://example.com"
 
 # Each Parquet file: a byte range comes back as a range (206, Content-Range with the
 # full size), uncompressed, with CORS; a second request should be a cache hit.
