@@ -613,11 +613,6 @@ function mergeKinds(parts) {
 
 // Posts and comments in the post's subreddit before it was made, within the window, and
 // when: `first` (earliest, epoch seconds) and `days` (distinct UTC days with activity).
-// Only the kinds the lifetime totals don't already rule out are queried. Usually one
-// timestamp search per kind answers everything; past TIMELINE_LIMIT items the exact count
-// and the first date take a query each, and `days` is a lower bound (complete: false).
-// Posts and comments in the post's subreddit before it was made, within the window, and
-// when: `first` (earliest, epoch seconds) and `days` (distinct UTC days with activity).
 // Only the kinds the lifetime totals don't already rule out are asked about.
 //
 // With `dumps` covering the subreddit, a kind's items come from its archive file up to
