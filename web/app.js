@@ -23,6 +23,7 @@ import {
   toCsv,
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
+import { LinkQueue } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
 const TITLE = document.title;
@@ -202,7 +203,8 @@ function setProgress(fraction) {
   const pct = Math.round(fraction * 100);
   $("bar-fill").style.width = `${pct}%`;
   $("bar").setAttribute("aria-valuenow", String(pct));
-  document.title = state.controller ? `(${pct}%) ${TITLE}` : TITLE;
+  const queued = queue.counts().waiting;
+  document.title = state.controller ? `(${pct}%${queued ? `, ${queued} queued` : ""}) ${TITLE}` : TITLE;
 }
 
 // Screen readers hear these (milestones only, not every progress tick).
@@ -236,6 +238,7 @@ function setRunning(running) {
   $("post").readOnly = running;
   $("option-fields").disabled = running;
   for (const b of $("saved-list").querySelectorAll("button")) b.disabled = running;
+  renderQueue();
   $("stop").hidden = !running;
   $("stop").disabled = false;
   $("stop").textContent = "Stop";
@@ -441,8 +444,11 @@ function renderUsers() {
 
 // ---- A run ----
 
-async function run() {
-  if (state.controller) return;
+// Scan the post in the box with the options in the form. Resolves with how it ended:
+// {kind: "done" | "empty" | "stopped" | "failed" | "invalid" | "offline" | "busy",
+//  message, post, profiled, total, failed}.
+async function run({ fromQueue = false } = {}) {
+  if (state.controller) return { kind: "busy", message: "A scan is already running." };
   const opts = readOptions();
   showOptions(opts);
   showError("");
@@ -454,14 +460,16 @@ async function run() {
     showError(err.message);
     $("post").setAttribute("aria-invalid", "true");
     $("post").setAttribute("aria-describedby", "error");
-    $("post").focus();
-    return;
+    if (!queueRunning()) $("post").focus();
+    return { kind: "invalid", message: err.message };
   }
   if (navigator.onLine === false) {
-    showError("You're offline. Connect to the internet and try again.");
-    return;
+    const message = "You're offline. Connect to the internet and try again.";
+    showError(message);
+    return { kind: "offline", message };
   }
-  history.replaceState(null, "", shareUrl(postId, opts));
+  // A queued scan leaves the address alone: reloading would start it again outside the queue.
+  if (!fromQueue) history.replaceState(null, "", shareUrl(postId, opts));
 
   // Start of the history window, in epoch seconds (null = all time).
   const after = opts.years ? Math.floor(Date.now() / 1000 - opts.years * 365.25 * 86400) : null;
@@ -479,6 +487,7 @@ async function run() {
 
   const cache = openCache(opts.cacheDays);
   const client = new ArcticShiftClient({
+    sleep: backgroundSleep,
     delay: opts.delay,
     maxInFlight: opts.concurrency,
     signal: controller.signal,
@@ -486,8 +495,17 @@ async function run() {
     onPause: (until) => runId === state.runId && status.eta?.pause(until),
   });
   const counts = { done: 0, total: 0 };
+  let failed = 0;
+  let outcome = { kind: "failed", message: "" };
+  const ended = (kind, message) => {
+    outcome = {
+      kind, message, post: state.post, profiled: counts.done, total: counts.total, failed,
+      seconds: elapsed().seconds, saved: savedOk,
+    };
+  };
   let thread = null;
   let fromCache = 0;
+  let savedOk = false;
   // Snapshot the scan for the saved list (a stopped one too, if anyone was profiled).
   const save = async (complete) => {
     if (!opts.cacheDays || !counts.done || !state.post) return;
@@ -508,6 +526,7 @@ async function run() {
       stats: scanStats(profiles, state.beforeKnown),
     };
     if (await openScans().save(summary, profiles.map(serializeProfile))) {
+      savedOk = true;
       state.savedId = state.post.id;
       renderSaved();
     }
@@ -532,8 +551,10 @@ async function run() {
     announce("Looking up the post…");
     const post = await client.getPost(postId);
     if (!post) {
-      showError(fail(`Post ${postId} isn't in the Arctic Shift archive. It may have been removed, or be too new: posts usually appear within minutes.`));
-      return;
+      const message = `Post ${postId} isn't in the Arctic Shift archive. It may have been removed, or be too new: posts usually appear within minutes.`;
+      showError(fail(message));
+      ended("failed", "Not in the Arctic Shift archive (yet).");
+      return outcome;
     }
     state.post = post;
     state.beforeKnown = after === null || post.createdUtc > after;
@@ -555,14 +576,14 @@ async function run() {
         : "This post has no archived comments yet.";
       setStatus(`${text} Took ${took()}.`);
       announce(text);
-      return;
+      ended("empty", text);
+      return outcome;
     }
     $("results").hidden = false;
     updateFilterNote(filterTerms());
 
     counts.total = ranked.length;
     let inFlight = 0;
-    let failed = 0;
     let firstError = null;
     let milestone = 0.25;
     const progress = () => {
@@ -570,6 +591,7 @@ async function run() {
         (fromCache ? `, ${fromCache} from saved results` : "") +
         (inFlight ? ` (${inFlight} in progress)` : ""));
       setProgress(counts.done / counts.total);
+      onQueueProgress(counts);
       if (counts.done >= milestone * counts.total && counts.done < counts.total) {
         announce(`Profiled ${counts.done} of ${counts.total}.`);
         while (counts.done >= milestone * counts.total) milestone += 0.25;
@@ -617,7 +639,11 @@ async function run() {
     setStatus(text);
     announce(text);
     await save(true);
-    if (failed === counts.total) showError(`Every lookup failed. ${explain(firstError)}`, firstError.message);
+    ended("done", text);
+    if (failed === counts.total) {
+      showError(`Every lookup failed. ${explain(firstError)}`, firstError.message);
+      ended("failed", `Every lookup failed. ${explain(firstError)}`);
+    }
   } catch (err) {
     if (runId === state.runId) stopEta();
     if (err instanceof Aborted) {
@@ -626,9 +652,11 @@ async function run() {
       setStatus(text);
       announce(text);
       await save(false);
+      ended("stopped", text);
     } else {
       showError(fail(explain(err)), err.message);
       announce(explain(err));
+      ended("failed", explain(err));
     }
   } finally {
     controller.abort(); // stop anything still in flight
@@ -640,6 +668,260 @@ async function run() {
       setRunning(false);
       document.title = TITLE;
     }
+  }
+  setTimeout(pumpQueue); // a queue waiting on a manual scan carries on
+  return outcome;
+}
+
+// ---- Background timers ----
+
+// Browsers slow a hidden tab's timers to about one a minute after a few minutes, which
+// would stall a long queue between requests. A worker's timers aren't slowed like that,
+// so the client's waits run on one once it has answered a first ping (if workers are
+// blocked, plain timers are used).
+const workerTimer = (() => {
+  const timer = { ready: false, start: null };
+  try {
+    const src = "onmessage = (e) => setTimeout(() => postMessage(e.data.id), e.data.ms);";
+    const worker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+    const pending = new Map();
+    let next = 0;
+    worker.onmessage = (e) => {
+      if (e.data === 0) timer.ready = true;
+      const done = pending.get(e.data);
+      pending.delete(e.data);
+      done?.();
+    };
+    timer.start = (ms, done) => {
+      const id = ++next;
+      pending.set(id, done);
+      worker.postMessage({ id, ms });
+      return () => pending.delete(id);
+    };
+    worker.postMessage({ id: 0, ms: 0 });
+  } catch {
+    // No workers: plain timers.
+  }
+  return timer;
+})();
+
+// Like core.js's wait(): resolves after `seconds`, or at once when `signal` aborts.
+function backgroundSleep(seconds, signal = null) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    let cancel;
+    const done = () => {
+      cancel();
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    if (workerTimer.ready) {
+      cancel = workerTimer.start(seconds * 1000, done);
+    } else {
+      const t = setTimeout(done, seconds * 1000);
+      cancel = () => clearTimeout(t);
+    }
+    signal?.addEventListener("abort", done);
+  });
+}
+
+// ---- Scheduler ----
+
+const queue = new LinkQueue();
+const QUEUE_GAP = 3; // seconds between queued scans, to go easy on the API
+let pumping = false;
+let queueCurrent = null; // id of the queued item being scanned
+
+function queueRunning() {
+  return queue.active || queueCurrent !== null;
+}
+
+const STATUS_PILLS = {
+  waiting: ["", "waiting"],
+  running: ["running", "scanning"],
+  done: ["regular", "done"],
+  failed: ["err", "failed"],
+  stopped: ["", "stopped"],
+};
+
+function renderQueue() {
+  const c = queue.counts();
+  const busy = state.controller !== null;
+  const parts = [];
+  if (c.running) parts.push("scanning");
+  if (c.waiting) parts.push(`${c.waiting} waiting`);
+  if (c.done) parts.push(`${c.done} done`);
+  if (c.failed) parts.push(`${c.failed} failed`);
+  $("queue-summary").textContent = parts.length ? `: ${parts.join(" · ")}` : "";
+
+  const toggle = $("queue-toggle");
+  if (queue.active) {
+    toggle.textContent = "Pause queue";
+    toggle.disabled = false;
+  } else {
+    toggle.textContent = queueCurrent ? "Resume queue" : "Start queue";
+    toggle.disabled = !c.waiting && !queueCurrent;
+  }
+  $("queue-clear").hidden = !(c.done + c.failed + c.stopped);
+
+  $("queue-list").replaceChildren(...queue.items.map((item) => {
+    const [cls, label] = STATUS_PILLS[item.status];
+    const actions = el("span", { class: "queue-actions" });
+    const name = item.title ? `r/${item.subreddit} · ${item.title}` : item.ref;
+    const button = (text, onClick, extra = {}) => {
+      const b = el("button", { type: "button", "aria-label": `${text}: ${name}`, ...extra }, text);
+      b.addEventListener("click", onClick);
+      actions.append(b);
+      return b;
+    };
+    if (item.status === "done" && item.saved) button("Open", () => openSaved(item.postId)).disabled = busy;
+    if (item.status === "failed" || item.status === "stopped") button("Retry", () => retryQueued(item.id));
+    if (item.status !== "running") button("Remove", () => removeQueued(item.id));
+    const note = [item.note, ...scanOptionNotes(item.opts)].filter(Boolean).join(" · ");
+    const li = el("li", { class: "queue-item" },
+      el("span", { class: `pill ${cls}` }, label),
+      el("span", { class: "queue-ref" }, name),
+      actions,
+      el("span", { class: "queue-note" }, note));
+    li.dataset.status = item.status;
+    li.dataset.id = item.id;
+    return li;
+  }));
+}
+
+function addToQueue() {
+  const r = queue.add($("queue-input").value, readOptions());
+  const notes = [];
+  if (r.added) notes.push(`Added ${plural(r.added, "link")}.`);
+  if (r.duplicates) notes.push(`${plural(r.duplicates, "link")} already queued.`);
+  if (r.invalid.length) notes.push(`Not a post link: ${r.invalid.join(", ")}`);
+  if (!notes.length) notes.push("Paste one or more post links first.");
+  $("queue-input").value = r.invalid.join("\n"); // leave the bad ones to fix
+  $("queue-add-note").textContent = notes.join(" ");
+  renderQueue();
+}
+
+function toggleQueue() {
+  if (queue.active) {
+    queue.setActive(false);
+    announce(queueCurrent ? "Queue paused after this scan." : "Queue paused.");
+  } else {
+    queue.setActive(true);
+    announce("Queue started.");
+    pumpQueue();
+  }
+  renderQueue();
+}
+
+function retryQueued(id) {
+  queue.retry(id);
+  renderQueue();
+  pumpQueue();
+}
+
+function removeQueued(id) {
+  queue.remove(id);
+  renderQueue();
+}
+
+function clearFinishedQueued() {
+  queue.clearFinished();
+  renderQueue();
+}
+
+// Put a queued item's link and options in the form, for run() to use.
+function fillFromItem(item) {
+  $("post").value = item.ref;
+  const o = { ...readOptions(), ...item.opts };
+  $("include-op").checked = Boolean(o.includeOp);
+  showOptions(o);
+}
+
+// Scan the next waiting item, and keep going while the queue is on. Anything that ends
+// a scan (including a manual run) calls this, so it's safe to call any time.
+async function pumpQueue() {
+  if (pumping || !queue.active || state.controller) return;
+  const item = queue.next();
+  if (!item) {
+    queue.setActive(false);
+    renderQueue();
+    queueFinished();
+    return;
+  }
+  pumping = true;
+  queueCurrent = item.id;
+  queue.update(item.id, { status: "running", note: "Starting…" });
+  renderQueue();
+  fillFromItem(item);
+  let outcome;
+  try {
+    outcome = await run({ fromQueue: true });
+  } catch (err) {
+    outcome = { kind: "failed", message: err.message };
+  }
+  queueCurrent = null;
+  const patch = { note: outcome.message, saved: Boolean(outcome.saved) };
+  if (outcome.post) Object.assign(patch, { title: outcome.post.title, subreddit: outcome.post.subreddit });
+  if (outcome.kind === "done" || outcome.kind === "empty") {
+    patch.status = "done";
+    if (outcome.kind === "done") {
+      patch.note = `${plural(outcome.profiled, "user")}${outcome.failed ? `, ${outcome.failed} failed` : ""}` +
+        ` · took ${formatDuration(outcome.seconds)}`;
+    }
+  } else if (outcome.kind === "stopped") {
+    patch.status = "stopped";
+    queue.setActive(false); // Stop means stop, not skip to the next one
+  } else if (outcome.kind === "offline" || outcome.kind === "busy") {
+    patch.status = "waiting";
+    queue.setActive(false);
+  } else {
+    patch.status = "failed";
+  }
+  queue.update(item.id, patch);
+  renderQueue();
+  pumping = false;
+  if (!queue.active) return;
+  await backgroundSleep(QUEUE_GAP);
+  pumpQueue();
+}
+
+// Live progress of the queued scan, on its row.
+function onQueueProgress(counts) {
+  if (queueCurrent === null) return;
+  const note = $("queue-list").querySelector(`[data-id="${queueCurrent}"] .queue-note`);
+  if (!note) return;
+  const eta = status.eta ? formatEta(status.eta.secondsLeft()) : "";
+  note.textContent = `Profiled ${counts.done} of ${counts.total}${eta ? ` · ${eta}` : ""}`;
+}
+
+function queueFinished() {
+  const c = queue.counts();
+  const text = `Queue finished: ${c.done} done${c.failed ? `, ${c.failed} failed` : ""}` +
+    `${c.stopped ? `, ${c.stopped} stopped` : ""}.`;
+  $("queue-add-note").textContent = text;
+  announce(text);
+  document.title = `✓ ${TITLE}`;
+  if ($("queue-notify").checked && globalThis.Notification?.permission === "granted") {
+    try {
+      new Notification("Reddit Commenter Profiler", { body: text });
+    } catch {
+      // Some browsers only allow notifications from a service worker.
+    }
+  }
+}
+
+async function onNotifyChange() {
+  const box = $("queue-notify");
+  if (!box.checked) return;
+  if (!globalThis.Notification) {
+    box.checked = false;
+    $("queue-add-note").textContent = "This browser can't show notifications.";
+    return;
+  }
+  if (Notification.permission === "default") await Notification.requestPermission();
+  if (Notification.permission !== "granted") {
+    box.checked = false;
+    $("queue-add-note").textContent = "Notifications are blocked for this site in your browser settings.";
   }
 }
 
@@ -876,6 +1158,18 @@ function init() {
   $("download").addEventListener("click", downloadCsv);
   $("share").addEventListener("click", copyLink);
   $("clear-cache").addEventListener("click", clearCache);
+  $("queue-add").addEventListener("click", addToQueue);
+  $("queue-toggle").addEventListener("click", toggleQueue);
+  $("queue-clear").addEventListener("click", clearFinishedQueued);
+  $("queue-notify").addEventListener("change", onNotifyChange);
+  window.addEventListener("beforeunload", (e) => {
+    if (state.controller) e.preventDefault(); // a scan would be cut off
+  });
+  if (queue.load()) {
+    $("scheduler").open = true;
+    $("queue-add-note").textContent = "The queue was cut off when the page closed. Press Start queue to carry on.";
+  }
+  renderQueue();
   for (const type of ["input", "change"]) $("option-fields").addEventListener(type, () => updateOptionsSummary());
 
   // Pre-fill from a shared link (the Options panel stays closed; its summary lists what's

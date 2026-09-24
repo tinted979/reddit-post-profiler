@@ -91,6 +91,31 @@ button.link {
 .row input { flex: 1; }
 
 #options { margin: 12px 0 0; }
+#scheduler { margin: 10px 0 0; }
+#scheduler > summary { cursor: pointer; color: var(--muted); width: fit-content; max-width: 100%; }
+#queue-summary { color: var(--text); }
+.scheduler-body { margin-top: 12px; }
+textarea {
+  display: block; width: 100%; font: inherit; color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; resize: vertical;
+}
+textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.queue-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.inline-check { display: flex; align-items: center; gap: 6px; font-size: .9rem; color: var(--muted); }
+#queue-add-note:empty { display: none; }
+.queue-list { list-style: none; margin: 12px 0 0; padding: 0; }
+.queue-item {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 10px; align-items: center;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  margin-bottom: 6px; font-size: .9rem;
+}
+.queue-item[data-status="running"] { border-color: var(--accent); }
+.queue-ref { overflow-wrap: anywhere; }
+.queue-note { grid-column: 2 / -1; color: var(--muted); font-size: .82rem; overflow-wrap: anywhere; }
+.queue-note:empty { display: none; }
+.queue-actions { display: flex; gap: 6px; }
+.queue-actions button { padding: 3px 9px; font-size: .82rem; }
+.pill.running { background: var(--accent); color: var(--accent-text); font-weight: 600; }
 #options > summary { cursor: pointer; color: var(--muted); width: fit-content; max-width: 100%; }
 #options-summary { color: var(--text); }
 fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }

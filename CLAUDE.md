@@ -55,11 +55,14 @@ The working branch is also the repo's default branch, so **every push deploys**.
   - `counts`: `ProfileCache`, the per-user results `buildProfile` reuses. It has a TTL and prunes old records. Keys are versioned (`v1|life|…`, `v1|before|…`); bump the version if the stored value shape changes.
   - `scans`: `ScanStore`, snapshots of finished or stopped scans (`sum|<id>` summary for the list, `data|<id>` serialized profiles) that `app.js` reopens with no requests. Kept until deleted.
   - A store that hangs turns itself off instead of blocking the page.
+- **`queue.js`:** `LinkQueue`, the scheduler's queue (localStorage, key `reddit-tool-queue`; storage injectable for tests). Items keep the options from when they were added; a `running` item found on load was cut off and goes back to `waiting`.
 - **`app.js`** handles the DOM only:
   - It reads and clamps the options. Share links use URL params `post`, `max`, `op`, `exclude`, `subs`, `years`, `min`, `delay`, `par` and `cache`.
   - It runs `mapPool(buildProfile)` and inserts cards in thread-activity order as results arrive.
   - It renders the status line, progress and ETA, and builds the CSV with `toCsv`.
   - Every run has a `runId`. Callbacks from an older run must check it before touching shared state.
+  - `run()` resolves with an outcome (`done`, `empty`, `stopped`, `failed`, …). The scheduler (`pumpQueue`) fills the form from a queued item, calls `run({ fromQueue: true })`, and continues after each scan (with a short gap); every run's end calls `pumpQueue`, so a queue waiting on a manual scan resumes. Queued scans don't write the URL, since a reload would re-run them outside the queue.
+  - The client's waits use `backgroundSleep`, which runs on a Web Worker timer (Chrome throttles hidden-tab timers to about once a minute after 5 minutes; worker timers aren't) and falls back to `setTimeout` until the worker has answered a ping.
 
 Accessibility is maintained. The last check with axe-core reported 0 violations in both light and dark mode. Screen readers get milestones through `#announce`, not every progress tick. Colour pairs in `style.css` are chosen for at least 4.5:1 contrast.
 

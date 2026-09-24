@@ -75,6 +75,24 @@
       </details>
     </form>
 
+    <details id="scheduler">
+      <summary>Scheduler<span id="queue-summary"></span></summary>
+      <div class="scheduler-body">
+        <label for="queue-input" class="field-label">Queue post links, one per line</label>
+        <textarea id="queue-input" rows="3" spellcheck="false" autocapitalize="off" aria-describedby="queue-help queue-add-note"
+                  placeholder="https://www.reddit.com/r/…/comments/abc123/…&#10;https://redd.it/def456"></textarea>
+        <div class="queue-controls">
+          <button id="queue-add" type="button">Add to queue</button>
+          <button id="queue-toggle" type="button" class="primary" disabled>Start queue</button>
+          <button id="queue-clear" type="button" hidden>Clear finished</button>
+          <label class="inline-check"><input id="queue-notify" type="checkbox"> Notify me when it's done</label>
+        </div>
+        <p id="queue-add-note" class="hint" aria-live="polite"></p>
+        <p id="queue-help" class="hint">Scans run one after another, each with the options set when it was added. You can switch to other tabs or windows while it runs, but keep this tab open; if it's closed, the queue is kept and picks up again when you press <b>Start queue</b>. Finished scans are listed under <a href="#saved-heading">Saved scans</a>.</p>
+        <ol id="queue-list" class="queue-list"></ol>
+      </div>
+    </details>
+
     <div id="error" class="error" role="alert" hidden></div>
 
     <section id="status" hidden>

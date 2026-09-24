@@ -41,6 +41,18 @@ and a link to their Reddit profile.
 Each post and comment count links to the Arctic Shift search page listing those posts or
 comments (newest first, within the `years` window if set).
 
+### Scheduler
+
+To scan several posts without waiting on each, open *Scheduler*, paste post links (one per
+line) and press *Add to queue*, then *Start queue*. They're scanned one after another, each
+with the options that were set when it was added, and each lands in *Saved scans*. You can
+use other tabs or windows meanwhile: the page paces its requests on a worker timer, which
+browsers don't slow down in background tabs the way they do ordinary timers. The tab has to
+stay open, but the queue is kept in this browser (localStorage), so after a reload or a
+closed tab *Start queue* carries on where it was cut off. *Pause queue* stops after the
+current scan; *Stop* ends the current scan and pauses the queue. Failed or stopped links
+can be retried, and *Notify me when it's done* shows a browser notification at the end.
+
 ### Saved scans
 
 Every scan you run (or stop after some users are profiled) is listed under *Saved scans*,
@@ -81,7 +93,8 @@ https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=
 - Results are saved in this browser's IndexedDB (database `reddit-tool`): each user's
   per-subreddit counts, and their "before" counts for each post you scan. They're reused
   for `cache` days; records older than that (and at least 30 days old) are deleted when
-  the page loads. Saved scans (each post, its options and every profile shown) are kept
+  the page loads. The scheduler's queue is kept in localStorage until you remove its links.
+  Saved scans (each post, its options and every profile shown) are kept
   until you delete them. *Clear saved results* under *Options* deletes everything now, and
   `cache=0` saves nothing.
 - A saved "before" count is reused only if it was fetched at least an hour after the post,
