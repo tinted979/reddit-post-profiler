@@ -1152,13 +1152,15 @@ test("parseUsernames strips u/ prefixes and profile links, and drops repeats and
       "u/Alice",
       "/u/bob_2",
       "https://www.reddit.com/user/Carol-X/",
+      "https://old.reddit.com/u/Eve_1/",
       "abcdefghijklmnopqrstu",
       "https://reddit.com.evil.com/user/alice",
+      "https://evil.reddit.com/user/frank",
       "alice",
       " ",
       "not a name!",
       "dave",
     ]),
-    ["Alice", "bob_2", "Carol-X", "abcdefghijklmnopqrstu", "dave"],
+    ["Alice", "bob_2", "Carol-X", "Eve_1", "abcdefghijklmnopqrstu", "dave"],
   );
 });
