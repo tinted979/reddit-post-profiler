@@ -1170,7 +1170,7 @@ async function importSaved() {
 async function deleteAllSaved() {
   if (state.controller) return;
   const n = (await openScans().list()).length;
-  if (!n || !window.confirm(`Delete all ${plural(n, "saved scan")}? This can't be undone. Export them first to keep a copy.`)) return;
+  if (!n || !window.confirm(`${n === 1 ? "Delete the saved scan" : `Delete all ${n} saved scans`}? This can't be undone. Export first to keep a copy.`)) return;
   await openScans().clear();
   state.savedId = null;
   savedNote(`Deleted ${plural(n, "saved scan")}.`);
