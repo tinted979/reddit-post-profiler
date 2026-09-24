@@ -19,7 +19,7 @@ const TREE_LIMIT = 25_000;
 // Arctic Shift normally archives new posts and comments within a minute. Allow an hour
 // for backlogs before trusting that counts fetched at some moment include everything
 // made before it.
-const INGEST_LAG = 3600;
+export const INGEST_LAG = 3600;
 // Prefix of every cache key; change it when the stored format changes.
 const CACHE_VERSION = "v1";
 // "Before" records moved to v2 when they gained the timeline facts (first, days).
