@@ -113,12 +113,14 @@ test("parsePostRef accepts urls, fullnames and ids", () => {
     "https://old.reddit.com/r/Python/comments/ABC123/t/def456/?context=3",
     "reddit.com/r/Python/comments/abc123",
     "https://redd.it/abc123",
+    "https://www.reddit.com/gallery/abc123",
+    "https://reddit.com/gallery/ABC123?utm_source=share",
     "t3_abc123",
     "  abc123 ",
   ]) {
     assert.equal(parsePostRef(ref), "abc123", ref);
   }
-  for (const bad of ["", "https://www.reddit.com/r/Python/", "not a post!"]) {
+  for (const bad of ["", "https://www.reddit.com/r/Python/", "not a post!", "https://example.com/gallery/abc123"]) {
     assert.throws(() => parsePostRef(bad));
   }
 });

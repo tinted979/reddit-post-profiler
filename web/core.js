@@ -49,6 +49,8 @@ const ID = "[0-9a-z]{1,13}";
 const URL_PATTERNS = [
   new RegExp(`/comments/(${ID})(?:[/?#]|$)`, "i"),
   new RegExp(`redd\\.it/(${ID})(?:[/?#]|$)`, "i"),
+  // Gallery links (reddit.com/gallery/<id>) are the post id too.
+  new RegExp(`reddit\\.com/gallery/(${ID})(?:[/?#]|$)`, "i"),
 ];
 const BARE_ID = new RegExp(`^(?:t3_)?(${ID})$`, "i");
 
@@ -68,7 +70,7 @@ export function parsePostRef(ref) {
   }
   throw new Error(
     "Can't find a post id in that input. Paste a Reddit post URL " +
-      "(…/comments/<id>/…), a redd.it link, or the post id.",
+      "(…/comments/<id>/… or …/gallery/<id>), a redd.it link, or the post id.",
   );
 }
 
