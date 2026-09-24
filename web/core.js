@@ -1175,7 +1175,9 @@ export function importScan(rec) {
   const beforeKnown = after === null || post.createdUtc > after;
   const live = profiles.map(deserializeProfile);
   const o = s.opts && typeof s.opts === "object" ? s.opts : {};
-  const names = (v) => (Array.isArray(v) ? v.filter((x) => isName(x)) : []);
+  // Cleaned the same way as the form's fields, so files saved before "Skip users" dropped
+  // "u/" prefixes keep those names.
+  const list = (v, parse) => (Array.isArray(v) ? parse(v.filter((x) => typeof x === "string")) : []);
   const years = [1, 5, 10].includes(o.years) ? o.years : null;
   const thread = s.thread && isCountNum(s.thread.comments) && isCountNum(s.thread.people)
     ? { comments: s.thread.comments, people: s.thread.people }
@@ -1194,11 +1196,11 @@ export function importScan(rec) {
     after,
     beforeKnown,
     opts: {
-      only: names(o.only),
+      only: list(o.only, parseSubreddits),
       years,
       maxUsers: Number.isInteger(o.maxUsers) && o.maxUsers > 0 ? o.maxUsers : null,
       includeOp: Boolean(o.includeOp),
-      exclude: names(o.exclude),
+      exclude: list(o.exclude, parseUsernames),
     },
     stats: scanStats(live, post, beforeKnown),
     facts: badgeFacts(live, post),
