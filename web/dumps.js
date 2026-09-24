@@ -69,6 +69,7 @@ export class DumpSource {
     this._subs = subs;
     this._openFile = openFile;
     this._files = new Map(); // path -> Promise<{file, metadata}>
+    this._lookups = new Map(); // "kind|sub|author" -> Promise<number[]>, for this scan
   }
 
   // The archive, or null if there's no usable manifest (missing, unreachable, slow,
@@ -112,8 +113,21 @@ export class DumpSource {
   }
 
   // Creation times (epoch seconds, oldest first) of every post or comment `author` has in
-  // the subreddit's files. Throws Aborted once stopped, else DumpUnavailable.
-  async timestamps(kind, subreddit, author) {
+  // the subreddit's files. Throws Aborted once stopped, else DumpUnavailable. A lookup is
+  // read once per source (one scan) and shared; callers must not change the array.
+  timestamps(kind, subreddit, author) {
+    const key = `${kind}|${String(subreddit).toLowerCase()}|${String(author).toLowerCase()}`;
+    let lookup = this._lookups.get(key);
+    if (!lookup) {
+      lookup = this._read(kind, subreddit, author);
+      lookup.catch(() => this._lookups.delete(key));
+      this._lookups.set(key, lookup);
+    }
+    return lookup;
+  }
+
+  // Internal method that actually reads from the archive.
+  async _read(kind, subreddit, author) {
     const f = this._subs.get(String(subreddit).toLowerCase())?.files[kind];
     if (!f || this.broken) throw new DumpUnavailable(`no usable ${kind} file for r/${subreddit}`);
     try {
