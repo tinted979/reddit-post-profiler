@@ -42,7 +42,11 @@ jobs:
       - name: Assemble site
         run: |
           mkdir _site
-          cp web/index.html web/app.js web/core.js web/style.css _site/
+          cp web/*.html web/*.js web/*.css _site/
+          # Fail if a module imports a file that didn't make it into the site.
+          for f in $(grep -ho 'from "\./[^"]*"' _site/*.js | sed 's/from "\.\/\(.*\)"/\1/' | sort -u); do
+            test -f "_site/$f" || { echo "missing from site: $f"; exit 1; }
+          done
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:
