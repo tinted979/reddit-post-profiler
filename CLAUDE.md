@@ -18,6 +18,7 @@ cd web && npm test                        # web tests: node --test (Node 22+)
 cd web && node --test --test-name-pattern="Eta" tests/core.test.js   # single web test
 python3 -m http.server -d web             # serve the web app locally (ES modules need http)
 uv run tools/build_dumps.py --subreddit X --posts X_posts.jsonl --comments X_comments.jsonl   # build dump files into dumps/
+tools/upload_dumps.sh                     # upload dumps/ to R2 (rclone remote "r2") and check the public URL
 uv run --with duckdb --with pytest pytest tools   # build script tests (CI runs them too)
 ```
 
@@ -85,6 +86,7 @@ The automatic pull request review (`.github/workflows/code-review.yml`) checks c
 Planned: serve Arctic Shift's per-subreddit dumps as static Parquet (on Cloudflare R2) so scans of a covered subreddit take the thread's commenters and the "before" facts from files instead of the API. Lifetime counts still need the API, since a subreddit's dump doesn't cover the rest of Reddit. The page doesn't use them yet.
 
 - `tools/build_dumps.py` (Python, DuckDB via `uv`) turns a subreddit's posts and comments JSONL into `posts_by_author`, `comments_by_author` (lowercase author, `created_utc`; sorted by author) and `comments_by_link` (`link_id` without `t3_`, author as written, `created_utc`), plus `manifest.json` (format version, and per subreddit the build directory and `posts_to_utc`/`comments_to_utc`, the times the data runs to). It keeps no text, drops deleted accounts and AutoModerator, and de-duplicates by id. Builds go in `r/<sub>/<version>/` and are never overwritten; only the manifest changes.
+- Hosting: R2 bucket `rpp-db`, served at `https://rpp-db.tinted979.dev` (custom domain, proxied, with a Cache Rule making it eligible for cache). Its CORS policy is `tools/r2-cors.json`: GET/HEAD from the Pages origin and `localhost:8000`, `Range` allowed, `Content-Range`/`Content-Length`/`Accept-Ranges`/`ETag` exposed. If the page moves origin, add the new one there and in the bucket settings. `tools/upload_dumps.sh` uploads build files first (`immutable`, a year, never replaced), then the manifest (5 minutes), then checks every file answers a range request with 206, the full size in `Content-Range`, CORS and no `Content-Encoding`. It never deletes: old builds stay until removed by hand. The rclone token is limited to Object Read & Write on the bucket and stays out of the repo.
 - Files are Snappy-compressed (hyparquet reads Snappy with no extra package) in ~10k-row groups. Measured on r/Hasan_Piker (131k posts, 792k comments): 1.3 MB, 5.8 MB and 10.6 MB; one user's comments read 71 KB and a 1,922-comment thread 285 KB, plus a 64 KB footer read.
 - For the browser, [hyparquet](https://github.com/hyparam/hyparquet) skips row groups by min/max statistics only for operator filters: `filter: { author: { $eq: name } }`. A plain `{ author: name }` gives the right rows but reads the whole file. Pass `initialFetchSize: 64 * 1024` to `parquetMetadataAsync`; the default reads the last 512 KB.
 
