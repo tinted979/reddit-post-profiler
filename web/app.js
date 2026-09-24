@@ -28,6 +28,7 @@ import {
   mapPool,
   parsePostRef,
   parseSubreddits,
+  parseUsernames,
   scanStats,
   serializeProfile,
   sortedSubreddits,
@@ -88,7 +89,7 @@ function readOptions() {
   const cacheDays = num("cache-days");
   return {
     includeOp: $("include-op").checked,
-    exclude: $("exclude").value.split(/[\s,]+/).filter(Boolean),
+    exclude: parseUsernames($("exclude").value.split(/[\s,]+/)),
     only: parseSubreddits($("only-subs").value.split(/[\s,]+/)),
     years: [1, 5, 10].includes(years) ? years : null,
     maxUsers: maxUsers > 0 ? maxUsers : null,

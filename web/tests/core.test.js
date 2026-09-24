@@ -28,6 +28,7 @@ import {
   mapPool,
   parsePostRef,
   parseSubreddits,
+  parseUsernames,
   scanStats,
   serializeProfile,
   sortedSubreddits,
@@ -1143,4 +1144,11 @@ test("ScanStore saves a scan's two records together, and export counts scans it 
   assert.deepEqual(writes, [[`data|${POST.id}`, `sum|${POST.id}`]]);
   backend.map.delete(`data|${POST.id}`); // summary listed, profiles gone
   assert.deepEqual(await store.exportAll(), { scans: [], failed: 1 });
+});
+
+test("parseUsernames strips u/ prefixes and profile links, and drops repeats and junk", () => {
+  assert.deepEqual(
+    parseUsernames(["u/Alice", "/u/bob_2", "https://www.reddit.com/user/Carol-X/", "alice", " ", "not a name!", "dave"]),
+    ["Alice", "bob_2", "Carol-X", "dave"],
+  );
 });
