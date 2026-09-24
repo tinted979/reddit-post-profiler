@@ -25,6 +25,8 @@ There is no linter or formatter configured.
 
 `.github/workflows/pages.yml` runs the web tests on every push and PR. On the default branch it copies `web/*.html web/*.js web/*.css` into the site and publishes it to Pages. It fails if a module imports a file that wasn't copied, so a new file of another type (such as images or JSON) must be added to that copy step. It also tags local imports, `app.js` and `style.css` with `?v=<commit>`, so browsers never mix cached old and new modules. Keep imports in the form `from "./x.js"` for that rewrite.
 
+`.github/workflows/code-review.yml` has Claude review each pull request once (on open, reopen or ready for review; drafts wait) with the `code-review` plugin, posting inline comments. It authenticates with the `CLAUDE_CODE_OAUTH_TOKEN` repo secret and the Claude GitHub App.
+
 The default branch is `main`, and only `main` deploys. Work on a feature branch and open a pull request into `main`; CI runs the tests on the PR, and merging it deploys. After a merge, check that the live `https://tinted979.github.io/reddit-post-profiler/*.js` serves the new code.
 
 ## Web app architecture
@@ -62,6 +64,18 @@ The default branch is `main`, and only `main` deploys. Work on a feature branch 
   - The client's waits use `backgroundSleep`, which runs on a Web Worker timer (Chrome throttles hidden-tab timers to about once a minute after 5 minutes; worker timers aren't) and falls back to `setTimeout` until the worker has answered a ping.
 
 Accessibility is maintained. The last check with axe-core reported 0 violations in both light and dark mode. Screen readers get milestones through `#announce`, not every progress tick. Colour pairs in `style.css` are chosen for at least 4.5:1 contrast.
+
+## Rules for changes
+
+The automatic pull request review (`.github/workflows/code-review.yml`) checks changes against this file, so these are the rules to hold to:
+
+- **Stale runs:** anything async in `app.js` that touches shared state or the page after an `await` must check its `runId` (or `state.controller`) first.
+- **Stored data:** bump the cache key version (`v1|life|…`, `v2|before|…`) when a stored value's shape changes, and never rename the `reddit-tool` IndexedDB database or the `reddit-tool-*` localStorage keys: visitors would lose their saved scans, results, queue and badge settings.
+- **Untrusted input:** API responses and imported saved-scan files are untrusted. Put text in with `textContent`/`el()`, never `innerHTML`; build links from a fixed `https://` prefix or `URLSearchParams`; validate imported fields as `importScan` does.
+- **Imports:** keep local imports as `from "./x.js"` (the deploy step's cache busting rewrites exactly that form), and add any new file type to the deploy copy step.
+- **The API:** Arctic Shift is a free shared service. New requests go through `ArcticShiftClient._get` (pacing, backoff, `meta-app`); don't add request patterns that bypass its throttle, and don't fall back to heavier queries when the server is busy or rate-limiting.
+- **Accessibility:** keep keyboard focus somewhere sensible when elements hide, announce milestones through `#announce` rather than every tick, and keep colour pairs at 4.5:1 or better.
+- **Tests:** logic in `core.js`, `cache.js` and `queue.js` gets a test in `web/tests/`; `npm test` must pass.
 
 ## Arctic Shift API facts (verified live)
 
