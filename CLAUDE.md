@@ -25,7 +25,7 @@ There is no linter or formatter configured.
 
 `.github/workflows/pages.yml` runs the web tests on every push and PR. On the default branch it copies `web/*.html web/*.js web/*.css` into the site and publishes it to Pages. It fails if a module imports a file that wasn't copied, so a new file of another type (such as images or JSON) must be added to that copy step. It also tags local imports, `app.js` and `style.css` with `?v=<commit>`, so browsers never mix cached old and new modules. Keep imports in the form `from "./x.js"` for that rewrite.
 
-`.github/workflows/code-review.yml` has Claude review each pull request once (on open, reopen or ready for review; drafts wait) against this file, posting inline comments. The review instructions are the `prompt` in that workflow. It authenticates with the `CLAUDE_CODE_OAUTH_TOKEN` repo secret and the Claude GitHub App.
+`.github/workflows/code-review.yml` has Claude review each pull request once (on open, reopen or ready for review; drafts wait) against this file, posting inline comments. The review instructions are the `prompt` in that workflow. It authenticates with the `ANTHROPIC_API_KEY` repo secret and the Claude GitHub App.
 
 The default branch is `main`, and only `main` deploys. Work on a feature branch and open a pull request into `main`; CI runs the tests on the PR, and merging it deploys. After a merge, check that the live `https://tinted979.github.io/reddit-post-profiler/*.js` serves the new code.
 
