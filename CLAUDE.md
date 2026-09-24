@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Profiles everyone who commented on a Reddit post using the [Arctic Shift](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md) archive API. It reports:
+Reddit Post Profiler (RPP). Profiles everyone who commented on a Reddit post using the [Arctic Shift](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md) archive API. It reports:
 
 - each commenter's posts and comments in the post's subreddit *before* the post was created;
 - their per-subreddit activity everywhere.
@@ -25,7 +25,7 @@ There is no linter or formatter configured.
 
 `.github/workflows/pages.yml` runs the web tests on every push and PR. On the default branch it copies `web/*.html web/*.js web/*.css` into the site and publishes it to Pages. It fails if a module imports a file that wasn't copied, so a new file of another type (such as images or JSON) must be added to that copy step. It also tags local imports, `app.js` and `style.css` with `?v=<commit>`, so browsers never mix cached old and new modules. Keep imports in the form `from "./x.js"` for that rewrite.
 
-The default branch is `main`, and only `main` deploys. Work on a feature branch and open a pull request into `main`; CI runs the tests on the PR, and merging it deploys. After a merge, check that the live `https://tinted979.github.io/reddit-tool/*.js` serves the new code.
+The default branch is `main`, and only `main` deploys. Work on a feature branch and open a pull request into `main`; CI runs the tests on the PR, and merging it deploys. After a merge, check that the live `https://tinted979.github.io/reddit-post-profiler/*.js` serves the new code.
 
 ## Web app architecture
 
@@ -33,7 +33,7 @@ The default branch is `main`, and only `main` deploys. Work on a feature branch 
   - **`ArcticShiftClient`:**
     - Spaces request starts by `delay` using a slot scheduler.
     - Caps requests in flight with AIMD: the cap halves on a 429, a "slow down" reply or a network error, and grows back after successes.
-    - Every request carries `meta-app=reddit-tool` (`APP_TAG`), so Arctic Shift's maintainer can identify the traffic.
+    - Every request carries `meta-app=reddit-post-profiler` (`APP_TAG`), so Arctic Shift's maintainer can identify the traffic.
     - A 429 or a network error pauses every request on the client (`_pause`, reported via `onPause`). Per-request backoffs are reported via `onWait`.
     - After repeated "slow down" replies it throws `ServerBusy` instead of escalating to heavier queries.
     - Stop works through an `AbortSignal` that also wakes any sleep in progress.
@@ -48,7 +48,7 @@ The default branch is `main`, and only `main` deploys. Work on a feature branch 
   - **`estimateScan`** gives a rough request count and time before a scan (from saved lifetime totals). Above `LARGE_SCAN` (300) users, `app.js` asks before profiling them all, unless `max` is set; queued scans take the top 300.
   - **Saved scans as a file** (`exportScans`, `parseScanExport`, `importScan`): imported files are untrusted, so every field is checked, names must match `[\w-]`, and stats and badge facts are recomputed from the profiles.
   - **`Eta`** estimates time left from the recent pace of users that needed requests, leaving out saved results and shared pauses.
-- **`cache.js`:** IndexedDB DB `reddit-tool` (version 2) with two stores sharing one connection; `MemoryBackend` for tests. Adding a store means bumping `DB_VERSION` and adding it to `STORES`.
+- **`cache.js`:** IndexedDB DB `reddit-tool` (version 2; like the `reddit-tool-*` localStorage keys, it keeps the project's old name so visitors' saved data survives the rename, so don't rename them) with two stores sharing one connection; `MemoryBackend` for tests. Adding a store means bumping `DB_VERSION` and adding it to `STORES`.
   - `counts`: `ProfileCache`, the per-user results `buildProfile` reuses. It has a TTL and prunes old records. Keys are versioned (`v1|life|…`, `v2|before|…`, the latter `{posts, comments, first, days, complete}`); bump the version if the stored value shape changes.
   - `scans`: `ScanStore`, snapshots of finished or stopped scans (`sum|<id>` summary for the list, `data|<id>` serialized profiles) that `app.js` reopens with no requests. Kept until deleted. `exportAll`/`importAll` back the export and import buttons; an import replaces a saved scan only if it's newer.
   - A store that hangs turns itself off instead of blocking the page.

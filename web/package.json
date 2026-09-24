@@ -1,5 +1,5 @@
 {
-  "name": "reddit-tool-web",
+  "name": "reddit-post-profiler",
   "private": true,
   "type": "module",
   "scripts": {

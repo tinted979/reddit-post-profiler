@@ -1,4 +1,4 @@
-# reddit-tool
+# Reddit Post Profiler (RPP)
 
 Profile everyone who commented on a Reddit post, using the
 [Arctic Shift](https://arctic-shift.photon-reddit.com/search) archive:
@@ -9,7 +9,7 @@ Profile everyone who commented on a Reddit post, using the
 
 ## Use it in your browser
 
-**https://tinted979.github.io/reddit-tool/**
+**https://tinted979.github.io/reddit-post-profiler/**
 
 Nothing to install. Paste a post URL and press *Analyze*. Users appear as they're
 profiled, ordered by how many comments they left in the thread. Click a user to see every
@@ -26,7 +26,7 @@ some of the same people, reuses them instead of asking the API again.
 A thread with more than 300 commenters to profile asks first. It shows roughly how many
 requests and how long profiling them all would take, and offers *Profile the top 300* (the
 most active commenters), *Profile all* or *Cancel*. Setting *Only the N most active
-commenters* (`max`) skips the question. Every request carries `meta-app=reddit-tool`, as the
+commenters* (`max`) skips the question. Every request carries `meta-app=reddit-post-profiler`, as the
 Arctic Shift site tags its own, so the archive's maintainer can see where the traffic comes from.
 
 ### Reading the results
@@ -107,7 +107,7 @@ address bar shows one once you press *Analyze*. Options set by a link are listed
 *Options*.
 
 ```
-https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=1
+https://tinted979.github.io/reddit-post-profiler/?post=https://redd.it/1l7d1e4&max=20&op=1
 ```
 
 | Parameter | Meaning |
@@ -128,7 +128,7 @@ https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=
 
 - The page has no server of its own and no analytics. Your browser sends every query
   straight to Arctic Shift, which sees the post and the usernames you look up.
-- Results are saved in this browser's IndexedDB (database `reddit-tool`): each user's
+- Results are saved in this browser's IndexedDB (database `reddit-tool`, the project's earlier name, kept so saved data carries over): each user's
   per-subreddit counts, and their "before" counts, days active and first date for each
   post you scan. They're reused
   for `cache` days; records older than that (and at least 30 days old) are deleted when
