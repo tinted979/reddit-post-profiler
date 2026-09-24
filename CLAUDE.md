@@ -17,6 +17,8 @@ It's a web app in `web/`: plain ES modules with no build step and no dependencie
 cd web && npm test                        # web tests: node --test (Node 22+)
 cd web && node --test --test-name-pattern="Eta" tests/core.test.js   # single web test
 python3 -m http.server -d web             # serve the web app locally (ES modules need http)
+uv run tools/build_dumps.py --subreddit X --posts X_posts.jsonl --comments X_comments.jsonl   # build dump files into dumps/
+uv run --with duckdb --with pytest pytest tools   # build script tests (CI runs them too)
 ```
 
 There is no linter or formatter configured.
@@ -77,6 +79,14 @@ The automatic pull request review (`.github/workflows/code-review.yml`) checks c
 - **Accessibility:** keep keyboard focus somewhere sensible when elements hide, announce milestones through `#announce` rather than every tick, and keep colour pairs at 4.5:1 or better.
 - **Tests:** logic in `core.js`, `cache.js` and `queue.js` gets a test in `web/tests/`; `npm test` must pass.
 - **Git workflow:** for any code change, create a `claude/<topic>` branch before editing. When the work is done and `npm test` passes, commit, push, and open a PR into `main` with `gh pr create`. Never push to `main` directly or merge PRs yourself.
+
+## Subreddit dumps (in progress)
+
+Planned: serve Arctic Shift's per-subreddit dumps as static Parquet (on Cloudflare R2) so scans of a covered subreddit take the thread's commenters and the "before" facts from files instead of the API. Lifetime counts still need the API, since a subreddit's dump doesn't cover the rest of Reddit. The page doesn't use them yet.
+
+- `tools/build_dumps.py` (Python, DuckDB via `uv`) turns a subreddit's posts and comments JSONL into `posts_by_author`, `comments_by_author` (lowercase author, `created_utc`; sorted by author) and `comments_by_link` (`link_id` without `t3_`, author as written, `created_utc`), plus `manifest.json` (format version, and per subreddit the build directory and `posts_to_utc`/`comments_to_utc`, the times the data runs to). It keeps no text, drops deleted accounts and AutoModerator, and de-duplicates by id. Builds go in `r/<sub>/<version>/` and are never overwritten; only the manifest changes.
+- Files are Snappy-compressed (hyparquet reads Snappy with no extra package) in ~10k-row groups. Measured on r/Hasan_Piker (131k posts, 792k comments): 1.3 MB, 5.8 MB and 10.6 MB; one user's comments read 71 KB and a 1,922-comment thread 285 KB, plus a 64 KB footer read.
+- For the browser, [hyparquet](https://github.com/hyparam/hyparquet) skips row groups by min/max statistics only for operator filters: `filter: { author: { $eq: name } }`. A plain `{ author: name }` gives the right rows but reads the whole file. Pass `initialFetchSize: 64 * 1024` to `parquetMetadataAsync`; the default reads the last 512 KB.
 
 ## Tech debt
 
