@@ -6,6 +6,7 @@ import {
   ArcticShiftClient,
   ArcticShiftError,
   QueryTimeout,
+  ServerBusy,
   Unsupported,
   buildProfile,
   collectCommenters,
@@ -57,7 +58,7 @@ const interactions = (rows) => json({ data: rows.map(([subreddit, posts, comment
 const notSupported = () => json({ data: null, error: "This user is currently not supported (too much data)" }, 400);
 
 // Aggregate responses: lifetime `posts`/`comments` rows, and "before" counts for
-// subreddit-filtered queries. Records which kinds of query were made.
+// subreddit-filtered queries. Fails the test if the interactions endpoint is queried.
 function aggregates({ posts = [], comments = [], before = { posts: 0, comments: 0 } }) {
   return (u) => {
     assert.ok(!isInteractions(u), "unexpected interactions query");
@@ -96,7 +97,7 @@ test("getPost", async () => {
     json({ data: [{ id: "abc123", author: "op", subreddit: "Python", created_utc: 1700000000, title: "Hi" }] }),
   );
   assert.deepEqual(await client.getPost("abc123"), {
-    id: "abc123", author: "op", subreddit: "Python", createdUtc: 1700000000, title: "Hi",
+    id: "abc123", author: "op", subreddit: "Python", createdUtc: 1700000000, title: "Hi", numComments: 0,
   });
 });
 
@@ -179,8 +180,10 @@ test("collectCommenters counts and filters", async () => {
     id: String(i), author, created_utc: i,
   }));
   const { client } = makeClient(() => json({ data: comments }));
-  const counts = await collectCommenters(client, POST, { exclude: ["u/spambot"], includeOp: true });
-  assert.deepEqual([...counts], [["alice", 2], ["bob", 1], ["op_user", 0]]);
+  const commenters = await collectCommenters(client, POST, { exclude: ["u/spambot"], includeOp: true });
+  assert.deepEqual(Object.fromEntries(commenters), {
+    alice: { count: 2, last: 1 }, bob: { count: 1, last: 2 }, op_user: { count: 0, last: null },
+  });
 });
 
 test("interactionCounts unpacks posts and comments", async () => {
@@ -258,14 +261,18 @@ test("timed-out lifetime aggregates fall back to one interactions query", async 
 });
 
 test("when interactions can't answer either, only the timed-out kind is split into years", async () => {
-  const { client, calls } = makeClient((u) => {
+  const { client, calls, clock } = makeClient((u) => {
     if (isInteractions(u)) return notSupported();
     if (u.pathname.includes("/posts/")) return json({ data: [{ key: "rust", count: "1" }] });
     return u.searchParams.has("after") ? json({ data: [{ key: "rust", count: "1" }] }) : json({ error: "Query timed out" });
   });
+  clock.t = Date.UTC(2024, 5, 1) / 1000;
   const p = await buildProfile(client, "busy", 1, POST);
   const years = yearlyRanges(null, client._now()).length;
+  assert.equal(years, 2024 - 2005 + 1);
   assert.equal(calls.filter((u) => u.pathname.includes("/posts/")).length, 1);
+  // The full comments query is sent twice, and not again once interactions has failed.
+  assert.equal(calls.filter((u) => u.pathname.includes("/comments/") && !u.searchParams.has("after")).length, 2);
   assert.equal(p.subreddits.get("rust").comments, years);
   assert.equal(p.subreddits.get("rust").posts, 1);
 });
@@ -283,10 +290,13 @@ test("a rate limit pauses every request on the client", async () => {
   const { client, starts, sleeps } = makeClient(() =>
     ++n === 1 ? json({ error: "Too many requests" }, 429) : json({ data: [] }),
   );
-  await Promise.all([client.subredditCounts("posts", "a"), client.subredditCounts("posts", "b")]);
-  // Both start at once; the 429 pauses the retry *and* anything queued behind it.
+  // One request in flight at a time, so b and c queue behind a.
+  client.maxInFlight = client._limit = 1;
+  await Promise.all(["a", "b", "c"].map((user) => client.subredditCounts("posts", user)));
+  // a's 429 pauses its own retry and the requests queued behind it.
   assert.equal(starts[0], 1000);
-  assert.ok(starts.slice(2).every((t) => t >= 1030), `starts: ${starts}`);
+  assert.equal(starts.length, 4);
+  assert.ok(starts.slice(1).every((t) => t >= 1030), `starts: ${starts}`);
   assert.ok(sleeps.includes(30));
 });
 
@@ -328,7 +338,7 @@ test("slow down halves the cap, and successes raise it again", async () => {
     slow ? json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422) : json({ data: [] }),
   );
   client.maxInFlight = client._limit = 4;
-  await assert.rejects(client._get("/api/posts/ids", {}), QueryTimeout);
+  await assert.rejects(client._get("/api/posts/ids", {}), ServerBusy);
   assert.equal(client._limit, 1);
   slow = false;
   for (let i = 0; i < 30; i++) await client._get("/api/posts/ids", {});
@@ -428,7 +438,7 @@ test("collectCommenters reads the whole thread from one comment tree request", a
   ];
   const { client, calls } = makeClient(() => json({ data: tree }));
   const counts = await collectCommenters(client, POST);
-  assert.deepEqual([...counts], [["alice", 2], ["bob", 1], ["carol", 1]]);
+  assert.deepEqual(Object.fromEntries([...counts].map(([name, c]) => [name, c.count])), { alice: 2, bob: 1, carol: 1 });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].pathname, "/api/comments/tree");
   assert.equal(calls[0].searchParams.get("link_id"), POST.id);
@@ -441,12 +451,13 @@ test("an incomplete or failed comment tree falls back to paging", async () => {
     () => json({ data: [] }),
     () => json({ error: "Query timed out" }),
     () => json({ error: "Invalid parameter" }, 400),
+    () => json({ data: [{ kind: "t1", data: { id: "a", author: "alice", replies: { kind: "Listing", data: {} } } }] }),
   ]) {
     let pages = 0;
     const { client, calls } = makeClient((u) =>
       u.pathname === "/api/comments/tree" ? treeResponse() : json({ data: pages++ ? [] : page }),
     );
-    assert.deepEqual([...(await collectCommenters(client, POST))], [["dave", 1]]);
+    assert.deepEqual([...(await collectCommenters(client, POST))], [["dave", { count: 1, last: 5 }]]);
     assert.equal(calls[1].searchParams.get("limit"), "auto");
     assert.equal(calls.length, 3); // tree, one page, one empty page
   }
@@ -489,17 +500,60 @@ test("cached results expire", async () => {
   assert.equal(p.cached, false);
 });
 
-test("lifetime counts cached before the thread settled don't justify skipping", async () => {
-  // Saved an hour after the post: the thread's comments may be missing from the totals.
-  const { cache, clock } = makeCache(POST.createdUtc + 3600);
-  const handler = aggregates({ comments: [["Python", 2]], before: { posts: 0, comments: 2 } });
-  await buildProfile(makeClient(handler).client, "alice", 5, POST, { cache });
-  clock.t += 86400;
-  const later = makeClient(handler);
-  const p = await buildProfile(later.client, "alice", 5, POST, { cache });
-  assert.equal(later.calls.length, 2); // both before queries, nothing else
-  assert.ok(later.calls.every((u) => u.searchParams.has("before")));
+test("saved lifetime totals older than the user's last comment here don't justify skipping", async () => {
+  const handler = aggregates({ comments: [["Python", 2]], before: { posts: 0, comments: 1 } });
+  // Day 3: alice has 1 comment in the thread and 2 in r/Python, so "before" is asked for.
+  const { cache, clock } = makeCache(POST.createdUtc + 3 * 86400);
+  const first = await buildProfile(makeClient(handler).client, "alice", 1, POST, {
+    cache, lastCommentUtc: POST.createdUtc + 2 * 86400,
+  });
+  assert.equal(first.targetCommentsBefore, 1);
+
+  // Day 5: she has 4 comments here now, so the saved total of 2 no longer covers them.
+  // The saved "before" answer is reused rather than skipping to 0.
+  clock.t = POST.createdUtc + 5 * 86400;
+  const opts = { cache, lastCommentUtc: POST.createdUtc + 4.5 * 86400 };
+  const rescan = makeClient(handler);
+  const p = await buildProfile(rescan.client, "alice", 4, POST, opts);
+  assert.equal(rescan.calls.length, 0);
+  assert.equal(p.targetCommentsBefore, 1);
+  assert.equal(p.cached, true);
+
+  // Without a saved answer, both "before" queries are made.
+  cache.backend.map.delete(`v1|before|alice|python|${POST.createdUtc}|all`);
+  const fresh = makeClient(handler);
+  const p2 = await buildProfile(fresh.client, "alice", 4, POST, opts);
+  assert.equal(fresh.calls.length, 2);
+  assert.ok(fresh.calls.every((u) => u.searchParams.has("before")));
+  assert.equal(p2.targetCommentsBefore, 1);
+});
+
+test("before counts saved within an hour of the post are fetched again", async () => {
+  const { cache, clock } = makeCache(POST.createdUtc + 600);
+  await buildProfile(makeClient(aggregates({ comments: [["Python", 3]], before: { posts: 0, comments: 1 } })).client,
+    "bob", 1, POST, { cache, lastCommentUtc: POST.createdUtc + 300 });
+  clock.t = POST.createdUtc + 3 * 86400;
+  const later = makeClient(aggregates({ comments: [["Python", 3]], before: { posts: 0, comments: 2 } }));
+  const p = await buildProfile(later.client, "bob", 1, POST, { cache, lastCommentUtc: POST.createdUtc + 300 });
+  assert.equal(later.calls.length, 2);
   assert.equal(p.targetCommentsBefore, 2);
+  assert.equal(p.cached, false);
+});
+
+test("broken or old-format saved records are ignored", async () => {
+  const { cache } = makeCache();
+  const map = cache.backend.map;
+  const t = POST.createdUtc + 30 * 86400;
+  map.set("v1|life|alice|all", { value: [[null, 1, 2]], fetchedAt: t });
+  map.set(`v1|before|alice|python|${POST.createdUtc}|all`, { value: { posts: "x" }, fetchedAt: t });
+  const { client, calls } = makeClient(aggregates({ comments: [["Python", 5]], before: { posts: 0, comments: 3 } }));
+  const p = await buildProfile(client, "alice", 1, POST, { cache, lastCommentUtc: POST.createdUtc + 60 });
+  assert.equal(calls.length, 3); // 2 lifetime + the comments-before query
+  assert.equal(p.targetCommentsBefore, 3);
+  assert.equal(p.cached, false);
+  // A record with no usable fetchedAt never counts as fresh.
+  map.set("v1|life|bob|all", { value: [] });
+  assert.equal(await cache.get("v1|life|bob|all"), null);
 });
 
 test("partial lifetime counts from the only fallback aren't cached", async () => {
@@ -509,7 +563,7 @@ test("partial lifetime counts from the only fallback aren't cached", async () =>
     return u.searchParams.get("subreddit") ? json({ data: [] }) : json({ error: "Query timed out" });
   };
   await buildProfile(makeClient(handler).client, "busy", 1, POST, { cache, only: ["rust"] });
-  assert.equal(await cache.get("life|busy|all"), null);
+  assert.equal(await cache.get("v1|life|busy|all"), null);
 });
 
 test("ProfileCache is off with 0 days and clears", async () => {
@@ -544,4 +598,162 @@ test("toCsv matches the CLI layout", () => {
       "",
     ].join("\r\n"),
   );
+});
+
+test("Stop cuts a rate-limit pause short", async () => {
+  const controller = new AbortController();
+  const client = new ArcticShiftClient({
+    delay: 0, signal: controller.signal, fetchFn: async () => json({ error: "Too many requests" }, 429),
+  });
+  const started = Date.now();
+  setTimeout(() => controller.abort(), 50);
+  await assert.rejects(client.getPost("abc123"), Aborted);
+  assert.ok(Date.now() - started < 2000, "should not wait out the 30 s pause");
+});
+
+test("Stop releases requests queued for a slot", async () => {
+  const controller = new AbortController();
+  const client = new ArcticShiftClient({
+    delay: 0, maxInFlight: 1, signal: controller.signal,
+    // Never answers; rejects only when its own request is aborted.
+    fetchFn: (_url, { signal }) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }),
+  });
+  const first = client.getPost("a");
+  const queued = client.getPost("b");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(client._waiters.length, 1);
+  controller.abort();
+  await assert.rejects(first, Aborted);
+  await assert.rejects(queued, Aborted);
+});
+
+test("Stop while a response downloads doesn't look like a server error", async () => {
+  const controller = new AbortController();
+  const sleeps = [];
+  const client = new ArcticShiftClient({
+    delay: 0, signal: controller.signal, sleep: async (s) => sleeps.push(s),
+    fetchFn: async () => ({
+      status: 200, ok: true, headers: new Headers(),
+      json: async () => {
+        controller.abort();
+        throw new DOMException("aborted", "AbortError");
+      },
+    }),
+  });
+  await assert.rejects(client.getPost("abc123"), Aborted);
+  assert.deepEqual(sleeps, []);
+});
+
+test("a server that keeps saying slow down fails the user without heavier fallbacks", async () => {
+  const { client, calls } = makeClient(() => json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422));
+  await assert.rejects(buildProfile(client, "alice", 1, POST), ServerBusy);
+  assert.equal(calls.length, 2 * (client.maxRetries + 1)); // each kind's query, and no more
+  assert.ok(!calls.some(isInteractions));
+});
+
+test("a 4xx that isn't JSON fails at once, with its status", async () => {
+  const { client, calls, sleeps } = makeClient(() => new Response("<html>Not found</html>", { status: 404 }));
+  const err = await client.getPost("abc123").catch((e) => e);
+  assert.ok(err instanceof ArcticShiftError);
+  assert.equal(err.status, 404);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(sleeps, []);
+});
+
+test("an interactions query that keeps failing falls through to the split", async () => {
+  const { client, calls, clock } = makeClient((u) => {
+    if (isInteractions(u)) return json({ error: "Internal error" }, 500);
+    if (u.pathname.includes("/posts/")) return json({ data: [] });
+    return u.searchParams.has("after") ? json({ data: [{ key: "rust", count: "1" }] }) : json({ error: "Query timed out" });
+  });
+  clock.t = Date.UTC(2024, 5, 1) / 1000;
+  const p = await buildProfile(client, "busy", 1, POST);
+  assert.equal(calls.filter(isInteractions).length, client.maxRetries + 1);
+  assert.equal(p.subreddits.get("rust").comments, yearlyRanges(null, client._now()).length);
+});
+
+test("aggregate rows that can't be counts are skipped", async () => {
+  const { client } = makeClient(() => json({
+    data: [{ key: null, count: "3" }, { key: "rust", count: "many" }, { key: "go", count: "2" }, null],
+  }));
+  assert.deepEqual([...(await client.subredditCounts("comments", "alice"))], [["go", 2]]);
+});
+
+test("a very deep reply chain is walked without overflowing", async () => {
+  let node = t1("c9999", "u9999");
+  for (let i = 9998; i >= 0; i--) node = t1(`c${i}`, `u${i % 3}`, [node]);
+  // Built as an object: JSON.stringify itself can't go that deep.
+  const client = new ArcticShiftClient({
+    delay: 0,
+    fetchFn: async () => ({ status: 200, ok: true, headers: new Headers(), json: async () => ({ data: [node] }) }),
+  });
+  const counts = await collectCommenters(client, POST);
+  assert.equal([...counts.values()].reduce((n, c) => n + c.count, 0), 10000);
+});
+
+test("threads too big for one tree response are paged straight away", async () => {
+  const { client, calls } = makeClient(() => json({ data: [] }));
+  await collectCommenters(client, { ...POST, numComments: 30_000 });
+  assert.equal(calls[0].pathname, "/api/comments/search");
+});
+
+test("parseSubreddits takes URLs and trailing slashes, and drops invalid names", () => {
+  assert.deepEqual(
+    parseSubreddits(["r/rust/", "https://www.reddit.com/r/golang/comments/x/y/", "old.reddit.com/r/Zig", "c++", "a", ""]),
+    ["rust", "golang", "Zig"],
+  );
+});
+
+test("parsePostRef explains app share links", () => {
+  assert.throws(() => parsePostRef("https://www.reddit.com/r/Python/s/AbCdEf123"), /share links/);
+});
+
+test("a lowered cap applies to requests already waiting for their start", async () => {
+  const clock = { t: 0 };
+  const gates = [];
+  let active = 0;
+  let peak = 0;
+  const client = new ArcticShiftClient({
+    delay: 0, maxInFlight: 2, now: () => clock.t,
+    sleep: (s) => new Promise((resolve) => gates.push(() => { clock.t += s; resolve(); })),
+    fetchFn: async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((r) => setTimeout(r, 5));
+      active--;
+      return json({ data: [] });
+    },
+  });
+  // Both requests take a slot, then wait out a pause; the cap drops to 1 meanwhile.
+  client._pause(10, "test");
+  const both = Promise.all([client._get("/a", {}), client._get("/b", {})]);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(client._inFlight, 2);
+  client._congested();
+  while (gates.length) gates.shift()();
+  await both;
+  assert.equal(peak, 1);
+});
+
+test("a saved-results store that hangs is given up on", async () => {
+  const hung = new Promise(() => {});
+  const cache = new ProfileCache({
+    backend: { get: () => hung, set: () => hung, clear: () => hung, prune: () => hung }, timeoutMs: 20,
+  });
+  assert.equal(await cache.get("k"), null);
+  assert.equal(cache.enabled, false);
+  await cache.set("k", 1); // returns at once now
+});
+
+test("prune deletes old and broken records", async () => {
+  const backend = new MemoryBackend();
+  const now = 100 * 86400;
+  const cache = new ProfileCache({ backend, ttlDays: 7, now: () => now });
+  await backend.set("new", { value: 1, fetchedAt: now - 86400 });
+  await backend.set("old", { value: 1, fetchedAt: now - 40 * 86400 });
+  await backend.set("broken", { value: 1 });
+  assert.equal(await cache.prune(), 2); // older than max(7, 30) days, and no fetchedAt
+  assert.deepEqual([...backend.map.keys()], ["new"]);
 });

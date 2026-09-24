@@ -7,25 +7,40 @@ Profile everyone who commented on a Reddit post, using the
   post was created**. This shows whether they're a regular or a newcomer.
 - **every subreddit** they're active in, with their post and comment counts in each.
 
+There's a web version and a command-line version; both write the same CSV.
+
 ## Use it in your browser
 
 **https://tinted979.github.io/reddit-tool/**
 
-Nothing to install. Paste a post URL and press *Analyze*. Results appear as each user is
-profiled; click a user to see every subreddit they're active in, or download the same CSV
-as the command-line version. Everything runs in the visitor's browser and talks to Arctic
-Shift directly, so there's no server to maintain.
+Nothing to install. Paste a post URL and press *Analyze*. Users appear as they're
+profiled, ordered by how many comments they left in the thread. Click a user to see every
+subreddit they're active in, filter by user or subreddit, or download a CSV. *Stop* ends
+a run at once and keeps what was found so far.
 
-The web version profiles several users at once and skips the "before this post" lookups
-when a user's lifetime counts show there can't be any, so most commenters cost 2 requests
-instead of 4. It fetches a thread's whole comment tree in one request, and saves results in
-your browser (IndexedDB): rescanning a thread, or scanning another one with the same people,
-reuses them for 7 days by default instead of asking the API again. *Clear saved results*
-in the options empties the store. If Arctic Shift rate-limits or asks to slow down, all
-requests pause and the pace eases off automatically.
+Everything runs in your browser and talks to Arctic Shift directly. The whole thread comes
+in one request, several users are profiled at once, and most commenters take 2 requests.
+Results are saved in your browser, so rescanning a thread, or scanning another one with
+some of the same people, reuses them instead of asking the API again.
 
-You can share a link that starts an analysis as soon as it opens (*Copy link* builds one
-with the current options):
+### Reading the results
+
+| On a user's card | Meaning |
+|---|---|
+| *N in thread* | their comments in this thread (0 for a post author who didn't comment) |
+| *new here* / *occasional* / *regular* | their posts + comments in the post's subreddit before the post was made: none / 1–9 / 10 or more. The badge shows the counts |
+| *N subreddits* | subreddits they have archived posts or comments in |
+| *saved* | reused from an earlier scan in this browser, with no new requests |
+| *lookup failed* | Arctic Shift kept failing for this user (open the card for details). Press *Analyze* again to retry; saved results are reused for everyone else |
+
+The line under a name lists their most active subreddits. Opening a card shows the full
+table, with the post's own subreddit highlighted, and a link to their Reddit profile.
+
+### Options and share links
+
+*Copy link* builds a link that starts the same analysis as soon as it opens, and the
+address bar shows one once you press *Analyze*. Options set by a link are listed next to
+*Options*.
 
 ```
 https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=1
@@ -34,26 +49,51 @@ https://tinted979.github.io/reddit-tool/?post=https://redd.it/1l7d1e4&max=20&op=
 | Parameter | Meaning |
 |---|---|
 | `post` | post URL or id (starts the analysis automatically) |
-| `max` | only profile the top N commenters |
+| `max` | only profile the N most active commenters in the thread |
 | `op=1` | also profile the post's author |
 | `exclude` | comma-separated usernames to skip |
-| `subs` | comma-separated subreddits to limit results to (the post's subreddit is always included) |
-| `years` | only count activity from the last 1, 5 or 10 years (default: all time) |
-| `min` | hide subreddits with fewer than N posts+comments |
-| `delay` | seconds between request starts (default 0.5) |
-| `par` | users profiled in parallel, 1–5 (default 3) |
-| `cache` | days to reuse saved results (default 7, `0` = off) |
+| `subs` | comma-separated subreddits to limit results to; the post's subreddit is always included, and listed ones are shown even with no activity. For very active users it also means far fewer requests |
+| `years` | only count activity from the last 1, 5 or 10 years, counted back from today (default: all time) |
+| `min` | hide subreddits with fewer than N posts + comments, on the page and in the CSV (the post's subreddit is always kept) |
+| `delay` | seconds between request starts (default 0.5, minimum 0.25) |
+| `par` | users profiled in parallel, 1–5 (default 3); also the most requests in flight at once |
+| `cache` | days to keep and reuse saved results (default 7, `0` = don't save) |
 
-The site lives in `web/`. `.github/workflows/pages.yml` runs both test suites on every
-push and deploys `web/` to GitHub Pages from the default branch. One-time setup: in the
-repo's **Settings → Pages**, set *Source* to **GitHub Actions**. On a free GitHub plan,
-Pages only works for public repositories.
+### Saved results and privacy
+
+- The page has no server of its own and no analytics. Your browser sends every query
+  straight to Arctic Shift, which sees the post and the usernames you look up.
+- Results are saved in this browser's IndexedDB (database `reddit-tool`): each user's
+  per-subreddit counts, and their "before" counts for each post you scan. They're reused
+  for `cache` days; records older than that (and at least 30 days old) are deleted when
+  the page loads. *Clear saved results* under *Options* deletes everything now.
+- A saved "before" count is reused only if it was fetched at least an hour after the post,
+  and saved totals from before a user's latest comment in the thread aren't trusted to
+  skip queries, so rescanning a thread that's still growing stays correct.
+
+## Limits
+
+- **Archived data only.** Counts include only what Arctic Shift has archived. New posts and
+  comments usually appear within minutes; anything deleted before it was archived is
+  missing. A post that isn't archived yet can't be analysed.
+- **Deleted accounts.** Comments whose author shows as `[deleted]` or `[removed]` can't be
+  traced to anyone, so they're skipped, and so is AutoModerator.
+- **History window (web).** `years` counts back from today, not from the post, and applies
+  to every count. For a post older than the window there's no "before" to count.
+- **Very active users.** Their full history can time out; the fallbacks (see
+  [How it works](#how-it-works)) take more requests, and if those fail the user shows
+  *lookup failed*, with the reason in the CSV's `error` column.
+- **Reddit app share links** (`reddit.com/r/<sub>/s/<code>`) don't contain the post id.
+  Open the link and copy the full `…/comments/<id>/…` address instead.
+- **Rate limits.** Arctic Shift is a free, shared service. A rate limit (HTTP 429) pauses
+  every request, for 30 seconds in the web app; a "slow down" answer delays only the request
+  that got it, and fewer requests run at once until the server recovers. If it keeps
+  saying so, that user fails rather than piling on heavier queries. Please don't turn up
+  the pace aggressively.
 
 ## Command-line version
 
-### Install / run
-
-Requires [uv](https://docs.astral.sh/uv/).
+Requires [uv](https://docs.astral.sh/uv/) (Python 3.12+, which uv installs if needed).
 
 ```sh
 uv sync
@@ -61,28 +101,26 @@ uv run reddit-tool https://www.reddit.com/r/learnpython/comments/1l7d1e4/running
 ```
 
 The post can be given as a full reddit URL, a `redd.it/<id>` link, a `t3_<id>` fullname or
-the bare post id.
-
-#### Options
+the bare post id. Progress is printed to stderr; the results go to a CSV file.
 
 | Option | Meaning |
 |---|---|
 | `-o, --output PATH` | CSV path (default `<post_id>_activity.csv`) |
 | `--include-op` | also profile the post's author |
-| `--exclude USER` | username to skip, repeatable (`AutoModerator` and `[deleted]` are always skipped) |
+| `--exclude USER` | username to skip, repeatable (`AutoModerator`, `[deleted]` and `[removed]` are always skipped) |
 | `--max-users N` | only profile the N most active commenters in the thread |
 | `--min-count N` | omit subreddits where a user has fewer than N posts+comments (the target subreddit is always kept) |
 | `--delay SECONDS` | minimum pause between API requests (default 2.0) |
 
-Each commenter costs 4 API requests, so a thread with 100 commenters takes roughly 15
-minutes at the default delay. Arctic Shift is a free service, so please don't lower the
-delay aggressively. Press Ctrl-C to stop early; the profiles collected so far are still
-written.
+The CLI profiles one user at a time with 4 requests each and saves nothing between runs,
+so a thread with 100 commenters takes roughly 15 minutes at the default delay. It has no
+equivalent of the web app's `subs` or `years`. Press Ctrl-C to stop early; the profiles
+collected so far are still written.
 
-### Output
+## CSV output
 
-One CSV row per (user, subreddit), sorted by the user's comment count in the thread, then
-by activity in each subreddit:
+One row per (user, subreddit), sorted by the user's comment count in the thread, then by
+activity in each subreddit:
 
 ```
 username,thread_comments,target_subreddit,target_posts_before,target_comments_before,subreddit,posts,comments,total,error
@@ -92,31 +130,41 @@ barkmonster,2,learnpython,0,24,ADHD,0,53,53,
 ```
 
 - `thread_comments`: the user's comment count in the analysed thread
-- `target_posts_before` / `target_comments_before`: their activity in the post's subreddit before the post was created
-- `posts` / `comments` / `total`: all-time counts in `subreddit`, as archived by Arctic Shift
+- `target_subreddit`: the post's subreddit
+- `target_posts_before` / `target_comments_before`: their activity there before the post was created (blank if the lookup failed)
+- `posts` / `comments` / `total`: their counts in `subreddit`, as archived by Arctic Shift: all-time, or since the start of the web app's `years` window
+- `error`: why the lookup failed, if it did
 
-A user with no archived activity, or whose lookup failed (see `error`), still gets one row.
+Subreddits below the minimum (`--min-count` or `min`) are left out, except the post's own.
+A user with no archived activity, or whose lookup failed, still gets one row. A CSV
+downloaded mid-run is named `…_activity_partial.csv`.
 
 ## How it works
 
-1. `GET /api/posts/ids` fetches the post's subreddit and creation time.
-2. `GET /api/comments/search?link_id=…` is paged by timestamp to collect the commenters.
+Both versions use the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md):
+
+1. `GET /api/posts/ids` fetches the post's subreddit, author and creation time.
+2. The commenters: the web app gets the whole thread from
+   `GET /api/comments/tree?link_id=…` in one request, and pages
+   `GET /api/comments/search?link_id=…` by timestamp only if the tree is incomplete, fails,
+   or the thread has 25,000+ comments. The CLI always pages the search.
 3. For each commenter, `GET /api/{posts,comments}/search/aggregate?aggregate=subreddit&author=…`
    returns per-subreddit counts. The same call with `subreddit=…&before=<post time>`
-   returns the "before" counts.
+   returns the "before" counts. The web app runs these in parallel and skips a "before"
+   query when the lifetime counts leave no room for one, e.g. when all of a user's
+   comments in the subreddit are in this thread.
 
-Rate limits (HTTP 429) and the server's "slow down" responses are retried with backoff.
-Aggregations that time out for very active users are split into yearly chunks and summed.
+Aggregations can time out for very active users; both versions retry once. The CLI then
+splits the query into yearly chunks and adds them up. The web app first tries
+`GET /api/users/interactions/subreddits`, which answers for posts and comments in one query
+(`weight_posts=1000000&weight_comments=1` packs both counts into one number). If that fails
+too, it splits only the kind that timed out: into one query per subreddit when `subs` is
+set, otherwise into yearly chunks. For ordinary users the two aggregations are quicker, so
+they stay the first choice.
 
-The web version differs in a few places:
-
-- Commenters come from `GET /api/comments/tree?link_id=…` in one request. If the tree is
-  incomplete or fails, it falls back to paging the search with `limit=auto`.
-- When a very active user's aggregations time out, it first tries
-  `GET /api/users/interactions/subreddits`. This endpoint answers with posts and comments
-  combined in one query (`weight_posts=1000000&weight_comments=1` packs both counts into
-  one number). Only if that fails too does it split the aggregations into yearly chunks.
-  For ordinary users the two aggregations are quicker, so they stay the first choice.
+The web app spaces request starts by `delay` and caps how many are in flight, starting at
+`par`: the cap halves on a 429, slow-down or network error, and rises again after a run of
+successes.
 
 ## Development
 
@@ -125,5 +173,12 @@ uv run pytest            # Python CLI
 cd web && npm test       # web app core (Node 22+, no dependencies)
 ```
 
-To try the web app locally, serve `web/` with any static server, e.g.
-`python3 -m http.server -d web`, and open http://localhost:8000.
+To try the web app locally, serve `web/` with any static server (ES modules don't load
+from `file://`), e.g. `python3 -m http.server -d web`, and open http://localhost:8000.
+
+`.github/workflows/pages.yml` runs both test suites on every push and pull request. On the
+default branch it then publishes the page files at the top of `web/` (`*.html`, `*.js`,
+`*.css`) to GitHub Pages, failing if a module imports a file that isn't among them; any
+other kind of file the page needs must be added to its copy step. One-time setup: in the
+repo's **Settings → Pages**, set *Source* to **GitHub Actions**. On a free GitHub plan,
+Pages only works for public repositories.

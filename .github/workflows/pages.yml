@@ -42,6 +42,8 @@ jobs:
       - name: Assemble site
         run: |
           mkdir _site
+          # The page files at the top of web/ (not tests/ or package.json). Add any other
+          # file type the page comes to need here.
           cp web/*.html web/*.js web/*.css _site/
           # Fail if a module imports a file that didn't make it into the site.
           for f in $(grep -ho 'from "\./[^"]*"' _site/*.js | sed 's/from "\.\/\(.*\)"/\1/' | sort -u); do

@@ -1,6 +1,13 @@
+// The page: reads the form, runs a scan with core.js (several users at a time) and shows
+// the results as they arrive. The API and profiling logic live in core.js; saved results
+// in cache.js.
+
 import {
   Aborted,
   ArcticShiftClient,
+  ArcticShiftError,
+  QueryTimeout,
+  ServerBusy,
   buildProfile,
   collectCommenters,
   mapPool,
@@ -12,11 +19,17 @@ import {
 import { openCache } from "./cache.js";
 
 const $ = (id) => document.getElementById(id);
+const TITLE = document.title;
+const DEFAULTS = { delay: 0.5, concurrency: 3, cacheDays: 7 };
 
 const state = {
+  runId: 0, // bumped for every run; callbacks from an older run are ignored
+  controller: null, // AbortController of the run in progress
+  focusRunAfter: false,
   post: null,
-  profiles: [],
-  controller: null,
+  slots: [], // profiles by rank (thread activity); has gaps while a run is going
+  shown: 0, // cards passing the filter
+  beforeKnown: true, // false when the post is older than the history window
 };
 
 function el(tag, attrs = {}, ...children) {
@@ -26,50 +39,170 @@ function el(tag, attrs = {}, ...children) {
     else node.setAttribute(k, v);
   }
   for (const child of children) {
-    if (child !== null && child !== undefined) node.append(child);
+    if (child !== null && child !== undefined && child !== false) node.append(child);
   }
   return node;
 }
 
+const plural = (n, word) => `${n} ${n === 1 ? word : `${word}s`}`;
+
+function debounce(fn, ms) {
+  let timer;
+  return () => {
+    clearTimeout(timer);
+    timer = setTimeout(fn, ms);
+  };
+}
+
+// ---- Options ----
+
+// The options as a run will use them, clamped to what the tool supports.
 function readOptions() {
-  const maxUsers = parseInt($("max-users").value, 10);
+  const num = (id) => Number.parseFloat($(id).value);
+  const maxUsers = Math.floor(num("max-users"));
+  const years = Number($("years").value);
+  const delay = num("delay");
+  const concurrency = Math.round(num("concurrency"));
+  const cacheDays = num("cache-days");
   return {
     includeOp: $("include-op").checked,
     exclude: $("exclude").value.split(/[\s,]+/).filter(Boolean),
     only: parseSubreddits($("only-subs").value.split(/[\s,]+/)),
-    years: [1, 5, 10].includes(Number($("years").value)) ? Number($("years").value) : null,
-    maxUsers: Number.isFinite(maxUsers) && maxUsers > 0 ? maxUsers : null,
-    delay: Math.max(0.25, parseFloat($("delay").value) || 0.5),
-    concurrency: Math.min(5, Math.max(1, parseInt($("concurrency").value, 10) || 3)),
-    cacheDays: cacheDays(),
+    years: [1, 5, 10].includes(years) ? years : null,
+    maxUsers: maxUsers > 0 ? maxUsers : null,
+    delay: Number.isFinite(delay) ? Math.min(30, Math.max(0.25, delay)) : DEFAULTS.delay,
+    concurrency: Number.isFinite(concurrency) ? Math.min(5, Math.max(1, concurrency)) : DEFAULTS.concurrency,
+    cacheDays: cacheDays >= 0 ? cacheDays : DEFAULTS.cacheDays,
   };
 }
 
-function cacheDays() {
-  const n = parseFloat($("cache-days").value);
-  return Number.isFinite(n) && n >= 0 ? n : 7;
-}
-
 function minCount() {
-  return Math.max(0, parseInt($("min-count").value, 10) || 0);
+  return Math.max(0, Math.floor(Number.parseFloat($("min-count").value)) || 0);
 }
 
-function showError(message) {
-  $("error").textContent = message;
-  $("error").hidden = !message;
+// Put the options back in the form as they'll be used (after a shared link or a typo).
+function showOptions(opts) {
+  $("exclude").value = opts.exclude.join(", ");
+  $("only-subs").value = opts.only.join(", ");
+  $("years").value = opts.years ?? "";
+  $("max-users").value = opts.maxUsers ?? "";
+  $("delay").value = opts.delay;
+  $("concurrency").value = opts.concurrency;
+  $("cache-days").value = opts.cacheDays;
+  $("min-count").value = minCount();
+  updateOptionsSummary(opts);
 }
 
-function setStatus(text, fraction = null) {
+// "Options: author included · top 20 · last 5 years", so settings from a shared link are
+// visible without opening the panel.
+function updateOptionsSummary(o = readOptions()) {
+  const parts = [];
+  if (o.includeOp) parts.push("author included");
+  if (o.exclude.length) parts.push(`skipping ${plural(o.exclude.length, "user")}`);
+  if (o.maxUsers) parts.push(`top ${o.maxUsers}`);
+  if (o.only.length) {
+    parts.push(o.only.length <= 3 ? `only ${o.only.map((s) => `r/${s}`).join(", ")}` : `only ${o.only.length} subreddits`);
+  }
+  if (o.years) parts.push(`last ${plural(o.years, "year")}`);
+  if (o.cacheDays !== DEFAULTS.cacheDays) parts.push(o.cacheDays ? `results kept ${plural(o.cacheDays, "day")}` : "not saving results");
+  if (o.delay !== DEFAULTS.delay) parts.push(`${o.delay}s between requests`);
+  if (o.concurrency !== DEFAULTS.concurrency) parts.push(`${o.concurrency} in parallel`);
+  $("options-summary").textContent = parts.length ? `: ${parts.join(" · ")}` : "";
+}
+
+// ---- Status ----
+
+const status = { text: "", waits: 0, until: 0, reason: "", timer: null };
+
+function renderStatus() {
+  const left = Math.ceil(status.until - Date.now() / 1000);
+  const wait = status.waits > 0 && left > 0 ? ` (${status.reason}, resuming in ${left}s)` : "";
+  $("status-text").textContent = status.text + wait;
+}
+
+function setStatus(text) {
+  status.text = text;
   $("status").hidden = false;
-  $("status-text").textContent = text;
-  if (fraction !== null) $("bar-fill").style.width = `${Math.round(fraction * 100)}%`;
+  renderStatus();
+}
+
+// The client reports each request that starts (reason, seconds) or stops (null) waiting
+// out a rate limit or a busy server.
+function onWait(reason, seconds) {
+  if (reason) {
+    status.waits++;
+    const until = Date.now() / 1000 + seconds;
+    if (until > status.until) {
+      status.until = until;
+      status.reason = reason;
+    }
+    status.timer ??= setInterval(renderStatus, 1000);
+    if (seconds >= 10) announce(`Paused: ${reason}. Resuming in ${Math.round(seconds)} seconds.`);
+  } else if (--status.waits <= 0) {
+    clearWaits();
+  }
+  renderStatus();
+}
+
+function clearWaits() {
+  clearInterval(status.timer);
+  Object.assign(status, { waits: 0, until: 0, timer: null });
+}
+
+function setProgress(fraction) {
+  const pct = Math.round(fraction * 100);
+  $("bar-fill").style.width = `${pct}%`;
+  $("bar").setAttribute("aria-valuenow", String(pct));
+  document.title = state.controller ? `(${pct}%) ${TITLE}` : TITLE;
+}
+
+// Screen readers hear these (milestones only, not every progress tick).
+function announce(text) {
+  $("announce").textContent = text;
+}
+
+// Plain-language explanation of an error from core.js; the raw message goes in details.
+function explain(err) {
+  if (err instanceof ServerBusy) return "Arctic Shift is overloaded right now. Try again in a few minutes.";
+  if (err instanceof QueryTimeout) return "Arctic Shift couldn't count this much history in time.";
+  if (err instanceof ArcticShiftError) {
+    if (err.status === 429) return "Arctic Shift is limiting requests right now. Wait a minute and try again.";
+    if (err.status === null) return "Couldn't reach Arctic Shift. Check your connection and try again.";
+    return `Arctic Shift returned an error (HTTP ${err.status}).`;
+  }
+  return err.message;
+}
+
+function showError(message, detail = null) {
+  const box = $("error");
+  box.replaceChildren();
+  box.hidden = !message;
+  if (!message) return;
+  box.append(el("p", {}, message));
+  if (detail && detail !== message) box.append(el("details", {}, el("summary", {}, "Details"), detail));
 }
 
 function setRunning(running) {
   $("run").disabled = running;
-  $("stop").hidden = !running;
   $("post").readOnly = running;
+  $("option-fields").disabled = running;
+  $("stop").hidden = !running;
+  $("stop").disabled = false;
+  $("stop").textContent = "Stop";
+  $("download").textContent = running ? "Download CSV (so far)" : "Download CSV";
+  if (!running && state.focusRunAfter) $("run").focus({ preventScroll: true });
+  state.focusRunAfter = false;
 }
+
+function stop() {
+  if (!state.controller) return;
+  state.focusRunAfter = document.activeElement === $("stop");
+  state.controller.abort();
+  $("stop").disabled = true;
+  $("stop").textContent = "Stopping…";
+}
+
+// ---- Post and user cards ----
 
 function formatDate(ts) {
   return new Date(ts * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -81,231 +214,375 @@ function renderPost(post, commenters) {
   $("post-title").textContent = post.title || "(untitled post)";
   $("post-title").href = `https://www.reddit.com/r/${post.subreddit}/comments/${post.id}/`;
   let meta = `by u/${post.author} · ${formatDate(post.createdUtc)}`;
+  let title = "";
   if (commenters) {
-    const total = [...commenters.values()].reduce((a, b) => a + b, 0);
-    meta += ` · ${total} archived comments from ${commenters.size} users`;
+    const people = [...commenters.values()].filter((c) => c.count > 0);
+    const comments = people.reduce((n, c) => n + c.count, 0);
+    meta += ` · ${plural(people.length, "commenter")} with ${plural(comments, "comment")} in the archive`;
+    title = "Not counting deleted accounts, AutoModerator or skipped users. " +
+      `Reddit counted ${plural(post.numComments, "comment")} when the post was archived.`;
   }
   $("post-meta").textContent = meta;
+  $("post-meta").title = title;
   for (const n of document.querySelectorAll(".target-name")) n.textContent = `r/${post.subreddit}`;
 }
 
+function renderWindowNote(after) {
+  if (after === null) {
+    $("window-note").textContent = "";
+    return;
+  }
+  const since = new Date(after * 1000).toLocaleDateString(undefined, { dateStyle: "medium" });
+  $("window-note").textContent = ` Only activity since ${since} is counted` +
+    (state.beforeKnown ? "." : `; this post is older than that, so there's no "before" to count.`);
+}
+
+// The badge for a user's activity in the post's subreddit before the post.
+function activity(profile, post) {
+  const sub = `r/${post.subreddit}`;
+  if (!state.beforeKnown) {
+    return { cls: "pill", text: "before: outside window", title: `This post is older than the history window` };
+  }
+  const { targetPostsBefore: posts, targetCommentsBefore: comments } = profile;
+  if (posts + comments === 0) {
+    return { cls: "pill new", text: "new here", title: `No posts or comments in ${sub} before this post` };
+  }
+  const counts = [posts && plural(posts, "post"), comments && plural(comments, "comment")].filter(Boolean).join(", ");
+  const tier = posts + comments >= 10 ? "regular" : "occasional";
+  return { cls: `pill ${tier}`, text: `${tier} · ${counts} before`, title: `${counts} in ${sub} before this post` };
+}
+
+const searchWords = new WeakMap();
+
 function userCard(profile, post) {
   const subs = sortedSubreddits(profile, post, minCount());
-  const before = profile.targetPostsBefore + profile.targetCommentsBefore;
-  const pills = el("div", { class: "stats" });
-  pills.append(el("span", { class: "pill" }, `${profile.threadComments} in thread`));
-  if (profile.cached) {
-    pills.append(el("span", { class: "pill cached", title: "Reused from an earlier scan" }, "cached"));
-  }
+  const active = subs.filter((s) => s.total > 0);
+  const pills = el("span", { class: "stats" }, el("span", { class: "pill" }, `${profile.threadComments} in thread`));
+  let label;
   if (profile.error) {
-    pills.append(el("span", { class: "pill err", title: profile.error }, "lookup failed"));
+    pills.append(el("span", { class: "pill err" }, "lookup failed"));
+    label = `u/${profile.username}: lookup failed`;
   } else {
+    const a = activity(profile, post);
     pills.append(
-      el("span", { class: "pill", title: `posts / comments in r/${post.subreddit} before this post` },
-        `before: ${profile.targetPostsBefore} / ${profile.targetCommentsBefore}`),
-      el("span", { class: before === 0 ? "pill new" : "pill regular" }, before === 0 ? "new here" : "regular"),
-      el("span", { class: "pill" }, `${[...profile.subreddits.values()].filter((c) => c.posts + c.comments > 0).length} subreddits`),
+      el("span", { class: a.cls, title: a.title }, a.text),
+      el("span", { class: "pill", title: "Subreddits with archived posts or comments" }, plural(active.length, "subreddit")),
     );
+    label = `u/${profile.username}: ${profile.threadComments} in thread, ${a.text}, ${plural(active.length, "subreddit")}`;
+  }
+  if (profile.cached) {
+    pills.append(el("span", { class: "pill saved", title: "Reused from an earlier scan in this browser" }, "saved"));
+    label += ", saved";
   }
 
-  const top = subs.slice(0, 6).map((s) => `r/${s.name} (${s.total})`).join(" · ");
-  const summary = el(
-    "summary",
-    {},
-    el("span", { class: "name" },
-      el("a", { href: `https://www.reddit.com/user/${encodeURIComponent(profile.username)}`, target: "_blank", rel: "noopener" },
-        `u/${profile.username}`)),
+  const top = active.slice(0, 6).map((s) => `r/${s.name} (${s.total})`).join(" · ");
+  const summary = el("summary", { "aria-label": label },
+    el("span", { class: "name" }, `u/${profile.username}`),
     pills,
-    el("div", { class: "top" }, profile.error ? profile.error : top || "No archived posts or comments"),
-  );
-  // Let the profile link open without toggling the card.
-  summary.querySelector("a").addEventListener("click", (e) => e.stopPropagation());
-
+    el("span", { class: "top" }, profile.error || top || "No archived posts or comments"));
   const card = el("details", { class: "user" }, summary);
-  card.dataset.rank = String(profile.rank ?? 0);
-  card.dataset.search = [profile.username, ...profile.subreddits.keys()].join(" ").toLowerCase();
+  card.dataset.rank = String(profile.rank);
+  searchWords.set(card, [profile.username, ...active.map((s) => s.name)].map((w) => w.toLowerCase()));
 
-  // Build the full table lazily, the first time the card is opened.
+  // Build the panel the first time the card is opened.
   card.addEventListener("toggle", () => {
-    if (!card.open || card.querySelector(".subs-wrap, .empty")) return;
-    if (!subs.length) {
-      card.append(el("p", { class: "empty" }, profile.error || "No archived activity."));
-      return;
-    }
-    const target = post.subreddit.toLowerCase();
-    const body = el("tbody");
-    for (const s of subs) {
-      body.append(
-        el("tr", { class: s.name.toLowerCase() === target ? "target" : "" },
-          el("td", {}, el("a", { href: `https://www.reddit.com/r/${s.name}/`, target: "_blank", rel: "noopener" }, `r/${s.name}`)),
-          el("td", {}, String(s.posts)),
-          el("td", {}, String(s.comments)),
-          el("td", {}, String(s.total))),
-      );
-    }
-    const table = el("table", { class: "subs" },
-      el("thead", {}, el("tr", {}, el("th", {}, "Subreddit"), el("th", {}, "Posts"), el("th", {}, "Comments"), el("th", {}, "Total"))),
-      body);
-    card.append(el("div", { class: "subs-wrap" }, table));
+    if (!card.open || card.querySelector(".panel")) return;
+    const profileUrl = `https://www.reddit.com/user/${encodeURIComponent(profile.username)}/`;
+    const panel = el("div", { class: "panel" },
+      el("p", { class: "panel-links" },
+        el("a", { href: profileUrl, target: "_blank", rel: "noopener" }, `u/${profile.username} on Reddit ↗`)));
+    if (profile.error) panel.append(el("p", { class: "empty" }, profile.errorDetail || profile.error));
+    else if (!subs.length) panel.append(el("p", { class: "empty" }, "No archived activity."));
+    else panel.append(subredditTable(subs, post));
+    card.append(panel);
   });
   return card;
 }
 
-function renderUsers() {
-  const list = $("users");
-  list.replaceChildren(...state.profiles.map((p) => userCard(p, state.post)));
-  applyFilter();
+function subredditTable(subs, post) {
+  const target = post.subreddit.toLowerCase();
+  const body = el("tbody");
+  for (const s of subs) {
+    body.append(
+      el("tr", { class: s.name.toLowerCase() === target ? "target" : "" },
+        el("td", {}, el("a", { href: `https://www.reddit.com/r/${s.name}/`, target: "_blank", rel: "noopener" }, `r/${s.name}`)),
+        el("td", {}, String(s.posts)),
+        el("td", {}, String(s.comments)),
+        el("td", {}, String(s.total))),
+    );
+  }
+  return el("div", { class: "subs-wrap" },
+    el("table", { class: "subs" },
+      el("thead", {}, el("tr", {},
+        el("th", { scope: "col" }, "Subreddit"), el("th", { scope: "col" }, "Posts"),
+        el("th", { scope: "col" }, "Comments"), el("th", { scope: "col" }, "Total"))),
+      body));
 }
 
-// Insert a card so the list stays in thread-activity order while results arrive out of order.
-function insertCard(card) {
-  const rank = Number(card.dataset.rank);
-  const after = [...$("users").children].find((c) => Number(c.dataset.rank) > rank);
-  $("users").insertBefore(card, after ?? null);
+// ---- Filter and list ----
+
+// Filter terms, ignoring "r/" and "u/" prefixes; a user must match every term.
+function filterTerms() {
+  return $("filter").value.toLowerCase().split(/[\s,]+/).map((t) => t.replace(/^\/?[ru]\//, "")).filter(Boolean);
+}
+
+function matches(card, terms) {
+  const words = searchWords.get(card) ?? [];
+  return terms.every((t) => words.some((w) => w.includes(t)));
+}
+
+function updateFilterNote(terms) {
+  const total = $("users").childElementCount;
+  $("filter-note").textContent = !terms.length ? ""
+    : state.shown ? `Showing ${state.shown} of ${plural(total, "user")}`
+    : `No users match “${$("filter").value.trim()}”`;
 }
 
 function applyFilter() {
-  const q = $("filter").value.trim().toLowerCase();
+  const terms = filterTerms();
+  state.shown = 0;
   for (const card of $("users").children) {
-    card.hidden = q !== "" && !card.dataset.search.includes(q);
+    card.hidden = !matches(card, terms);
+    if (!card.hidden) state.shown++;
   }
+  updateFilterNote(terms);
 }
 
-function shareUrl() {
-  const url = new URL(window.location.href);
-  url.search = "";
-  const opts = readOptions();
-  url.searchParams.set("post", $("post").value.trim());
-  if (opts.includeOp) url.searchParams.set("op", "1");
-  if (opts.exclude.length) url.searchParams.set("exclude", opts.exclude.join(","));
-  if (opts.only.length) url.searchParams.set("subs", opts.only.join(","));
-  if (opts.years) url.searchParams.set("years", String(opts.years));
-  if (opts.maxUsers) url.searchParams.set("max", String(opts.maxUsers));
-  if (minCount()) url.searchParams.set("min", String(minCount()));
-  if (opts.delay !== 0.5) url.searchParams.set("delay", String(opts.delay));
-  if (opts.concurrency !== 3) url.searchParams.set("par", String(opts.concurrency));
-  if (opts.cacheDays !== 7) url.searchParams.set("cache", String(opts.cacheDays));
-  return url.toString();
+// Insert a card so the list stays in thread-activity order while results arrive out of
+// order. They mostly arrive in order, so search from the end.
+function insertCard(card) {
+  const list = $("users");
+  const rank = Number(card.dataset.rank);
+  let next = null;
+  for (let c = list.lastElementChild; c && Number(c.dataset.rank) > rank; c = c.previousElementSibling) next = c;
+  list.insertBefore(card, next);
+  const terms = filterTerms();
+  card.hidden = !matches(card, terms);
+  if (!card.hidden) state.shown++;
+  updateFilterNote(terms);
 }
+
+// Rebuild every card (after the minimum changes), keeping open ones open.
+function renderUsers() {
+  if (!state.post) return;
+  const open = new Set([...$("users").querySelectorAll(".user[open]")].map((c) => c.dataset.rank));
+  const cards = state.slots.filter(Boolean).map((p) => {
+    const card = userCard(p, state.post);
+    if (open.has(card.dataset.rank)) card.open = true;
+    return card;
+  });
+  $("users").replaceChildren(...cards);
+  applyFilter();
+  history.replaceState(null, "", shareUrl(currentPostRef()));
+}
+
+// ---- A run ----
 
 async function run() {
+  if (state.controller) return;
+  const opts = readOptions();
+  showOptions(opts);
   showError("");
+  $("post").removeAttribute("aria-invalid");
   let postId;
   try {
     postId = parsePostRef($("post").value);
   } catch (err) {
     showError(err.message);
+    $("post").setAttribute("aria-invalid", "true");
+    $("post").setAttribute("aria-describedby", "error");
+    $("post").focus();
     return;
   }
-  const opts = readOptions();
-  history.replaceState(null, "", shareUrl());
+  if (navigator.onLine === false) {
+    showError("You're offline. Connect to the internet and try again.");
+    return;
+  }
+  history.replaceState(null, "", shareUrl(postId, opts));
 
-  state.controller = new AbortController();
-  state.post = null;
-  state.profiles = [];
+  const runId = ++state.runId;
+  const controller = new AbortController();
+  Object.assign(state, { controller, post: null, slots: [], shown: 0, beforeKnown: true });
   $("post-card").hidden = true;
   $("results").hidden = true;
   $("users").replaceChildren();
+  $("bar").hidden = false;
+  clearWaits();
   setRunning(true);
-  $("bar-fill").style.width = "0";
+  setProgress(0);
 
-  let current = "";
   // Start of the history window, in epoch seconds (null = all time).
   const after = opts.years ? Math.floor(Date.now() / 1000 - opts.years * 365.25 * 86400) : null;
-  $("window-note").textContent = after
-    ? ` (counting activity since ${new Date(after * 1000).toLocaleDateString(undefined, { dateStyle: "medium" })})`
-    : "";
-
   const cache = openCache(opts.cacheDays);
   const client = new ArcticShiftClient({
     delay: opts.delay,
-    signal: state.controller.signal,
     maxInFlight: opts.concurrency,
-    // A null reason means the wait is over; drop the stale "waiting" note.
-    onWait: (reason, seconds) =>
-      setStatus(reason ? `${current} (${reason}, waiting ${Math.round(seconds)}s…)` : current),
+    signal: controller.signal,
+    onWait: (reason, seconds) => runId === state.runId && onWait(reason, seconds),
   });
+  const counts = { done: 0, total: 0 };
 
   try {
-    current = "Looking up the post…";
-    setStatus(current, 0);
+    setStatus("Looking up the post…");
+    announce("Looking up the post…");
     const post = await client.getPost(postId);
     if (!post) {
-      showError(`Post ${postId} isn't in the Arctic Shift archive (it may be too new, or removed).`);
+      showError(`Post ${postId} isn't in the Arctic Shift archive. It may have been removed, or be too new: posts usually appear within minutes.`);
       $("status").hidden = true;
       return;
     }
     state.post = post;
+    state.beforeKnown = after === null || post.createdUtc > after;
     renderPost(post, null);
+    renderWindowNote(after);
 
-    current = "Collecting commenters…";
-    setStatus(current, 0);
+    setStatus("Collecting commenters…");
     const commenters = await collectCommenters(client, post, opts);
     renderPost(post, commenters);
 
-    let ranked = [...commenters].sort((a, b) => b[1] - a[1] || a[0].toLowerCase().localeCompare(b[0].toLowerCase()));
+    let ranked = [...commenters].sort((a, b) =>
+      b[1].count - a[1].count || a[0].toLowerCase().localeCompare(b[0].toLowerCase()));
     if (opts.maxUsers) ranked = ranked.slice(0, opts.maxUsers);
     if (!ranked.length) {
-      setStatus("No commenters to profile.", 1);
+      $("bar").hidden = true;
+      const text = post.numComments
+        ? "None of this post's archived comments are from accounts that can be profiled."
+        : "This post has no archived comments yet.";
+      setStatus(text);
+      announce(text);
       return;
     }
     $("results").hidden = false;
+    updateFilterNote(filterTerms());
 
-    const slots = [];
-    let done = 0;
+    counts.total = ranked.length;
     let inFlight = 0;
     let fromCache = 0;
+    let failed = 0;
+    let firstError = null;
+    let milestone = 0.25;
     const progress = () => {
-      current = `Profiled ${done} of ${ranked.length}` +
-        (fromCache ? `, ${fromCache} from cache` : "") +
-        (inFlight ? ` (${inFlight} in progress)` : "");
-      setStatus(current, done / ranked.length);
+      setStatus(`Profiled ${counts.done} of ${counts.total}` +
+        (fromCache ? `, ${fromCache} from saved results` : "") +
+        (inFlight ? ` (${inFlight} in progress)` : ""));
+      setProgress(counts.done / counts.total);
+      if (counts.done >= milestone * counts.total && counts.done < counts.total) {
+        announce(`Profiled ${counts.done} of ${counts.total}.`);
+        while (counts.done >= milestone * counts.total) milestone += 0.25;
+      }
     };
+    announce(`Found ${plural(counts.total, "commenter")}. Profiling…`);
     progress();
-    await mapPool(ranked, opts.concurrency, async ([username, n], i) => {
+    await mapPool(ranked, opts.concurrency, async ([username, { count, last }], i) => {
       inFlight++;
       progress();
       let profile;
       try {
-        profile = await buildProfile(client, username, n, post, { only: opts.only, after, cache });
+        profile = await buildProfile(client, username, count, post, {
+          only: opts.only, after, lastCommentUtc: last, cache,
+        });
       } catch (err) {
         if (err instanceof Aborted) throw err;
+        failed++;
+        firstError ??= err;
         profile = {
-          username, threadComments: n, targetPostsBefore: 0, targetCommentsBefore: 0,
-          subreddits: new Map(), error: err.message,
+          username, threadComments: count, targetPostsBefore: 0, targetCommentsBefore: 0,
+          subreddits: new Map(), error: explain(err), errorDetail: err.message,
         };
       } finally {
         inFlight--;
       }
       profile.rank = i;
       if (profile.cached) fromCache++;
-      slots[i] = profile;
-      state.profiles = slots.filter(Boolean);
-      done++;
+      state.slots[i] = profile;
+      counts.done++;
       progress();
       insertCard(userCard(profile, post));
-      applyFilter();
-    }, state.controller.signal);
-    const failed = state.profiles.filter((p) => p.error).length;
-    const notes = [fromCache && `${fromCache} from cache`, failed && `${failed} failed`].filter(Boolean);
-    setStatus(`Done: profiled ${state.profiles.length} users${notes.length ? ` (${notes.join(", ")})` : ""}.`, 1);
+    }, controller.signal);
+
+    const notes = [fromCache && `${fromCache} from saved results`, failed && `${failed} failed`].filter(Boolean);
+    let text = `Done: profiled ${plural(counts.total, "user")}${notes.length ? ` (${notes.join(", ")})` : ""}` +
+      ` with ${plural(client.requests, "request")}.`;
+    if (failed && failed < counts.total && opts.cacheDays > 0) {
+      text += " Press Analyze to retry the failed ones; the rest are reused.";
+    }
+    setStatus(text);
+    announce(text);
+    if (failed === counts.total) showError(`Every lookup failed. ${explain(firstError)}`, firstError.message);
   } catch (err) {
     if (err instanceof Aborted) {
-      setStatus(`Stopped after ${state.profiles.length} users.`);
+      const text = counts.total ? `Stopped after ${counts.done} of ${plural(counts.total, "user")}.` : "Stopped.";
+      setStatus(text);
+      announce(text);
     } else {
-      showError(err.message);
+      showError(explain(err), err.message);
       $("status").hidden = true;
+      announce(explain(err));
     }
   } finally {
-    setRunning(false);
-    state.controller = null;
+    controller.abort(); // stop anything still in flight
+    if (runId === state.runId) {
+      state.controller = null;
+      clearWaits();
+      renderStatus();
+      setRunning(false);
+      document.title = TITLE;
+    }
+  }
+}
+
+// ---- Sharing, CSV, saved results ----
+
+// The post in the box, as a bare id when it can be parsed.
+function currentPostRef() {
+  try {
+    return parsePostRef($("post").value);
+  } catch {
+    return state.post?.id ?? $("post").value.trim();
+  }
+}
+
+function shareUrl(postRef, opts = readOptions()) {
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("post", postRef);
+  if (opts.includeOp) url.searchParams.set("op", "1");
+  if (opts.exclude.length) url.searchParams.set("exclude", opts.exclude.join(","));
+  if (opts.only.length) url.searchParams.set("subs", opts.only.join(","));
+  if (opts.years) url.searchParams.set("years", String(opts.years));
+  if (opts.maxUsers) url.searchParams.set("max", String(opts.maxUsers));
+  if (minCount()) url.searchParams.set("min", String(minCount()));
+  if (opts.delay !== DEFAULTS.delay) url.searchParams.set("delay", String(opts.delay));
+  if (opts.concurrency !== DEFAULTS.concurrency) url.searchParams.set("par", String(opts.concurrency));
+  if (opts.cacheDays !== DEFAULTS.cacheDays) url.searchParams.set("cache", String(opts.cacheDays));
+  return url.toString();
+}
+
+function flash(button, text, original, ms = 2000) {
+  button.textContent = text;
+  setTimeout(() => (button.textContent = original), ms);
+}
+
+async function copyLink() {
+  const url = shareUrl(currentPostRef());
+  try {
+    await navigator.clipboard.writeText(url);
+    flash($("share"), "Copied!", "Copy link", 1500);
+    announce("Link copied.");
+  } catch {
+    window.prompt("Copy this link:", url);
   }
 }
 
 function downloadCsv() {
   if (!state.post) return;
-  const blob = new Blob([toCsv(state.profiles, state.post, minCount())], { type: "text/csv" });
-  const a = el("a", { href: URL.createObjectURL(blob), download: `${state.post.id}_activity.csv` });
+  const partial = state.controller !== null;
+  const csv = toCsv(state.slots.filter(Boolean), state.post, minCount());
+  const a = el("a", {
+    href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })),
+    download: `${state.post.id}_activity${partial ? "_partial" : ""}.csv`,
+  });
   document.body.append(a);
   a.click();
   a.remove();
@@ -314,47 +591,43 @@ function downloadCsv() {
 
 async function clearCache() {
   const n = await openCache(0).clear();
-  $("clear-cache").textContent = `Cleared ${n} saved ${n === 1 ? "result" : "results"}`;
-  setTimeout(() => ($("clear-cache").textContent = "Clear saved results"), 2000);
-}
-
-async function copyLink() {
-  const url = shareUrl();
-  try {
-    await navigator.clipboard.writeText(url);
-    $("share").textContent = "Copied!";
-  } catch {
-    window.prompt("Copy this link:", url);
-  }
-  setTimeout(() => ($("share").textContent = "Copy link"), 1500);
+  const text = n ? `Cleared ${plural(n, "saved result")}` : "Nothing saved";
+  flash($("clear-cache"), text, "Clear saved results");
+  announce(text);
 }
 
 function init() {
   $("form").addEventListener("submit", (e) => {
     e.preventDefault();
-    if (!state.controller) run();
+    run();
   });
-  $("stop").addEventListener("click", () => state.controller?.abort());
+  $("post").addEventListener("input", () => $("post").removeAttribute("aria-invalid"));
+  $("stop").addEventListener("click", stop);
   $("filter").addEventListener("input", applyFilter);
-  $("min-count").addEventListener("change", () => state.post && renderUsers());
+  $("min-count").addEventListener("input", debounce(renderUsers, 200));
   $("download").addEventListener("click", downloadCsv);
   $("share").addEventListener("click", copyLink);
   $("clear-cache").addEventListener("click", clearCache);
+  for (const type of ["input", "change"]) $("option-fields").addEventListener(type, () => updateOptionsSummary());
 
-  // Pre-fill from a shared link and start straight away.
+  // Pre-fill from a shared link (the Options panel stays closed; its summary lists what's
+  // set) and start straight away.
   const params = new URLSearchParams(window.location.search);
-  if (params.get("op") === "1") $("include-op").checked = true;
-  if (params.get("exclude")) $("exclude").value = params.get("exclude");
-  if (params.get("subs")) $("only-subs").value = params.get("subs");
-  if (params.get("years")) $("years").value = params.get("years");
-  if (params.get("max")) $("max-users").value = params.get("max");
-  if (params.get("min")) $("min-count").value = params.get("min");
-  if (params.get("delay")) $("delay").value = params.get("delay");
-  if (params.get("par")) $("concurrency").value = params.get("par");
-  if (params.get("cache")) $("cache-days").value = params.get("cache");
-  if (["exclude", "subs", "years", "max", "min", "op", "delay", "par", "cache"].some((k) => params.has(k))) {
-    $("options").open = true;
-  }
+  const fill = (id, key) => {
+    if (params.has(key)) $(id).value = params.get(key);
+  };
+  $("include-op").checked = params.get("op") === "1";
+  fill("exclude", "exclude");
+  fill("only-subs", "subs");
+  fill("years", "years");
+  fill("max-users", "max");
+  fill("min-count", "min");
+  fill("delay", "delay");
+  fill("concurrency", "par");
+  fill("cache-days", "cache");
+  const opts = readOptions();
+  showOptions(opts);
+  openCache(opts.cacheDays).prune();
   if (params.get("post")) {
     $("post").value = params.get("post");
     run();
