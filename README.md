@@ -34,8 +34,9 @@ some of the same people, reuses them instead of asking the API again.
 | *saved* | reused from an earlier scan in this browser, with no new requests |
 | *lookup failed* | Arctic Shift kept failing for this user (open the card for details). Press *Analyze* again to retry; saved results are reused for everyone else |
 
-The line under a name lists their most active subreddits. Opening a card shows the full
-table, with the post's own subreddit highlighted, and a link to their Reddit profile.
+The line under a name lists the post's subreddit first, then their most active others.
+Opening a card shows the full table, with the post's own subreddit highlighted at the top,
+and a link to their Reddit profile.
 Each post and comment count links to the Arctic Shift search page listing those posts or
 comments (newest first, within the `years` window if set).
 

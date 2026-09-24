@@ -284,7 +284,8 @@ function activity(profile, post) {
 const searchWords = new WeakMap();
 
 function userCard(profile, post) {
-  const subs = sortedSubreddits(profile, post, minCount());
+  // The post's subreddit leads, in the summary line and the table.
+  const subs = sortedSubreddits(profile, post, minCount(), { targetFirst: true });
   const active = subs.filter((s) => s.total > 0);
   const pills = el("span", { class: "stats" }, el("span", { class: "pill" }, `${profile.threadComments} in thread`));
   let label;

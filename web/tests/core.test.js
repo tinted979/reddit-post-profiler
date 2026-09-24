@@ -15,6 +15,7 @@ import {
   mapPool,
   parsePostRef,
   parseSubreddits,
+  sortedSubreddits,
   toCsv,
   yearlyRanges,
 } from "../core.js";
@@ -834,4 +835,11 @@ test("client reports shared pauses", async () => {
   client.onPause = (until) => pauses.push(until - clock.t);
   await client.subredditCounts("comments", "u");
   assert.deepEqual(pauses, [30]);
+});
+
+test("sortedSubreddits can put the post's subreddit first", () => {
+  const profile = { subreddits: new Map([["AskReddit", { posts: 1, comments: 40 }], ["python", { posts: 0, comments: 2 }], ["rust", { posts: 0, comments: 9 }]]) };
+  const post = { subreddit: "Python" };
+  assert.deepEqual(sortedSubreddits(profile, post).map((s) => s.name), ["AskReddit", "rust", "python"]);
+  assert.deepEqual(sortedSubreddits(profile, post, 5, { targetFirst: true }).map((s) => s.name), ["python", "AskReddit", "rust"]);
 });

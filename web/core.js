@@ -786,13 +786,15 @@ export class Eta {
 }
 
 // Subreddits of a profile, filtered by minCount (target subreddit always kept) and
-// sorted by total desc, then name.
-export function sortedSubreddits(profile, post, minCount = 0) {
+// sorted by total desc, then name; with targetFirst, the post's subreddit comes first.
+export function sortedSubreddits(profile, post, minCount = 0, { targetFirst = false } = {}) {
   const target = post.subreddit.toLowerCase();
+  const isTarget = (s) => s.name.toLowerCase() === target;
   return [...profile.subreddits]
     .map(([name, c]) => ({ name, posts: c.posts, comments: c.comments, total: c.posts + c.comments }))
-    .filter((s) => s.total >= minCount || s.name.toLowerCase() === target)
-    .sort((a, b) => b.total - a.total || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+    .filter((s) => s.total >= minCount || isTarget(s))
+    .sort((a, b) => (targetFirst && isTarget(b) - isTarget(a)) ||
+      b.total - a.total || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 }
 
 // Link to the Arctic Shift search page listing an author's posts or comments in a
