@@ -616,10 +616,22 @@ function mergeKinds(parts) {
 // Only the kinds the lifetime totals don't already rule out are queried. Usually one
 // timestamp search per kind answers everything; past TIMELINE_LIMIT items the exact count
 // and the first date take a query each, and `days` is a lower bound (complete: false).
-// If the search fails, the counts come from the aggregate and the timeline is unknown.
-async function beforeFacts(client, username, post, { after, needPosts, needComments }) {
-  const opts = { subreddit: post.subreddit, after, before: post.createdUtc };
-  const kind = async (k) => {
+// Posts and comments in the post's subreddit before it was made, within the window, and
+// when: `first` (earliest, epoch seconds) and `days` (distinct UTC days with activity).
+// Only the kinds the lifetime totals don't already rule out are asked about.
+//
+// With `dumps` covering the subreddit, a kind's items come from its archive file up to
+// where that file can be trusted (`through`); the API is asked only about the rest, from
+// `through` to the post (`after` is exclusive, so nothing is counted twice). If the file
+// can't be read, the API answers for the whole window as it would without an archive.
+//
+// From the API, one timestamp search per kind usually answers everything; past
+// TIMELINE_LIMIT items the exact count and the first date take a query each, and `days`
+// is a lower bound (complete: false). If the search fails, the counts come from the
+// aggregate and the timeline is unknown.
+async function beforeFacts(client, username, post, { after, needPosts, needComments, dumps = null }) {
+  const fromApi = async (k, since) => {
+    const opts = { subreddit: post.subreddit, after: since, before: post.createdUtc };
     let times;
     try {
       times = await client.timestamps(k, username, opts);
@@ -630,13 +642,36 @@ async function beforeFacts(client, username, post, { after, needPosts, needComme
       return { count: sum(await client.subredditCounts(k, username, opts)), times: null, first: null, complete: false };
     }
     if (times.length < TIMELINE_LIMIT) {
-      return { count: times.length, times, first: times.length ? Math.min(...times) : null, complete: true };
+      return { count: times.length, times, first: minOf(times), complete: true };
     }
     const [counts, earliest] = await settleAll([
       client.subredditCounts(k, username, opts),
       client.timestamps(k, username, { ...opts, sort: "asc", limit: 1 }),
     ]);
-    return { count: Math.max(sum(counts), times.length), times, first: Math.min(...times, ...earliest), complete: false };
+    return { count: Math.max(sum(counts), times.length), times, first: minOf([...times, ...earliest]), complete: false };
+  };
+  const archive = dumps?.covers(post.subreddit) ?? null;
+  const kind = async (k) => {
+    const through = archive?.[k === "posts" ? "postsThrough" : "commentsThrough"];
+    if (!Number.isFinite(through)) return fromApi(k, after);
+    let saved;
+    try {
+      saved = await dumps.timestamps(k, post.subreddit, username);
+    } catch (err) {
+      if (err instanceof Aborted) throw err;
+      return fromApi(k, after);
+    }
+    const times = saved.filter((t) => t < post.createdUtc && t <= through && (after === null || t > after));
+    const fromFiles = { count: times.length, times, first: minOf(times), complete: true };
+    if (post.createdUtc - 1 <= through) return fromFiles;
+    const gap = await fromApi(k, after === null ? through : Math.max(after, through));
+    return {
+      count: fromFiles.count + gap.count,
+      // An unknown gap timeline leaves only the files' days: a lower bound (complete: false).
+      times: gap.times ? [...times, ...gap.times] : times.length ? times : null,
+      first: fromFiles.first ?? gap.first,
+      complete: gap.complete,
+    };
   };
   const [posts, comments] = await settleAll([
     needPosts ? kind("posts") : null,
@@ -649,7 +684,7 @@ async function beforeFacts(client, username, post, { after, needPosts, needComme
   return {
     posts: posts?.count ?? 0,
     comments: comments?.count ?? 0,
-    first: known && firsts.length ? Math.min(...firsts) : null,
+    first: known ? minOf(firsts) : null,
     days: known ? days.size : null,
     complete: known && parts.every((p) => p.complete),
   };
@@ -742,7 +777,9 @@ export function emptyProfile(username, threadComments) {
 // activity so the answer is explicit. With `after` (epoch seconds), only activity from
 // then on is counted, "before the post" included. With `cache` ({get(key) -> {value,
 // fetchedAt} | null, set(key, value)}), earlier results are reused and new ones saved.
-export async function buildProfile(client, username, threadComments, post, { only = null, after = null, lastCommentUtc = null, cache = null } = {}) {
+// With `dumps` (a DumpSource, see dumps.js), "before" facts for a covered subreddit
+// come from its archive files.
+export async function buildProfile(client, username, threadComments, post, { only = null, after = null, lastCommentUtc = null, cache = null, dumps = null } = {}) {
   const profile = emptyProfile(username, threadComments);
   const user = username.toLowerCase();
   const bucket = windowBucket(after);
@@ -810,7 +847,7 @@ export async function buildProfile(client, username, threadComments, post, { onl
       before = saved.value;
     } else {
       fromCache = false;
-      before = await beforeFacts(client, username, post, { after, needPosts, needComments });
+      before = await beforeFacts(client, username, post, { after, needPosts, needComments, dumps });
       await cacheSet(cache, beforeKey, before);
     }
     Object.assign(profile, {
@@ -845,6 +882,14 @@ function sum(map) {
   let t = 0;
   for (const n of map.values()) t += n;
   return t;
+}
+
+// The smallest number in `list`, or null for none (Math.min(...list) overflows the stack
+// for very long lists, such as a busy user's whole archive timeline).
+function minOf(list) {
+  let min = null;
+  for (const n of list) if (min === null || n < min) min = n;
+  return min;
 }
 
 // Estimates the seconds left in a scan from the recent pace of finished users.
