@@ -50,7 +50,8 @@ FORMAT = 1
 DEFAULT_ROW_GROUP = 10_000
 EXCLUDED = ("[deleted]", "[removed]", "automoderator")
 SUBREDDIT_NAME = re.compile(r"^\w{2,21}$")
-VERSION_NAME = re.compile(r"^[\w.-]{1,40}$")
+# One path segment that can't be "." or "..": it starts with a letter, digit or underscore.
+VERSION_NAME = re.compile(r"^\w[\w.-]{0,39}$")
 
 
 def utc_date(ts: int | None) -> str:

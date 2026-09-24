@@ -111,7 +111,9 @@ def test_a_build_is_never_overwritten_and_the_manifest_keeps_other_subreddits(tm
 def test_refuses_bad_names_and_wrong_files(tmp_path, dumps):
     with pytest.raises(SystemExit, match="not a subreddit name"):
         build_dumps.build("r/Some_Sub", *dumps, tmp_path / "out", log=lambda *_: None)
-    with pytest.raises(SystemExit, match="not a usable version name"):
-        build_dumps.build(SUB, *dumps, tmp_path / "out", version="../x", log=lambda *_: None)
+    for version in ("../x", "..", ".", "-x", "a/b"):
+        with pytest.raises(SystemExit, match="not a usable version name"):
+            build_dumps.build(SUB, *dumps, tmp_path / "out", version=version, log=lambda *_: None)
+    assert not (tmp_path / "out").exists()
     with pytest.raises(SystemExit, match="no posts left"):
         build_dumps.build("Elsewhere2", *dumps, tmp_path / "out", log=lambda *_: None)
