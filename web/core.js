@@ -587,7 +587,9 @@ async function beforeFacts(client, username, post, { after, needPosts, needComme
     try {
       times = await client.timestamps(k, username, opts);
     } catch (err) {
-      if (err instanceof Aborted) throw err;
+      // An overloaded or rate-limiting server, or no connection, won't answer the heavier
+      // aggregate either: fail this user rather than pile on more queries.
+      if (err instanceof Aborted || err instanceof ServerBusy || err.status === 429 || err.status === null) throw err;
       return { count: sum(await client.subredditCounts(k, username, opts)), times: null, first: null, complete: false };
     }
     if (times.length < TIMELINE_LIMIT) {
@@ -1040,7 +1042,10 @@ export const CSV_COLUMNS = [
 ];
 
 function csvCell(value) {
-  const s = value === null || value === undefined ? "" : String(value);
+  let s = value === null || value === undefined ? "" : String(value);
+  // Spreadsheets run text starting with these as a formula (a username can start with "-",
+  // and an imported file's error text could be anything), so mark it as text.
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -1088,6 +1093,8 @@ export function exportScans(scans, now = Date.now() / 1000) {
 }
 
 const isNum = (n) => typeof n === "number" && Number.isFinite(n);
+// Epoch seconds a Date can hold and format (up to the year 5138).
+const isEpoch = (n) => isNum(n) && n >= 0 && n < 1e11;
 const isCountNum = (n) => isNum(n) && n >= 0;
 const isName = (s, max = 64) => typeof s === "string" && /^[\w-]+$/.test(s) && s.length <= max;
 const orNull = (v, ok) => (v === null || v === undefined ? null : ok(v) ? v : undefined);
@@ -1097,7 +1104,7 @@ const orNull = (v, ok) => (v === null || v === undefined ? null : ok(v) ? v : un
 function importProfile(d, index) {
   if (!d || typeof d !== "object" || !isName(d.username, 40) || !isCountNum(d.threadComments)) return null;
   if (!isCountNum(d.targetPostsBefore) || !isCountNum(d.targetCommentsBefore)) return null;
-  const first = orNull(d.targetFirstBefore, isNum);
+  const first = orNull(d.targetFirstBefore, isEpoch);
   const days = orNull(d.targetDaysBefore, isCountNum);
   if (first === undefined || days === undefined || !Array.isArray(d.subreddits)) return null;
   const subreddits = [];
@@ -1131,7 +1138,7 @@ export function importScan(rec) {
   const p = s?.post;
   if (!s || typeof s !== "object" || !p || typeof p !== "object" || !Array.isArray(rec.profiles)) return null;
   if (typeof p.id !== "string" || !/^[0-9a-z]{1,13}$/.test(p.id) || s.id !== p.id) return null;
-  if (!isName(p.subreddit, 30) || typeof p.author !== "string" || !isNum(p.createdUtc) || !isNum(s.scannedAt)) return null;
+  if (!isName(p.subreddit, 30) || typeof p.author !== "string" || !isEpoch(p.createdUtc) || !isEpoch(s.scannedAt)) return null;
   const profiles = rec.profiles.map(importProfile);
   if (profiles.includes(null)) return null;
   const post = {
@@ -1142,7 +1149,7 @@ export function importScan(rec) {
     title: typeof p.title === "string" ? p.title.slice(0, 500) : "",
     numComments: isCountNum(p.numComments) ? p.numComments : 0,
   };
-  const after = isNum(s.after) ? s.after : null;
+  const after = isEpoch(s.after) ? s.after : null;
   const beforeKnown = after === null || post.createdUtc > after;
   const live = profiles.map(deserializeProfile);
   const o = s.opts && typeof s.opts === "object" ? s.opts : {};

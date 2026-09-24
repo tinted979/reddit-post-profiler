@@ -34,7 +34,7 @@ import {
   toCsv,
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
-import { LinkQueue, MAX_WAITING } from "./queue.js";
+import { LinkQueue, MAX_WAITING, QUEUE_KEY } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
 const TITLE = document.title;
@@ -325,6 +325,8 @@ function setRunning(running) {
   for (const b of $("saved-list").querySelectorAll("button")) b.disabled = running;
   $("scans-delete-all").disabled = running;
   renderQueue();
+  // Stop is about to disappear: don't strand keyboard focus on it.
+  if (!running && document.activeElement === $("stop")) state.focusRunAfter = true;
   $("stop").hidden = !running;
   $("stop").disabled = false;
   $("stop").textContent = "Stop";
@@ -336,6 +338,7 @@ function setRunning(running) {
 // Before a large scan, show its rough cost and ask how many users to profile. Resolves
 // "top", "all" or "cancel" (also on Stop).
 function askLargeScan(est, signal) {
+  if (signal.aborted) return Promise.resolve("cancel"); // Stop was pressed while estimating
   const box = $("confirm");
   const mins = Math.max(1, Math.round(est.seconds / 60));
   const time = mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)} h ${mins % 60} min`;
@@ -351,6 +354,11 @@ function askLargeScan(est, signal) {
   announce($("confirm-text").textContent);
   return new Promise((resolve) => {
     const done = (choice) => {
+      // Keep keyboard focus nearby: on Stop while profiling, on Analyze after a cancel.
+      if (box.contains(document.activeElement)) {
+        if (choice === "cancel") state.focusRunAfter = true;
+        else $("stop").focus({ preventScroll: true });
+      }
       box.hidden = true;
       for (const [id, fn] of handlers) $(id).removeEventListener("click", fn);
       signal.removeEventListener("abort", onAbort);
@@ -835,7 +843,9 @@ async function run({ fromQueue = false } = {}) {
       document.title = TITLE;
     }
   }
-  setTimeout(pumpQueue); // a queue waiting on a manual scan carries on
+  // A queue waiting on a manual scan carries on. (A queued scan's own pump continues after
+  // its gap between scans; starting it here too would skip the gap.)
+  if (!fromQueue) setTimeout(pumpQueue);
   return outcome;
 }
 
@@ -896,6 +906,10 @@ function backgroundSleep(seconds, signal = null) {
 const queue = new LinkQueue();
 const QUEUE_GAP = 3; // seconds between queued scans, to go easy on the API
 let pumping = false;
+// Only one tab runs the queue (it's shared through localStorage, so two tabs would overwrite
+// each other's changes). The others show it read-only until that tab closes.
+let queueOwner = false;
+const QUEUE_LOCK = "reddit-tool-queue";
 let queueCurrent = null; // id of the queued item being scanned
 
 function queueRunning() {
@@ -930,6 +944,9 @@ function renderQueue() {
   }
   $("queue-clear").hidden = !(c.done + c.failed + c.stopped);
 
+  for (const id of ["queue-input", "queue-add", "queue-clear"]) $(id).disabled = !queueOwner;
+  if (!queueOwner) toggle.disabled = true;
+
   $("queue-list").replaceChildren(...queue.items.map((item) => {
     const [cls, label] = STATUS_PILLS[item.status];
     const actions = el("span", { class: "queue-actions" });
@@ -941,8 +958,8 @@ function renderQueue() {
       return b;
     };
     if (item.status === "done" && item.saved) button("Open", () => openSaved(item.postId)).disabled = busy;
-    if (item.status === "failed" || item.status === "stopped") button("Retry", () => retryQueued(item.id));
-    if (item.status !== "running") button("Remove", () => removeQueued(item.id));
+    if (item.status === "failed" || item.status === "stopped") button("Retry", () => retryQueued(item.id)).disabled = !queueOwner;
+    if (item.status !== "running") button("Remove", () => removeQueued(item.id)).disabled = !queueOwner;
     const note = [item.note, ...scanOptionNotes(item.opts)].filter(Boolean).join(" · ");
     const li = el("li", { class: "queue-item" },
       el("span", { class: `pill ${cls}` }, label),
@@ -981,9 +998,45 @@ function toggleQueue() {
 }
 
 function retryQueued(id) {
-  queue.retry(id);
+  const why = queue.retry(id);
+  if (why === "duplicate") $("queue-add-note").textContent = "That post is already queued.";
+  if (why === "full") $("queue-add-note").textContent = `The queue holds ${MAX_WAITING} scans at a time. Try again once one has run.`;
   renderQueue();
   pumpQueue();
+}
+
+// Take the queue if no other tab has it, else show it read-only and take it when that tab
+// closes. Without Web Locks (old browsers), every tab runs its own copy as before.
+function claimQueue() {
+  const locks = navigator.locks;
+  if (!locks) return useQueue(true);
+  const hold = () => new Promise(() => {}); // kept until the page closes
+  locks.request(QUEUE_LOCK, { ifAvailable: true }, (lock) => {
+    if (lock) {
+      useQueue(true);
+      return hold();
+    }
+    useQueue(false);
+    locks.request(QUEUE_LOCK, () => {
+      useQueue(true);
+      return hold();
+    });
+    return undefined;
+  }).catch(() => useQueue(true));
+}
+
+function useQueue(owner) {
+  queueOwner = owner;
+  const interrupted = queue.load({ readOnly: !owner });
+  if (!owner) {
+    $("queue-add-note").textContent = "The scheduler is open in another tab of this site, so it's shown here read-only. It becomes usable here when that tab is closed.";
+  } else if (interrupted) {
+    $("scheduler").open = true;
+    $("queue-add-note").textContent = "The queue was cut off when the page closed. Press Start queue to carry on.";
+  } else if ($("queue-add-note").textContent.startsWith("The scheduler is open")) {
+    $("queue-add-note").textContent = "";
+  }
+  renderQueue();
 }
 
 function removeQueued(id) {
@@ -1007,7 +1060,7 @@ function fillFromItem(item) {
 // Scan the next waiting item, and keep going while the queue is on. Anything that ends
 // a scan (including a manual run) calls this, so it's safe to call any time.
 async function pumpQueue() {
-  if (pumping || !queue.active || state.controller) return;
+  if (!queueOwner || pumping || !queue.active || state.controller) return;
   const item = queue.next();
   if (!item) {
     queue.setActive(false);
@@ -1129,8 +1182,8 @@ function savedNote(text) {
 }
 
 async function exportSaved() {
-  const scans = await openScans().exportAll();
-  if (!scans.length) return savedNote("Nothing to export.");
+  const { scans, failed } = await openScans().exportAll();
+  if (!scans.length) return savedNote(failed ? "The saved scans couldn't be read, so nothing was exported." : "Nothing to export.");
   const a = el("a", {
     href: URL.createObjectURL(new Blob([exportScans(scans)], { type: "application/json" })),
     download: `rpp-saved-scans-${new Date().toISOString().slice(0, 10)}.json`,
@@ -1139,7 +1192,8 @@ async function exportSaved() {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  savedNote(`Exported ${plural(scans.length, "scan")}.`);
+  savedNote(`Exported ${plural(scans.length, "scan")}.` +
+    (failed ? ` ${plural(failed, "scan")} couldn't be read and ${failed === 1 ? "isn't" : "aren't"} in the file.` : ""));
 }
 
 async function importSaved() {
@@ -1305,6 +1359,7 @@ async function openSaved(id) {
 function scanAgain(id) {
   if (state.controller) return;
   openScans().load(id).then((rec) => {
+    if (state.controller) return; // a queued scan started meanwhile; leave its form alone
     if (rec) fillFromScan(rec.summary);
     else $("post").value = id;
     run();
@@ -1381,6 +1436,9 @@ function downloadCsv() {
 }
 
 async function clearCache() {
+  const saved = (await openScans().list()).length;
+  if (saved && !window.confirm(`This also deletes ${saved === 1 ? "your saved scan" : `all ${saved} saved scans`}. ` +
+    "This can't be undone. Export them first to keep a copy. Clear everything?")) return;
   const [n, scans] = await Promise.all([openCache(0).clear(), openScans().clear()]);
   const text = n || scans ? `Cleared ${plural(n, "saved result")} and ${plural(scans, "scan")}` : "Nothing saved";
   state.savedId = null;
@@ -1392,6 +1450,8 @@ async function clearCache() {
 function init() {
   $("form").addEventListener("submit", (e) => {
     e.preventDefault();
+    // Enter in a badge box shouldn't start a scan: badges never need requests.
+    if ($("badge-fields").contains(document.activeElement)) return;
     run();
   });
   $("post").addEventListener("input", () => $("post").removeAttribute("aria-invalid"));
@@ -1419,11 +1479,10 @@ function init() {
   window.addEventListener("beforeunload", (e) => {
     if (state.controller) e.preventDefault(); // a scan would be cut off
   });
-  if (queue.load()) {
-    $("scheduler").open = true;
-    $("queue-add-note").textContent = "The queue was cut off when the page closed. Press Start queue to carry on.";
-  }
-  renderQueue();
+  claimQueue();
+  window.addEventListener("storage", (e) => {
+    if (!queueOwner && e.key === QUEUE_KEY) useQueue(false); // follow the owning tab's changes
+  });
   for (const type of ["input", "change"]) $("option-fields").addEventListener(type, () => updateOptionsSummary());
 
   // Pre-fill from a shared link (the Options panel stays closed; its summary lists what's
@@ -1446,11 +1505,13 @@ function init() {
   fill("cache-days", "cache");
   const opts = readOptions();
   showOptions(opts);
-  openCache(opts.cacheDays).prune();
+  // Clearing out old records walks the whole store, and the scan's own reads would queue
+  // behind it (long enough, on a big store, to switch saved results off for the run).
+  const pruned = openCache(opts.cacheDays).prune();
   renderSaved();
   if (params.get("post")) {
     $("post").value = params.get("post");
-    run();
+    pruned.finally(() => run());
   }
 }
 

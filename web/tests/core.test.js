@@ -951,7 +951,7 @@ test("ScanStore saves, lists newest first, loads, replaces and deletes scans", a
 
 test("ScanStore gives up on a store that hangs", async () => {
   const hang = () => new Promise(() => {});
-  const store = new ScanStore({ backend: { getPrefix: hang, set: hang, get: hang, delete: hang, clear: hang }, timeoutMs: 10 });
+  const store = new ScanStore({ backend: { getPrefix: hang, set: hang, setMany: hang, get: hang, delete: hang, clear: hang }, timeoutMs: 10 });
   assert.deepEqual(await store.list(), []);
   assert.equal(await store.save({ id: "x", scannedAt: 1 }, []), false);
 });
@@ -1088,11 +1088,57 @@ test("ScanStore exports every scan and imports only newer copies", async () => {
   const store = new ScanStore();
   const scan = importScan(savedScan());
   await store.save(scan.summary, scan.profiles);
-  assert.deepEqual(await store.exportAll(), [scan]);
+  assert.deepEqual(await store.exportAll(), { scans: [scan], failed: 0 });
   const older = { ...scan, summary: { ...scan.summary, scannedAt: scan.summary.scannedAt - 1 } };
   const newer = { ...scan, summary: { ...scan.summary, scannedAt: scan.summary.scannedAt + 1 } };
   const other = { ...scan, summary: { ...scan.summary, id: "zzz999", post: { ...scan.summary.post, id: "zzz999" } } };
   assert.deepEqual(await store.importAll([older, newer, other]), { added: 1, replaced: 1, kept: 1, failed: 0 });
   assert.equal((await store.load(POST.id)).summary.scannedAt, newer.summary.scannedAt);
   assert.equal((await store.list()).length, 2);
+});
+
+test("a busy or rate-limiting server during the before search fails the user without aggregate fallbacks", async () => {
+  const handler = aggregates({ comments: [["Python", 9]], before: { comments: 6 } });
+  const slow = () => json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422);
+  const busy = makeClient((u) => (u.pathname === "/api/comments/search" ? slow() : handler(u)));
+  await assert.rejects(buildProfile(busy.client, "alice", 1, POST), ServerBusy);
+  assert.ok(!busy.calls.some((u) => u.pathname.endsWith("/aggregate") && u.searchParams.has("before")));
+  const limited = makeClient((u) => (u.pathname === "/api/comments/search" ? json({}, 429) : handler(u)));
+  const err = await buildProfile(limited.client, "alice", 1, POST).catch((e) => e);
+  assert.equal(err.status, 429);
+  assert.ok(!limited.calls.some((u) => u.pathname.endsWith("/aggregate") && u.searchParams.has("before")));
+});
+
+test("CSV cells that a spreadsheet would run as a formula are marked as text", () => {
+  const profiles = [{ username: "-Nerf-", threadComments: 1, targetPostsBefore: 0, targetCommentsBefore: 0,
+    subreddits: new Map(), error: '=HYPERLINK("http://x","y")' }];
+  const [, row] = toCsv(profiles, POST).trim().split("\n");
+  assert.equal(row, `'-Nerf-,1,Python,,,,,,,"'=HYPERLINK(""http://x"",""y"")",,,`);
+});
+
+test("imported dates a Date can't hold are rejected", () => {
+  for (const spoil of [(s) => (s.profiles[0].targetFirstBefore = 1e20), (s) => (s.summary.post.createdUtc = -5), (s) => (s.summary.scannedAt = 1e15)]) {
+    const scan = savedScan();
+    spoil(scan);
+    assert.equal(importScan(scan), null, spoil.toString());
+  }
+  const odd = savedScan();
+  odd.summary.after = 1e20;
+  assert.equal(importScan(odd).summary.after, null);
+});
+
+test("ScanStore saves a scan's two records together, and export counts scans it can't read", async () => {
+  const backend = new MemoryBackend();
+  const writes = [];
+  const setMany = backend.setMany.bind(backend);
+  backend.setMany = async (entries) => {
+    writes.push(entries.map(([k]) => k));
+    return setMany(entries);
+  };
+  const store = new ScanStore({ backend });
+  const scan = importScan(savedScan());
+  assert.equal(await store.save(scan.summary, scan.profiles), true);
+  assert.deepEqual(writes, [[`data|${POST.id}`, `sum|${POST.id}`]]);
+  backend.map.delete(`data|${POST.id}`); // summary listed, profiles gone
+  assert.deepEqual(await store.exportAll(), { scans: [], failed: 1 });
 });

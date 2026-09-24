@@ -91,3 +91,33 @@ test("holds at most MAX_WAITING scans waiting or running", () => {
   assert.equal(q.add(ids[MAX_WAITING], {}).added, 1);
   assert.deepEqual(q.add(ids[MAX_WAITING + 1], {}).full, [ids[MAX_WAITING + 1]]);
 });
+
+test("retry won't queue a post twice or past the cap", () => {
+  const q = new LinkQueue({ storage: new FakeStorage() });
+  q.add("aaa111", {});
+  const first = q.items[0];
+  q.update(first.id, { status: "stopped" });
+  q.add("aaa111", {});
+  assert.equal(q.retry(first.id), "duplicate");
+  assert.equal(q.counts().waiting, 1);
+  const full = new LinkQueue({ storage: new FakeStorage() });
+  full.add("zzz999", {});
+  full.update(full.items[0].id, { status: "failed" });
+  full.add(Array.from({ length: MAX_WAITING }, (_, i) => `p${String(i).padStart(5, "0")}`).join("\n"), {});
+  assert.equal(full.retry(full.items[0].id), "full");
+  assert.equal(full.items[0].status, "failed");
+});
+
+test("a read-only load shows another tab's queue without changing it", () => {
+  const storage = new FakeStorage();
+  const owner = new LinkQueue({ storage });
+  owner.add("aaa111 bbb222", {});
+  owner.update(owner.items[0].id, { status: "running" });
+  owner.setActive(true);
+  const saved = storage.getItem("reddit-tool-queue");
+  const viewer = new LinkQueue({ storage });
+  assert.equal(viewer.load({ readOnly: true }), false);
+  assert.equal(viewer.items[0].status, "running");
+  assert.equal(viewer.active, true);
+  assert.equal(storage.getItem("reddit-tool-queue"), saved);
+});
