@@ -5,7 +5,8 @@
 import { parsePostRef } from "./core.js";
 
 // Named before the project became Reddit Post Profiler; kept so visitors' saved data survives.
-const KEY = "reddit-tool-queue";
+export const QUEUE_KEY = "reddit-tool-queue";
+const KEY = QUEUE_KEY;
 // Most scans waiting at once: the queue runs unattended, so keep it from piling up a day's
 // worth of requests on the free API.
 export const MAX_WAITING = 25;
@@ -47,7 +48,8 @@ export class LinkQueue {
   }
 
   // Restore the saved queue. Returns true if it was cut off mid-run (the page closed).
-  load() {
+  // readOnly: just show it (another tab runs the queue), so change and save nothing.
+  load({ readOnly = false } = {}) {
     let data = null;
     try {
       data = JSON.parse(this._storage?.getItem(KEY) ?? "null");
@@ -56,6 +58,10 @@ export class LinkQueue {
     }
     const items = Array.isArray(data?.items) ? data.items : [];
     this.items = items.filter((i) => i && typeof i.postId === "string" && typeof i.ref === "string");
+    if (readOnly) {
+      this.active = Boolean(data?.active);
+      return false;
+    }
     let interrupted = Boolean(data?.active);
     for (const item of this.items) {
       if (item.status === "running") {
@@ -126,13 +132,18 @@ export class LinkQueue {
     return item;
   }
 
-  // Run a finished item again (at the end of the queue).
+  // Run a finished item again (at the end of the queue). Returns null, or why it can't:
+  // "duplicate" (the post is already waiting or running) or "full" (MAX_WAITING reached).
   retry(id) {
     const item = this.get(id);
-    if (!item || !FINISHED.has(item.status)) return;
+    if (!item || !FINISHED.has(item.status)) return null;
+    const pending = this.items.filter((i) => i.status === "waiting" || i.status === "running");
+    if (pending.some((i) => i.postId === item.postId)) return "duplicate";
+    if (pending.length >= MAX_WAITING) return "full";
     this.items = this.items.filter((i) => i !== item);
     this.items.push(Object.assign(item, { status: "waiting", note: "" }));
     this.save();
+    return null;
   }
 
   remove(id) {

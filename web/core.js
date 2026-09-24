@@ -49,6 +49,8 @@ const ID = "[0-9a-z]{1,13}";
 const URL_PATTERNS = [
   new RegExp(`/comments/(${ID})(?:[/?#]|$)`, "i"),
   new RegExp(`redd\\.it/(${ID})(?:[/?#]|$)`, "i"),
+  // Gallery links (reddit.com/gallery/<id>) are the post id too.
+  new RegExp(`reddit\\.com/gallery/(${ID})(?:[/?#]|$)`, "i"),
 ];
 const BARE_ID = new RegExp(`^(?:t3_)?(${ID})$`, "i");
 
@@ -68,7 +70,7 @@ export function parsePostRef(ref) {
   }
   throw new Error(
     "Can't find a post id in that input. Paste a Reddit post URL " +
-      "(…/comments/<id>/…), a redd.it link, or the post id.",
+      "(…/comments/<id>/… or …/gallery/<id>), a redd.it link, or the post id.",
   );
 }
 
@@ -507,6 +509,26 @@ export async function collectCommenters(client, post, { exclude = [], includeOp 
   return commenters;
 }
 
+// Usernames as typed into "Skip users": "u/name", "/u/name" and profile links become "name";
+// anything with characters outside a Reddit username is dropped, and repeats (in any case)
+// are removed.
+export function parseUsernames(names) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of names) {
+    const name = String(raw)
+      .trim()
+      .replace(/^(?:(?:https?:)?\/\/)?(?:(?:www|old|new|m|np)\.)?reddit\.com(?=\/|$)/i, "")
+      .replace(/^\/?u(?:ser)?\//i, "")
+      .replace(/\/.*$/, "");
+    if (/^[\w-]+$/.test(name) && !seen.has(name.toLowerCase())) {
+      seen.add(name.toLowerCase());
+      out.push(name);
+    }
+  }
+  return out;
+}
+
 // Normalise subreddit names ("r/Foo", "/r/foo/", "reddit.com/r/Foo/…", "Foo") to bare
 // names, dropping duplicates (ignoring case) and anything that can't be a subreddit.
 export function parseSubreddits(names) {
@@ -587,7 +609,9 @@ async function beforeFacts(client, username, post, { after, needPosts, needComme
     try {
       times = await client.timestamps(k, username, opts);
     } catch (err) {
-      if (err instanceof Aborted) throw err;
+      // An overloaded or rate-limiting server, or no connection, won't answer the heavier
+      // aggregate either: fail this user rather than pile on more queries.
+      if (err instanceof Aborted || err instanceof ServerBusy || err.status === 429 || err.status === null) throw err;
       return { count: sum(await client.subredditCounts(k, username, opts)), times: null, first: null, complete: false };
     }
     if (times.length < TIMELINE_LIMIT) {
@@ -1044,7 +1068,10 @@ export const CSV_COLUMNS = [
 ];
 
 function csvCell(value) {
-  const s = value === null || value === undefined ? "" : String(value);
+  let s = value === null || value === undefined ? "" : String(value);
+  // Spreadsheets run text starting with these as a formula (a username can start with "-",
+  // and an imported file's error text could be anything), so mark it as text.
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -1092,6 +1119,8 @@ export function exportScans(scans, now = Date.now() / 1000) {
 }
 
 const isNum = (n) => typeof n === "number" && Number.isFinite(n);
+// Epoch seconds a Date can hold and format (up to the year 5138).
+const isEpoch = (n) => isNum(n) && n >= 0 && n < 1e11;
 const isCountNum = (n) => isNum(n) && n >= 0;
 const isName = (s, max = 64) => typeof s === "string" && /^[\w-]+$/.test(s) && s.length <= max;
 const orNull = (v, ok) => (v === null || v === undefined ? null : ok(v) ? v : undefined);
@@ -1101,7 +1130,7 @@ const orNull = (v, ok) => (v === null || v === undefined ? null : ok(v) ? v : un
 function importProfile(d, index) {
   if (!d || typeof d !== "object" || !isName(d.username, 40) || !isCountNum(d.threadComments)) return null;
   if (!isCountNum(d.targetPostsBefore) || !isCountNum(d.targetCommentsBefore)) return null;
-  const first = orNull(d.targetFirstBefore, isNum);
+  const first = orNull(d.targetFirstBefore, isEpoch);
   const days = orNull(d.targetDaysBefore, isCountNum);
   if (first === undefined || days === undefined || !Array.isArray(d.subreddits)) return null;
   const subreddits = [];
@@ -1135,7 +1164,7 @@ export function importScan(rec) {
   const p = s?.post;
   if (!s || typeof s !== "object" || !p || typeof p !== "object" || !Array.isArray(rec.profiles)) return null;
   if (typeof p.id !== "string" || !/^[0-9a-z]{1,13}$/.test(p.id) || s.id !== p.id) return null;
-  if (!isName(p.subreddit, 30) || typeof p.author !== "string" || !isNum(p.createdUtc) || !isNum(s.scannedAt)) return null;
+  if (!isName(p.subreddit, 30) || typeof p.author !== "string" || !isEpoch(p.createdUtc) || !isEpoch(s.scannedAt)) return null;
   const profiles = rec.profiles.map(importProfile);
   if (profiles.includes(null)) return null;
   const post = {
@@ -1146,11 +1175,13 @@ export function importScan(rec) {
     title: typeof p.title === "string" ? p.title.slice(0, 500) : "",
     numComments: isCountNum(p.numComments) ? p.numComments : 0,
   };
-  const after = isNum(s.after) ? s.after : null;
+  const after = isEpoch(s.after) ? s.after : null;
   const beforeKnown = after === null || post.createdUtc > after;
   const live = profiles.map(deserializeProfile);
   const o = s.opts && typeof s.opts === "object" ? s.opts : {};
-  const names = (v) => (Array.isArray(v) ? v.filter((x) => isName(x)) : []);
+  // Cleaned the same way as the form's fields, so files saved before "Skip users" dropped
+  // "u/" prefixes keep those names.
+  const list = (v, parse) => (Array.isArray(v) ? parse(v.filter((x) => typeof x === "string")) : []);
   const years = [1, 5, 10].includes(o.years) ? o.years : null;
   const thread = s.thread && isCountNum(s.thread.comments) && isCountNum(s.thread.people)
     ? { comments: s.thread.comments, people: s.thread.people }
@@ -1169,11 +1200,11 @@ export function importScan(rec) {
     after,
     beforeKnown,
     opts: {
-      only: names(o.only),
+      only: list(o.only, parseSubreddits),
       years,
       maxUsers: Number.isInteger(o.maxUsers) && o.maxUsers > 0 ? o.maxUsers : null,
       includeOp: Boolean(o.includeOp),
-      exclude: names(o.exclude),
+      exclude: list(o.exclude, parseUsernames),
     },
     stats: scanStats(live, post, beforeKnown),
     facts: badgeFacts(live, post),

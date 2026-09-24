@@ -77,6 +77,8 @@ stay open, but the queue is kept in this browser (localStorage), so after a relo
 closed tab *Start queue* carries on where it was cut off. *Pause queue* stops after the
 current scan; *Stop* ends the current scan and pauses the queue. Failed or stopped links
 can be retried, and *Notify me when it's done* shows a browser notification at the end.
+The queue runs in one tab at a time: in any other tab of the site it's shown read-only, and
+that tab takes it over when the first one closes.
 
 Because nobody is watching it, the queue goes easier on the API: it holds at most 25 scans
 waiting at a time (links past that stay in the box to add later), profiles 2 users at a time
@@ -245,6 +247,13 @@ Pages only works for public repositories.
 
 Work happens on other branches and reaches `main` through pull requests, so the live site
 only changes when a pull request is merged.
+
+`.github/workflows/code-review.yml` has Claude review each pull request once when it's
+opened, reopened or marked ready for review (drafts wait), and post its findings as inline
+comments. It needs the Claude GitHub App installed on the repo and a
+`CLAUDE_CODE_OAUTH_TOKEN` secret (from `claude setup-token`), so reviews use the Claude
+subscription's usage rather than API billing. The review checks changes against the rules in
+[CLAUDE.md](CLAUDE.md#rules-for-changes).
 
 ## License
 
