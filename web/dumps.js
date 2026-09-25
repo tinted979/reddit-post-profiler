@@ -294,8 +294,8 @@ export class DumpSource {
       }));
       this.threadReads++;
       const saved = rows
-        .map((r) => ({ author: String(r.author), created_utc: Number(r.created_utc) }))
-        .filter((r) => isTime(r.created_utc) && (!tail || r.created_utc <= tail.base));
+        .map((r) => ({ author: r.author, created_utc: Number(r.created_utc) }))
+        .filter((r) => typeof r.author === "string" && r.author && isTime(r.created_utc) && (!tail || r.created_utc <= tail.base));
       return [...saved, ...(tail?.links.get(String(linkId)) ?? [])];
     } catch (err) {
       if (this.signal?.aborted) throw new Aborted("stopped");

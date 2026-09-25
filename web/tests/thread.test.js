@@ -164,6 +164,18 @@ test("if comments_by_link can't be read, or isn't in the manifest, the tree answ
   assert.equal(second.calls.filter(isTree).length, 1);
 });
 
+test("thread rows without an author, or with an empty one, are dropped", async () => {
+  // Not something build_dumps.py writes: a file made by hand with DuckDB.
+  const bad = readFileSync(new URL("./fixtures/malformed/comments_by_link.parquet", import.meta.url));
+  const openFile = async (url) => (url.endsWith("comments_by_link.parquet")
+    ? { byteLength: bad.byteLength, slice: (s, e = bad.byteLength) => bad.buffer.slice(bad.byteOffset + s, bad.byteOffset + e) }
+    : localFile(url));
+  const { client } = makeClient(api({}));
+  const dumps = await openFixtures({ openFile });
+  await fetchTails(client, dumps, P1, { only: ["Python"], now: () => NOW });
+  assert.deepEqual(await dumps.threadRows("Python", "p1"), [{ author: "Alice", created_utc: 1699000001 }]);
+});
+
 test("a tail row dated more than a day ahead is dropped, and a cut-short tail never covers past now", async () => {
   const future = NOW + 10 * 86400;
   const rows = [
