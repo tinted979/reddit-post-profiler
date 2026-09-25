@@ -104,7 +104,7 @@ export class Aborted extends Error {}
 
 // An overloaded or rate-limiting server, or no connection: it won't answer a fallback
 // either, so callers give up rather than send more (or heavier) queries.
-const refusesMore = (err) => err instanceof ServerBusy || err.status === 429 || err.status === null;
+export const refusesMore = (err) => err instanceof ServerBusy || err.status === 429 || err.status === null;
 
 const ID = "[0-9a-z]{1,13}";
 const URL_PATTERNS = [
@@ -169,6 +169,8 @@ export class ArcticShiftClient {
     maxRetries = 4,
     maxRateLimitWaits = 10,
     baseUrl = BASE_URL,
+    // The `meta-app` every request carries: the page's own, or the archive sync's (docs/adr/0005).
+    appTag = APP_TAG,
     fetchFn = (...a) => globalThis.fetch(...a),
     sleep = wait,
     now = monotonicNow,
@@ -177,7 +179,7 @@ export class ArcticShiftClient {
     onPause = () => {},
     random = Math.random,
   } = {}) {
-    Object.assign(this, { delay, maxInFlight, maxRetries, maxRateLimitWaits, baseUrl, signal, onWait, onPause });
+    Object.assign(this, { delay, maxInFlight, maxRetries, maxRateLimitWaits, baseUrl, appTag, signal, onWait, onPause });
     this._random = random;
     this._fetch = fetchFn;
     this._sleepFn = sleep;
@@ -355,7 +357,7 @@ export class ArcticShiftClient {
     const label = requestLabel(path, params, { split: Boolean(group) });
     const url = new URL(path, this.baseUrl);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
-    url.searchParams.set("meta-app", APP_TAG);
+    url.searchParams.set("meta-app", this.appTag);
     let failures = 0;
     let slowdowns = 0;
     let rateLimitWaits = 0;

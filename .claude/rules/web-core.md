@@ -12,7 +12,7 @@ Moved from CLAUDE.md's web app architecture. The API's verified behaviour is in 
   - **`ArcticShiftClient`:**
     - Spaces request starts by `delay` using a slot scheduler.
     - Caps requests in flight with AIMD: the cap halves on a 429, a "slow down" reply, a 5xx or a network error, and grows back after `GROW_AFTER` successes. The retry waits are the `BACKOFF` table; a request's own waits are jittered (`JITTER`).
-    - Every request carries `meta-app=reddit-post-profiler` (`APP_TAG`), so Arctic Shift's maintainer can identify the traffic.
+    - Every request carries `meta-app`, so Arctic Shift's maintainer can identify the traffic: the `appTag` option, by default `APP_TAG` (`reddit-post-profiler`). The archive sync's fetcher passes its own (docs/adr/0005).
     - It counts every request it sends (`requests`), and the same by what each was for (`byLabel`, labels from `requestLabel(path, params)`) and its retries by reason (`retries`), for the request breakdown.
     - A 429 or a network error pauses every request on the client (`_pause`, reported via `onPause`). Per-request backoffs are reported via `onWait`.
     - After repeated "slow down" replies it throws `ServerBusy` instead of escalating to heavier queries, and pauses every request on the client for `BACKOFF.busy` (60 s), so the next users don't start their own rounds of retries. The parts of a split (`subredditCounts`) share a group: its slow-downs are counted together, and once one part gives up on a server that won't answer (`refusesMore`, or a lasting 5xx; its 5xx replies are counted together too), the unsent parts are dropped with that part's error (measured: 102 requests to a busy server for one timed-out user before, 7 now).
