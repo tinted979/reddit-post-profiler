@@ -38,9 +38,9 @@ import {
   wait,
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
-import { describeRule, explain, formatDuration, formatEta, plural, requestsText, timelineText, tookText } from "./format.js";
+import { breakdownLines, describeRule, explain, formatDuration, formatEta, plural, requestsText, timelineText, tookText } from "./format.js";
 import { FIELD_IDS, mergeOptions, optionsSummary, parseMinCount, parseOptions, readShareParams, scanOptionNotes, shareParams } from "./options.js";
-import { DumpSource, TailStore } from "./dumps.js";
+import { DumpSource, TailStore, archiveFileName } from "./dumps.js";
 import { LinkQueue, MAX_WAITING, QUEUE_CONCURRENCY, QUEUE_KEY } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
@@ -204,6 +204,13 @@ function startEta(total) {
 function stopEta() {
   clearInterval(status.etaTimer);
   Object.assign(status, { eta: null, etaTimer: null });
+}
+
+// The request breakdown under the status line (format.js breakdownLines), shown once a run
+// ends; null hides it.
+function showBreakdown(lines) {
+  $("breakdown-list").replaceChildren(...(lines ?? []).map((line) => el("li", {}, line)));
+  $("breakdown").hidden = !lines;
 }
 
 function setStatus(text) {
@@ -568,7 +575,8 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
   // the options too (Enter in an option field starts a scan):
   // keyboard focus on any of them moves to Stop once it shows (below), instead of being
   // dropped.
-  const refocus = ["post-card", "results", "saved-list", "run", "option-fields"].some((id) => $(id).contains(document.activeElement));
+  const refocus = ["post-card", "results", "saved-list", "run", "option-fields", "breakdown"].some((id) => $(id).contains(document.activeElement));
+  showBreakdown(null);
   $("post-card").hidden = true;
   $("results").hidden = true;
   $("users").replaceChildren();
@@ -589,9 +597,17 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
     onPause: (until) => runId === state.runId && status.eta?.pause(until),
   });
   const counts = { done: 0, total: 0 };
-  // Requests to the archive server (R2): the manifest and each range read. The API's are
-  // client.requests.
+  // Requests to the archive server (R2): the manifest and each range read, in all and by
+  // file. The API's are client.requests.
   let archiveRequests = 0;
+  const archiveByFile = new Map();
+  const countArchive = (url) => {
+    archiveRequests++;
+    const file = archiveFileName(url);
+    archiveByFile.set(file, (archiveByFile.get(file) ?? 0) + 1);
+  };
+  // What each recent-activity fetch did (fetchTails), for the request breakdown.
+  let tailReport = [];
   let failed = 0;
   let capped = null; // commenters in the thread, when only the top LARGE_SCAN were profiled
   let outcome = { kind: "failed", message: "" };
@@ -674,7 +690,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
 
     // Archive files for the post's subreddit, if there are any: "before" facts come from
     // them rather than Arctic Shift searches. No manifest, or a broken one, means the API.
-    const dumps = await DumpSource.open({ signal: controller.signal, onRequest: () => archiveRequests++, tails });
+    const dumps = await DumpSource.open({ signal: controller.signal, onRequest: countArchive, tails });
     // Where the files alone end, for the end-of-scan note.
     const archive = dumps?.covers(post.subreddit, { withTail: false }) ?? null;
     // What the files don't have yet, fetched once for the scan rather than per commenter.
@@ -682,7 +698,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
     if (dumps) {
       setStatus("Checking recent activity…");
       const sent = client.requests;
-      await fetchTails(client, dumps, post, { only: opts.only });
+      tailReport = await fetchTails(client, dumps, post, { only: opts.only });
       tailRequests = client.requests - sent;
     }
 
@@ -827,6 +843,10 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
   } finally {
     controller.abort(); // stop anything still in flight
     if (runId === state.runId) {
+      showBreakdown(breakdownLines({
+        requests: client.requests, byLabel: client.byLabel, retries: client.retries,
+        tails: tailReport, archive: archiveRequests, archiveByFile,
+      }));
       state.controller = null;
       clearWaits();
       stopEta();
@@ -1340,6 +1360,7 @@ async function openSaved(id) {
   // start a fresh one on reload.
   history.replaceState(null, "", location.pathname);
   showError("");
+  showBreakdown(null); // it describes the last run, not this saved scan
   fillFromScan(summary);
   renderPost(summary.post, summary.thread);
   renderWindowNote(state.after);

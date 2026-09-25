@@ -149,6 +149,9 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .error summary { cursor: pointer; }
 
 #status { margin-top: 20px; }
+.breakdown { margin-top: 8px; font-size: .85rem; color: var(--muted); }
+.breakdown > summary { cursor: pointer; width: fit-content; }
+.breakdown ul { margin: 6px 0 0; padding-left: 20px; overflow-wrap: anywhere; }
 .status-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; color: var(--muted); font-size: .92rem; min-height: 40px; }
 .confirm { background: var(--info-soft); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
 .confirm p { margin: 0 0 8px; }

@@ -5,6 +5,51 @@ import { ArcticShiftError, QueryTimeout, ServerBusy } from "./core.js";
 
 export const plural = (n, word) => `${n} ${n === 1 ? word : `${word}s`}`;
 
+// Words for core.js's requestLabel labels, in the order the request breakdown lists them.
+const LABEL_TEXT = new Map([
+  ["post", "Post"],
+  ["recent posts", "Recent activity, posts (whole subreddit)"],
+  ["recent comments", "Recent activity, comments (whole subreddit)"],
+  ["thread tree", "Thread, comment tree"],
+  ["thread pages", "Thread, comment pages"],
+  ["lifetime posts", "Lifetime totals per user, posts"],
+  ["lifetime comments", "Lifetime totals per user, comments"],
+  ["lifetime posts, split", "Lifetime totals per user, posts, split up"],
+  ["lifetime comments, split", "Lifetime totals per user, comments, split up"],
+  ["interactions", "Lifetime totals per user, interactions"],
+  ["before posts", "Before the post per user, post timestamps"],
+  ["before comments", "Before the post per user, comment timestamps"],
+  ["before posts, count", "Before the post per user, post counts"],
+  ["before comments, count", "Before the post per user, comment counts"],
+]);
+
+const utcMinute = (t) => `${new Date(t * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+
+// The scan's request breakdown, a line each: the Arctic Shift requests by what they were
+// for (client.byLabel), adding up to the total; the retries among them by reason; what
+// each recent-activity fetch did (core.js fetchTails); and the archive requests by file.
+export function breakdownLines({ requests, byLabel, retries, tails, archive, archiveByFile }) {
+  const lines = [`Arctic Shift: ${plural(requests, "request")}`];
+  for (const [label, text] of LABEL_TEXT) {
+    if (byLabel.get(label)) lines.push(`${text}: ${byLabel.get(label)}`);
+  }
+  for (const [label, n] of byLabel) {
+    if (!LABEL_TEXT.has(label)) lines.push(`${label}: ${n}`);
+  }
+  if (retries.size) lines.push(`Retries: ${[...retries].map(([why, n]) => `${why} ${n}`).join(", ")} (included above)`);
+  if (!tails.length) lines.push("No recent activity was fetched for the whole subreddit.");
+  for (const t of tails) {
+    const how = t.reachedEnd ? "reached the present" : t.error ? `stopped: ${t.error}` : "stopped at the budget";
+    const upTo = t.reachedEnd || t.through === null ? "" : `; complete up to ${utcMinute(t.through)}`;
+    lines.push(`r/${t.subreddit} ${t.kind} since the archive files: ${t.pages} of ${t.budget} pages, ${how}${upTo}`);
+  }
+  if (archive !== null && archive !== undefined) {
+    const files = [...archiveByFile].sort(([a], [b]) => a.localeCompare(b)).map(([f, n]) => `${f} ${n}`).join(", ");
+    lines.push(`Archive: ${plural(archive, "request")}${files ? ` (${files})` : ""}`);
+  }
+  return lines;
+}
+
 // Time left in a scan, rounded up and coarser as it grows.
 export function formatEta(seconds) {
   if (seconds === null) return "estimating time left…";
