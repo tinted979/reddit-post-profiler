@@ -141,7 +141,7 @@ https://tinted979.github.io/reddit-post-profiler/?post=https://redd.it/1l7d1e4&m
   per-subreddit counts, and their "before" counts, days active and first date for each
   post you scan. They're reused
   for `cache` days; records older than that (and at least 30 days old) are deleted when
-  the page loads. The scheduler's queue is kept in localStorage until you remove its links.
+  the page loads, at most once a day (the time of the last clean-up is kept in localStorage). The scheduler's queue is kept in localStorage until you remove its links.
   Saved scans (each post, its options and every profile shown) are kept
   until you delete them. *Clear saved results* under *Options* deletes everything now, and
   `cache=0` saves nothing.
