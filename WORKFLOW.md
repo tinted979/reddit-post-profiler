@@ -44,7 +44,7 @@ flowchart TD
     R["Mark draft ready"]
     M["Approve & merge"]
   end
-  I --> L --> W["implementer<br/>(Claude App token)"] --> D["Draft PR on claude/N-slug"]
+  I --> L --> W["implementer<br/>(writer app token)"] --> D["Draft PR on claude/N-slug"]
   D --> C["Checks: tests, rule guards,<br/>test-count and path guards"]
   C --> R --> G["Checks again"] --> RV["pr-reviewer + specialists<br/>(GITHUB_TOKEN: comment only)"]
   RV --> M --> DEP["Deploy to Pages"] --> V["Check the live site<br/>serves the commit"]
@@ -110,8 +110,8 @@ Ten decisions drive everything else. When a later section seems arbitrary, it fo
 
 | Role | Where it runs | Started by | Token | Changes | Done means |
 |---|---|---|---|---|---|
-| **implementer** (senior developer) | CI and interactive | `agent:implement` label on an issue; `@claude` on a PR; you, locally | Claude App (push `claude/*`, open PRs) | Code and tests on its own branch | A draft PR with green tests and evidence, or a comment explaining why it stopped |
-| **refactorer** | CI and interactive | `agent:refactor` label | Claude App | Code only; existing tests are locked | A draft PR, behaviour unchanged, ≤ ~300 lines |
+| **implementer** (senior developer) | CI and interactive | `agent:implement` label on an issue; `@claude` on a PR; you, locally | Your writer app (push `claude/<issue>-*`, open draft PRs) | Code and tests on its own branch | A draft PR with green tests and evidence, or a comment explaining why it stopped |
+| **refactorer** | CI and interactive | `agent:refactor` label | Writer app | Code only; existing tests are locked | A draft PR, behaviour unchanged, ≤ ~300 lines |
 | **pr-reviewer** | CI | You mark a PR ready (or open it ready); `review:pr-reviewer` | `GITHUB_TOKEN`: comment only | Nothing | ≤ 5 inline comments and one summary |
 | **architecture-reviewer** | CI and interactive | PR touches CLAUDE.md/ADRs, adds a module or changes storage schema; label; monthly | Comment-only on PRs; none in audits | Nothing | A verdict (fits / notes / conflicts) with sources; an ADR draft if needed |
 | **security-reviewer** | CI | PR touches `.github/`, `.claude/`, deploy scripts, CORS or `index.html`; label | Comment only | Nothing | Inline comments and a summary; never quotes a secret |
@@ -159,10 +159,10 @@ Everything that isn't in this table is either you or a script.
 - **Trigger:**
   - A PR is opened ready, reopened, or marked ready for review, by you.
   - Or you add `review:pr-reviewer` to re-run it.
-  - It is skipped for drafts, forks, bot actors, and README-only or plan-only (`docs/history/`) PRs.
+  - It is skipped for drafts, forks, bot actors (so Dependabot's PRs get no review unless you add a `review:` label; see 6.1), and README-only or plan-only (`docs/history/`) PRs.
   - It runs **after** `checks.yml` passes in the same workflow.
 - **Context:** CLAUDE.md (from the base branch), the diff, and the changed files in full. Reading them with the Read tool is what loads the path-scoped rules.
-- **Tools:** Read/Grep/Glob, `gh pr diff/view/comment` and the inline-comment MCP tool. The token is `GITHUB_TOKEN` with `contents: read, pull-requests: write`, so it can't push, approve or touch issues.
+- **Tools:** Read/Grep/Glob, `gh pr diff/view/comment`, read-only `git diff/log/show`, and the inline-comment MCP tool, with 50 turns. The token is `GITHUB_TOKEN` with `contents: read, pull-requests: write`, so it can't push, approve or touch issues.
 - **Reports only:**
   - Bugs, and security or data-loss risks.
   - CLAUDE.md rule breaks that need judgement: `runId` checks after `await`, cache-key version bumps, focus handling, request patterns that bypass `_get`, and Arctic Shift endpoints or parameters missing from the verified API facts.
@@ -201,7 +201,7 @@ This role isn't on your list. It covers the one area where a mistake is both lik
 
 ### 3.7 Bug hunter
 
-- **Trigger:** Mondays 06:17 UTC, or dispatch with an optional focus such as `web/queue.js`.
+- **Trigger:** Mondays 06:47 UTC (after the 06:17 archive check), or dispatch with an optional focus such as `web/queue.js`.
 - **Context:** the repo with 200 commits of history, the fixtures, and the `finding-format` skill.
 - **Tools:**
   - Read/Grep/Glob.
@@ -272,7 +272,7 @@ Don't run an interactive session on a branch a CI writer owns, or the reverse. W
 | `checks.yml` (reusable) | `workflow_call` from `ci.yml` and `agent-review.yml` | `test`: web tests, Python tests, rule guards. `guards` (PRs only): test integrity, sensitive paths, PR size, actionlint and zizmor | `contents: read` (+ `issues/pull-requests: read` for label checks) |
 | `ci.yml` (replaces `pages.yml`) | `push` to `main`; `pull_request` (incl. `labeled`); dispatch | `checks` → `deploy` (main only) → live-site check | `pages: write`, `id-token: write` in deploy only |
 | `agent-review.yml` (replaces `code-review.yml`) | `pull_request`: opened, reopened, ready_for_review, labeled `review:*` | `gate` (= checks) → `route` (picks roles from paths/labels) → `review` matrix | `GITHUB_TOKEN`: `contents: read`, `pull-requests: write`. No Claude App, no `id-token` |
-| `agent-write.yml` | `issues: labeled` (`agent:implement`, `agent:refactor`); `issue_comment` with `@claude` on a PR; dispatch | `from-issue` (agent mode) and `follow-up` (tag mode), both in concurrency group `agent-write` with `queue: max` | `GITHUB_TOKEN` read-only; the **Claude App** token (via `id-token: write`) pushes `claude/*` and opens PRs |
+| `agent-write.yml` | `issues: labeled` (`agent:implement`, `agent:refactor`); `issue_comment` with `@claude` on a PR; dispatch | `from-issue` (agent mode) and `follow-up` (tag mode), both in concurrency group `agent-write` with `queue: max` | `GITHUB_TOKEN` read-only; the **writer app** token (minted per job by `actions/create-github-app-token`; no `id-token`) pushes `claude/<issue>-*` and opens draft PRs |
 | `agent-audit.yml` | Two crons + dispatch (role choice + focus) | `plan` → `audit` matrix (one at a time) → `file-issues` | Audit job: `contents/issues: read`, nothing else. Filing job: `issues: write`, no Claude |
 
 Every agent job:
@@ -289,7 +289,7 @@ The full files are in the [appendix](#appendix-starter-files). They pass `action
 
 1. **You write an issue** with the *Agent task* form: problem, acceptance criteria, likely files, out of scope, how to verify. GitHub's guidance for its own agent is to treat the issue as the prompt [G39].
 2. **You add `agent:implement`.** `agent-write.yml` checks that you're the actor and the issue's author is you or the audit bot, waits for any running writer, then runs the implementer.
-3. **The implementer pushes `claude/42-short-slug` and opens a draft PR.** Pushes and PRs made with the Claude App's token *do* trigger workflows (only `GITHUB_TOKEN` events don't [G16]), so `ci.yml` runs tests and guards on the draft.
+3. **The implementer pushes `claude/42-short-slug` and opens a draft PR.** Pushes and PRs made with the writer app's token *do* trigger workflows (only `GITHUB_TOKEN` events don't [G16]), so `ci.yml` runs tests and guards on the draft.
 4. **You glance at the draft.** Is it green, is it the right size, does the body make sense? If not, comment `@claude …` (the `follow-up` job) or close it. If yes, **Ready for review**.
 5. **`agent-review.yml` runs checks again, then the reviewers the diff calls for.** Comments land within a few minutes.
 6. **You review, with the reviewers' comments as a starting point, not a verdict.** You ask for fixes with `@claude`, approve and merge. **Merge = deploy**: `ci.yml` publishes to Pages and fails loudly if the live page doesn't load the new commit within three minutes.
@@ -300,25 +300,27 @@ The full files are in the [appendix](#appendix-starter-files). They pass `action
 | Identity | Used by | Can | Can't |
 |---|---|---|---|
 | **You** (`tinted979`, code owner, admin) | Everything that authorises | Label, mark ready, approve bot PRs, merge, bypass the approval ruleset for your own PRs | Approve your own PRs (GitHub forbids it [G25]) |
-| **Claude App** installation token | implementer, refactorer, follow-up | Push branches, open PRs and comment. Its events trigger CI | Satisfy code-owner review, so it can't merge. Push to `main` (ruleset). Edit workflows (the app isn't given workflow write access [A20]; the hook and `ack:sensitive` back that up regardless) |
+| **Writer app** installation token (your own GitHub App, minted per job with contents, pull-requests and issues write) | implementer, refactorer, follow-up | Push `claude/<issue>-*` branches, open PRs and comment. Its events trigger CI | Satisfy code-owner review, so it can't merge. Push to `main` or your branches (rulesets). Push workflow files: it has no `workflows` or `actions` permission, so GitHub refuses the push. (The Claude GitHub App asks for both, so it isn't used; see the appendix's corrections) |
 | **`GITHUB_TOKEN`** (job-scoped) | reviewers, audit filing, checks | Exactly what the job's `permissions:` grants | Approve PRs (repo setting off), trigger other workflows [G16], outlive the job. A PR it opened would get CI runs only after a manual approval [G43], another reason writers use the app |
 
 This split is the key change from today's `code-review.yml`, which reviews using the Claude App's contents-write token. In the new setup the reviewer holds a token that can only comment. The claude-code-action vulnerability published in June 2026 (fixed in January) showed why this matters: a prompt-injected run could leak the credentials for requesting its OIDC token, which an attacker could then exchange for the app's write token [R7]. Reviewers here don't get `id-token: write` at all.
 
 ### 4.5 Protecting `main` as a solo maintainer
 
-GitHub has no "solo" recipe, and "pull request authors cannot approve their own pull requests" [G25]. Two layered **rulesets** (free on public repos, and the most restrictive rule wins where they overlap [G23]) give you strict rules for bots and a deliberate escape hatch for yourself:
+GitHub has no "solo" recipe, and "pull request authors cannot approve their own pull requests" [G25]. Three layered **rulesets** (free on public repos, and the most restrictive rule wins where they overlap [G23]) give you strict rules for bots and a deliberate escape hatch for yourself:
 
 | Ruleset | Target | Rules | Bypass |
 |---|---|---|---|
 | **main: integrity** | `main` | Require a pull request (0 approvals). Required status checks: `checks / test`, `checks / guards` (from `ci.yml`). Block force pushes. Restrict deletions | **Nobody** |
 | **main: human approval** | `main` | Require a pull request with 1 approval. Require review from code owners. Require approval of the most recent reviewable push | **Repository admin, pull requests only** |
+| **branches: owner only** | Every branch except `main` and `claude/[0-9]*` | Restrict updates, force pushes and deletions | **Repository admin; Dependabot on its own branches** |
 
 Add `.github/CODEOWNERS` with `* @tinted979`. Here's what follows:
 
 - **Bot-authored PRs** (the CI implementer and refactorer) need *your* approval. No token can produce a code-owner approval. An agent push after your approval voids it [G24].
-- **Your own PRs** (interactive sessions push as you) can't be approved by you. You merge them with *Merge without waiting for requirements to be met (bypass rules)*. That's a conscious, logged act, and it skips only the approval ruleset: the checks ruleset still applies.
+- **Your own PRs** (interactive sessions push as you) can't be approved by you. You merge them with *Merge without waiting for requirements to be met (bypass rules)*. That's a conscious, logged act, and it skips only the approval ruleset: the checks ruleset still applies. From the terminal it's `gh pr merge <N> --merge --admin`; without `--admin`, `gh` refuses before it tries, because it doesn't check for bypass rights [G47].
 - **Nothing can merge red.** The integrity ruleset has no bypass.
+- **Agents can't push to your branches.** The *branches: owner only* ruleset (added after the security review of #39) lets only you, or Dependabot on its own branches, update any branch except `main` and the agents' `claude/<number>-…`. That's what lets `pr-guards.sh` trust that your PRs hold only your commits, and it's why interactive branch names mustn't start with a digit.
 - Rulesets can also name individual users as bypass actors (since May 2026 [G44]). The *Repository admin* role does the same job here with less to maintain.
 - Merge queues are only offered for organization-owned repositories [G27], and you don't need one at this volume.
 
@@ -328,7 +330,7 @@ Add `.github/CODEOWNERS` with `* @tinted979`. Here's what follows:
 - Fork PR workflows: *Require approval for all external contributors*.
 - Enable the SHA-pinning policy for actions, if your plan shows it [G17].
 - Variables → `AGENTS_ENABLED=true` (the kill switch).
-- Install the Claude GitHub App on **this repository only**.
+- Create the writer app (a GitHub App of your own with contents, pull-requests and issues write, and no `workflows` or `actions`) and install it on **this repository only**. Set the variables `WRITER_APP_CLIENT_ID` and `WRITER_APP_SLUG` and the secret `WRITER_APP_PRIVATE_KEY`. The Claude GitHub App isn't needed.
 - Environments → `github-pages` → deployment branches: `main` only.
 
 ### 4.6 How roles avoid stepping on each other
@@ -338,7 +340,7 @@ Add `.github/CODEOWNERS` with `* @tinted979`. Here's what follows:
 - **Branch ownership.** Writers create `claude/<issue>-<slug>` and push only there. The follow-up job pushes to a PR's branch only when you ask on that PR. `main` is closed to every token.
 - **Overlap check.** The refactorer checks open PRs' files before starting. The PR-size guard keeps PRs small enough that overlaps are rare and cheap.
 - **Readers can't conflict.** They hold no write token (audits) or a comment-only token (reviewers).
-- **Agents can't trigger agents.** Reviewer and audit comments use `GITHUB_TOKEN`, whose events start no workflows [G16]. Every agent workflow also requires `github.actor == owner`, so Claude App events can't start one either. There's no agent-to-agent path except through you.
+- **Agents can't trigger agents.** Reviewer and audit comments use `GITHUB_TOKEN`, whose events start no workflows [G16]. Every agent workflow also requires `github.actor == owner`, so writer app events can't start one either. There's no agent-to-agent path except through you.
 - **Output collisions are de-duplicated.** Each reviewer runs once per PR, audit findings are fingerprinted, and specialists run only on their paths.
 
 ### 4.7 Where CLAUDE.md, rules, skills, hooks and MCP enter a CI run
@@ -347,7 +349,7 @@ In order, for a reviewer run on PR #42:
 
 1. **Base-branch config.** Checkout gives the PR head. The action then **restores `.claude/`, `.mcp.json`, `CLAUDE.md` and a few others from the base branch** [A18], so the PR can't change its own reviewer's instructions, hooks or MCP servers.
 2. **Settings.** Claude Code loads user, project and local settings. Hooks in the project's `.claude/settings.json` **do run** in headless runs [A5][A4], so the path hook is active in CI.
-3. **What doesn't load from the repo in CI.** A headless run in a folder that was never trusted (every fresh runner) ignores the repo's `permissions.allow`, repo-declared plugins, and hooks or MCP servers declared in a *subagent's frontmatter* [A4][A12]. That's why every workflow passes tools explicitly with `--allowedTools`, why the path hook lives in `settings.json` rather than in agent frontmatter, and why your 11 enabled plugins don't bloat CI context.
+3. **What doesn't load from the repo in CI.** A headless run in a folder that was never trusted (every fresh runner) ignores the repo's `permissions.allow`, repo-declared plugins, and hooks or MCP servers declared in a *subagent's frontmatter* [A4][A12]. That's why every workflow passes tools explicitly with `--allowedTools`, why the path hook lives in `settings.json` rather than in agent frontmatter, and why the plugins enabled in `.claude/settings.json` don't bloat CI context.
 4. **The agent.** `--agent pr-reviewer` applies the role's prompt, tool list and model, and **preloads its skills** (`finding-format`) in full [A3].
 5. **Memory.** CLAUDE.md loads at start. `.claude/rules/*.md` with `paths:` load when a matching file is read [A2]. That's why reviewers are told to *read changed files in full*, not just the diff.
 6. **MCP.** Only the action's own `github_inline_comment` server, which starts only when named in `--allowedTools` [A21]. No third-party MCP servers in CI.
@@ -397,7 +399,7 @@ Each step stands alone; stop wherever the value tails off.
 | **MCP servers** | Connections to external systems' tools and data [A13] | Tool definitions at start | No, and they're a prompt-injection surface [A13][R2] | Yes (open protocol) | External systems only: Context7 docs and Playwright, interactively. None in CI beyond the action's comment tool |
 | **Plugins** | A bundle of skills, agents, hooks, commands and MCP config, installed from a marketplace [A11] | Whatever they bundle | Via their hooks | Claude Code only | Distributing a *reusable* kit across repos. Not needed for one repo |
 | **Output styles** | Replace or extend the main system prompt's tone [A14] | Main session only | No: "nothing enforces it" [A14] | No | Nothing. Roles are subagents; machine output uses `--json-schema` |
-| **GitHub App / tokens** | Identity and authority on GitHub | Not context | **Yes**, at the API | n/a | Writer identity (Claude App) vs comment-only readers (`GITHUB_TOKEN`) |
+| **GitHub App / tokens** | Identity and authority on GitHub | Not context | **Yes**, at the API | n/a | Writer identity (your writer app) vs comment-only readers (`GITHUB_TOKEN`) |
 
 ### 5.2 A decision rule
 
@@ -473,7 +475,7 @@ They give the architecture reviewer something stable to cite.
 | 1 | **Authorise** | Write the issue, or read an audit-filed one; then add `agent:*` | Deciding *what* to build is a human call: in one study, a common stated reason for rejecting Claude Code PRs was that a different solution was preferred [R18]. It's also where injection would enter, so the label is your statement that the text is safe to act on | 2–5 min |
 | 2 | **Vouch** | Glance at the draft: green? right size? plausible body? Then *Ready for review* | Keeps review tokens and your attention off dead ends; it's also what lets the reviewers start (they require a human actor) | 1 min |
 | 3 | **Accept** | Read the diff with the reviewers' comments, approve, merge | The person who clicks Merge owns the code [G34]. GitHub says to use AI review "to supplement human reviews, not to replace them" [G32]. Merge = deploy | 5–20 min |
-| 4 | **Grounding changes** | Read every changed line in CLAUDE.md, `.claude/`, `.github/`, then add `ack:sensitive` | These files decide what every future run can do, and a PR that edits them is the one place an agent could expand its own power | 2 min |
+| 4 | **Grounding changes** | Read every changed line in CLAUDE.md, `.claude/`, `.github/`, then add `ack:sensitive`. Dependabot's weekly action bumps change `.github/workflows/`, so they need it too, and reviewers don't start on Dependabot's PRs by themselves: add `review:security-reviewer` first if you want its read | These files decide what every future run can do, and a PR that edits them is the one place an agent could expand its own power | 2 min |
 | 5 | **Waivers** | `ack:tests`, `ack:large` when a test removal or a big PR is genuinely intended | Editing tests is how Claude models most often cheat on impossible tasks [R15] | seconds |
 | 6 | **Monthly tune-up** | 15 minutes with the list of `agent:finding` issues and review comments: what was useful? | Turn off or narrow any role whose findings you mostly close as not planned | 15 min/month |
 
@@ -548,10 +550,10 @@ All CI runs use `CLAUDE_CODE_OAUTH_TOKEN`, so they draw on your Claude plan's us
 |---|---|---|---|---|
 | implementer | Opus | 80 (40 for `@claude` follow-ups) | 45 min (30) | 5–15 |
 | refactorer | Sonnet | 80 | 45 min | 0–5 |
-| pr-reviewer | Sonnet | 30 | 20 min | 10–20 (once per PR) |
-| security-reviewer | Opus | 30 | 20 min | 0–5 |
-| architecture-reviewer | Opus | 30 (PR) / 50 (audit) | 20 / 30 min | 1–5 |
-| perf-auditor | Sonnet | 30 (PR) / 50 (audit) | 20 / 30 min | 1–3 |
+| pr-reviewer | Sonnet | 50 | 20 min | 10–20 (once per PR) |
+| security-reviewer | Opus | 50 | 20 min | 0–5 |
+| architecture-reviewer | Opus | 50 | 20 (PR) / 30 (audit) min | 1–5 |
+| perf-auditor | Sonnet | 50 | 20 (PR) / 30 (audit) min | 1–3 |
 | bug-hunter | Opus | 50 | 30 min | 4 |
 | context-steward | Sonnet | 50 | 30 min | 1 |
 
@@ -667,7 +669,7 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 **D4. Two rulesets, CODEOWNERS, and an admin bypass for PRs only.**
 *Instead of:* classic branch protection with 0 approvals, the simplest solo setup.
 *Why:*
-- With 0 required approvals, any token with contents-write (the Claude App's included) could merge a green PR.
+- With 0 required approvals, any token with contents-write (the writers' included) could merge a green PR.
 - Requiring *code-owner* approval makes merge a human-only act, because no app can be the code owner [G26][G24].
 - Authors can't approve their own PRs [G25], so you need a bypass for your own. Putting the checks in a *separate*, bypass-free ruleset keeps "nothing merges red" absolute, since rulesets layer and the most restrictive wins [G23].
 
@@ -678,6 +680,7 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 - The action supports `github_token` in place of the app [A20].
 - The 2026 OIDC → app-token exploit [R7] and PromptPwnd's advice not to give AI agents write tools [R1] both favour least privilege for anything that reads untrusted-ish text.
 - Writers need the app because its events *do* trigger CI, unlike `GITHUB_TOKEN`'s [G16].
+- *As built:* the writers use your own **writer app** instead of the Claude App, which asks for `workflows` and `actions` write (see the appendix's corrections). The reasoning above holds for either app.
 
 **D6. "Safe outputs" for scheduled audits: the agent job holds no write token.**
 *Instead of:* letting the audit agent file issues itself.
@@ -782,9 +785,10 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 1. **`--agent <role>` through `claude_args`.** The action forwards unknown flags to the CLI, and `--agent` is a CLI flag [A32]. I confirmed the forwarding in the action's source but didn't run it. Check the first run's init log shows the role's tools and model. The prompts also name the role file as a fallback.
 2. **Whether preloaded `skills:` apply when an agent runs as the main session** (`--agent`), not only as a subagent. If they don't, nothing breaks: the review and audit prompts also tell the agent to read `.claude/skills/finding-format/SKILL.md` directly.
 3. **`concurrency.queue: max`** is documented by GitHub [G15], but `actionlint` 1.7.12 doesn't know it yet; `checks.yml` ignores exactly that message.
-4. **The Claude App's `workflows` permission.** The action's security doc lists *Workflows (read & write)* under "Permissions for Future Features", while its FAQ says the app "doesn't have workflow write access" [A18][A20]. This design doesn't depend on either: the hook blocks workflow edits and `ack:sensitive` gates them.
+4. **The Claude App's `workflows` permission.** The action's security doc lists *Workflows (read & write)* under "Permissions for Future Features", while its FAQ says the app "doesn't have workflow write access" [A18][A20]. This design doesn't depend on either: the hook blocks workflow edits and `ack:sensitive` gates them. *Resolved:* its public record (`gh api apps/claude`) shows it asks for `workflows: write`, and the hook turned out to be a guardrail, not a boundary, so the writers use your own writer app, which has no `workflows` permission (see the appendix's corrections).
 5. **The live-site check** assumes Pages serves the new `index.html` within three minutes of `deploy-pages` finishing. If it flakes, lengthen the loop rather than removing it.
 6. **The owner-ack check** reads label events through the issues API. If GitHub changes label actor attribution for app-applied labels, the check fails closed, which is safe.
+7. **A `review:` label on a Dependabot PR.** GitHub gives runs triggered by Dependabot only Dependabot secrets and a read-only token [G46], and doesn't say how it treats a label a person adds to Dependabot's PR. The label makes you the event's actor, so the reviewer should get `CLAUDE_CODE_OAUTH_TOKEN`. If the first such review fails for lack of a token, that's why; re-running it keeps the original run's privileges.
 
 ---
 
@@ -817,7 +821,7 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 >   - CI runs the base branch's `pr-guards.sh` and `test-integrity.sh`, not the PR's.
 >   - Agent work that touches a protected path fails, and no label waives it. Agent work means a PR opened by, or with a commit written by, anyone but the owner (Dependabot aside). It's judged by authorship, not branch name, because an agent can pick any branch name.
 >   - Changing or deleting an existing test in agent work needs `ack:tests`.
->   - A PR could still edit `checks.yml` itself. What closes that is the Claude App having no `workflows` permission.
+>   - A PR could still edit `checks.yml` itself. What closes that is the writer app having no `workflows` permission (see below).
 > - **A third ruleset, "branches: owner only"** (added after the security review of #39): only a repo admin, or Dependabot on its own branches, may update, force-push or delete any branch except `main` and `claude/[0-9]*`. Commit authorship can be forged, and a writer's code holds the App token, so without this ruleset an agent could push commits that name the owner as author onto the owner's own PRs, and `ack:sensitive` would let them through. With it, the owner's branches hold only the owner's pushes. Side effects: interactive branch names can't start with a digit, and the Copilot agent can't push to the owner's branches.
 > - **Nothing from the PR runs before the guard's verdict** (security review of #39). Bash reads a script as it runs, so PR code run by the same process could rewrite the rest of the guard. So:
 >   - `pr-guards.sh` runs only git and gh.
@@ -825,7 +829,7 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 >   - `owner-ack.sh` is shared by both.
 >   - The test count is only as trustworthy as the PR's code, since that code could fake it. The protected-path verdict is unaffected.
 > - **`from-issue` refuses an issue edited by anyone but the owner** (or the audit bot), in its body (`userContentEdits`) or title (`RenamedTitleEvent`), because the agents' App token can edit issues.
-> - **The writers don't use the Claude GitHub App.** This corrects §4.4 and §9.4 item 4. The app's public record (`gh api apps/claude`) shows it asks for `workflows: write`, `actions: write` and `repository_hooks: write`. With those, code a writer runs could replace `checks.yml` on its branch, or add a workflow that reads the Claude token secret. Push rulesets could block those paths for every token, but they're only for organization-owned repositories.
+> - **The writers don't use the Claude GitHub App.** §4.4 and §9.4 item 4 have been updated to match. The app's public record (`gh api apps/claude`) shows it asks for `workflows: write`, `actions: write` and `repository_hooks: write`. With those, code a writer runs could replace `checks.yml` on its branch, or add a workflow that reads the Claude token secret. Push rulesets could block those paths for every token, but they're only for organization-owned repositories.
 >   - The writers use the owner's own **writer app**, with contents, pull-requests and issues write only. `actions/create-github-app-token` mints its token per job and also asks for just those three.
 >   - GitHub refuses a workflow-file push from a token without `workflows` permission.
 >   - The writer jobs have no `id-token`, and check `github.triggering_actor` too, so a re-run by anyone else doesn't count.
@@ -834,7 +838,7 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 > - **Every `setup-uv` step sets `enable-cache: false`, and every `setup-node` step sets `package-manager-cache: false`.** Both actions cache by default: setup-uv always on GitHub's runners, setup-node as soon as `package.json` names a package manager, which a PR could add. A writer job's cache, saved after agent code ran, would be restored by CI on `main`.
 > - **In agent work, `ack:tests` also covers changes to what decides which tests run:** `web/package.json`, `web/.nvmrc`, and any `conftest.py`, `pytest.ini`, `pyproject.toml`, `setup.cfg` or `tox.ini`, new ones included. Writers may only create and push `claude/<issue>-*` and must open PRs with `--draft`.
 > - **`pr-guards.sh` fails closed** when a PR has more commits than `gh` lists (100). It uses `--no-renames`, so moving a file out of a protected folder still counts as changing it.
-> - **The follow-up job only revises PRs the Claude App opened in this repository.** It refuses forks, non-`claude/*` branches and the owner's own PRs. Commit authors can be forged, so only a PR's author reliably marks agent work. It may only `git push` or `git push origin HEAD`. `pr-guards.sh` treats any commit author that isn't exactly the owner or Dependabot as agent work, including authors with no linked login.
+> - **The follow-up job only revises PRs the writer app opened in this repository.** It refuses forks, non-`claude/*` branches and the owner's own PRs. Commit authors can be forged, so only a PR's author reliably marks agent work. It may only `git push` or `git push origin HEAD`. `pr-guards.sh` treats any commit author that isn't exactly the owner or Dependabot as agent work, including authors with no linked login.
 > - **The env scrub needs `bubblewrap` and `socat` on the runner.** Claude Code 2.1.282 won't start without bubblewrap, and Bash fails without socat. Every agent job installs both, lifts Ubuntu 24.04's AppArmor block on user namespaces, and checks both work.
 > - **`pr-guards.sh` covers every PR, whatever its branch.** The owner's `ack:` labels waive its checks, except that agent work may never touch protected paths.
 
@@ -2102,6 +2106,8 @@ All accessed 25 September 2026. Dates are publication dates where the page has o
 - **[G43]** GitHub Changelog, Bot-created pull requests can run workflows if approved (11 Jun 2026). <https://github.blog/changelog/2026-06-11-bot-created-pull-requests-can-run-workflows-if-approved/>
 - **[G44]** GitHub Changelog, Repository rulesets: user bypass and branch renaming (7 May 2026). <https://github.blog/changelog/2026-05-07-repository-rulesets-user-bypass-and-branch-renaming/>
 - **[G45]** GitHub Blog, Under the hood: security architecture of GitHub Agentic Workflows (9 Mar 2026). <https://github.blog/ai-and-ml/generative-ai/under-the-hood-security-architecture-of-github-agentic-workflows/>
+- **[G46]** GitHub Docs, Troubleshooting Dependabot on GitHub Actions (runs triggered by Dependabot get Dependabot secrets and a read-only token). <https://docs.github.com/en/code-security/reference/supply-chain-security/troubleshoot-dependabot/dependabot-on-actions>
+- **[G47]** cli/cli issue #13388, `gh pr merge` refuses when ruleset bypass authority would resolve the block (open, May 2026; `--admin` works). <https://github.com/cli/cli/issues/13388>
 
 ### Industry reports and research
 
@@ -2229,6 +2235,8 @@ All accessed 25 September 2026. Dates are publication dates where the page has o
 [G43]: https://github.blog/changelog/2026-06-11-bot-created-pull-requests-can-run-workflows-if-approved/
 [G44]: https://github.blog/changelog/2026-05-07-repository-rulesets-user-bypass-and-branch-renaming/
 [G45]: https://github.blog/ai-and-ml/generative-ai/under-the-hood-security-architecture-of-github-agentic-workflows/
+[G46]: https://docs.github.com/en/code-security/reference/supply-chain-security/troubleshoot-dependabot/dependabot-on-actions
+[G47]: https://github.com/cli/cli/issues/13388
 [R1]: https://www.aikido.dev/blog/promptpwnd-github-actions-ai-agents
 [R2]: https://invariantlabs.ai/blog/mcp-github-vulnerability
 [R3]: https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/
