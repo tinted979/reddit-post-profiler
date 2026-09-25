@@ -1,0 +1,79 @@
+name: Checks
+
+# The cheap, deterministic layer. ci.yml calls it on every PR and push to main (and, from
+# WORKFLOW.md stage 3, agent-review.yml calls it before any AI reviewer runs), so nobody spends
+# review attention on a red PR. The main ruleset requires `checks / test` and `checks / guards`.
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      # No dependency cache: a poisoned cache is a known way into a workflow, and npm ci of
+      # one small dev dependency is quick.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: web/.nvmrc
+      - name: Web tests
+        working-directory: web
+        # fake-indexeddb is the one (dev-only) dependency: the tests run the real IndexedDB
+        # backend on it. The site itself has none.
+        run: |
+          npm ci
+          npm test
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - name: Dump tool tests
+        # The command in CLAUDE.md, with duckdb kept below its next major version.
+        run: uv run --python 3.12 --with "duckdb>=1.1,<2" --with pytest pytest tools -q
+      - name: Rule guards (CLAUDE.md rules a grep can decide)
+        run: bash .github/scripts/rule-guards.sh
+      - name: Tests of the CI scripts
+        run: node --test .github/scripts/tests/*.test.mjs
+      - name: Shell script lint
+        run: shellcheck tools/*.sh .github/scripts/*.sh
+
+  guards:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read          # label events, for the owner's ack: labels
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 2    # the merge commit and main, for HEAD^1
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: web/.nvmrc
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - name: Branch guards (sensitive paths, size, test integrity)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          OWNER: ${{ github.repository_owner }}
+        run: bash .github/scripts/pr-guards.sh
+      - name: Workflow lint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" actionlint
+          # actionlint 1.7.12 predates concurrency `queue: max`; ignore just that.
+          ./actionlint -ignore 'unexpected key "queue"'
+          uvx zizmor==1.30.1 --offline --min-severity medium .github/workflows

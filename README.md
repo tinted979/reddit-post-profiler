@@ -256,8 +256,8 @@ uv run --with duckdb --with pytest pytest tools   # dump build and upload-check 
 To try the web app locally, serve `web/` with any static server (ES modules don't load
 from `file://`), e.g. `python3 -m http.server -d web`, and open http://localhost:8000.
 
-`.github/workflows/pages.yml` runs the tests on every pull request and push to `main`, and
-on `main` it then publishes the page files at the top of `web/` (`*.html`, `*.js`,
+`.github/workflows/ci.yml` runs the tests and checks (`checks.yml`) on every pull request and
+push to `main`, and on `main` it then publishes the page files at the top of `web/` (`*.html`, `*.js`,
 `*.css`) to GitHub Pages, failing if a module imports a file that isn't among them, and tags each script and stylesheet
 with the commit so browsers don't mix cached versions; any
 other kind of file the page needs must be added to its copy step. One-time setup: in the
@@ -265,7 +265,9 @@ repo's **Settings → Pages**, set *Source* to **GitHub Actions**. On a free Git
 Pages only works for public repositories.
 
 Work happens on other branches and reaches `main` through pull requests, so the live site
-only changes when a pull request is merged.
+only changes when a pull request is merged. After deploying, CI checks that the live page
+loads the new commit. How AI agents take part (who can change what, and where a human
+decides) is in [WORKFLOW.md](WORKFLOW.md).
 
 The archive files are built with `tools/build_dumps.py` and uploaded with
 `tools/upload_dumps.sh`. It first checks the upload against what's live
