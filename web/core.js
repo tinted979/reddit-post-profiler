@@ -104,7 +104,7 @@ export class Aborted extends Error {}
 
 // An overloaded or rate-limiting server, or no connection: it won't answer a fallback
 // either, so callers give up rather than send more (or heavier) queries.
-const refusesMore = (err) => err instanceof ServerBusy || err.status === 429 || err.status === null;
+export const refusesMore = (err) => err instanceof ServerBusy || err.status === 429 || err.status === null;
 
 const ID = "[0-9a-z]{1,13}";
 const URL_PATTERNS = [
@@ -169,6 +169,8 @@ export class ArcticShiftClient {
     maxRetries = 4,
     maxRateLimitWaits = 10,
     baseUrl = BASE_URL,
+    // The `meta-app` every request carries: the page's own, or the archive sync's (docs/adr/0005).
+    appTag = APP_TAG,
     fetchFn = (...a) => globalThis.fetch(...a),
     sleep = wait,
     now = monotonicNow,
@@ -177,7 +179,7 @@ export class ArcticShiftClient {
     onPause = () => {},
     random = Math.random,
   } = {}) {
-    Object.assign(this, { delay, maxInFlight, maxRetries, maxRateLimitWaits, baseUrl, signal, onWait, onPause });
+    Object.assign(this, { delay, maxInFlight, maxRetries, maxRateLimitWaits, baseUrl, appTag, signal, onWait, onPause });
     this._random = random;
     this._fetch = fetchFn;
     this._sleepFn = sleep;
@@ -355,7 +357,7 @@ export class ArcticShiftClient {
     const label = requestLabel(path, params, { split: Boolean(group) });
     const url = new URL(path, this.baseUrl);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
-    url.searchParams.set("meta-app", APP_TAG);
+    url.searchParams.set("meta-app", this.appTag);
     let failures = 0;
     let slowdowns = 0;
     let rateLimitWaits = 0;
@@ -502,10 +504,11 @@ export class ArcticShiftClient {
   // start the next page one second before the last one ended (rows can share a second) and
   // dedupe by id. With pageSize "auto" the server picks the page size, so only an empty
   // page, or two in a row with nothing new, marks the end; with a number, so does a short
-  // page. An empty last page is yielded too (as []), so a caller counting pages counts every
-  // answer, as the budget does. After `maxPages` pages it stops early. Returns true if it
-  // reached the end.
-  async *iterAscending(path, { after = null, ...params }, pageSize = "auto", { maxPages = Infinity } = {}) {
+  // page. `shortBelow` makes a page of fewer rows the end with "auto" too: the API's README
+  // says "auto" answers 100-1000 rows (the archive sync's fetcher passes 100). An empty last
+  // page is yielded too (as []), so a caller counting pages counts every answer, as the
+  // budget does. After `maxPages` pages it stops early. Returns true if it reached the end.
+  async *iterAscending(path, { after = null, ...params }, pageSize = "auto", { maxPages = Infinity, shortBelow = typeof pageSize === "number" ? pageSize : 0 } = {}) {
     const seen = new Set();
     let cursor = after;
     let stale = 0;
@@ -524,7 +527,7 @@ export class ArcticShiftClient {
         fresh.push(row);
       }
       yield fresh;
-      if (typeof pageSize === "number" && page.length < pageSize) return true;
+      if (page.length < shortBelow) return true;
       stale = fresh.length ? 0 : stale + 1;
       if (stale >= 2) return true;
       if (pages >= maxPages) return false;

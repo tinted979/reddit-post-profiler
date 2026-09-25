@@ -1,4 +1,14 @@
-> **Status.** Current plan, being built in phases; the decisions are in docs/adr/0005. Landed: P0 (#72), P1, the shared tail (#73), and P2, the thread from the archive (#74). Next: P3, the fetcher for the scheduled sync. Update this note as phases land.
+> **Status.** Current plan, being built in phases; the decisions are in docs/adr/0005 and 0006. Update this note as phases land.
+>
+> - **Landed:**
+>   - P0 (#72);
+>   - P1, the shared tail (#73), and P2, the thread from the archive (#74);
+>   - a request breakdown at the end of each scan (#75);
+>   - an adaptive tail budget (#76);
+>   - every count stopping at the post (#77, docs/adr/0006), which changed P1 and P2 as described below;
+>   - P3, the fetcher (#78).
+> - **Next:** P4, the splice builder.
+> - **Measured** (live, 2026-09-26): an "only" scan of a 53-commenter r/Hasan_Piker post older than the files went from 60 requests to 2 (the post, and one search for the thread's comments after the files), with no per-user requests.
 
 # Fewer Arctic Shift requests: shared subreddit tails, and a scheduled archive sync
 
@@ -24,7 +34,7 @@ This merges two proposals:
 - Backfilling hasan_piker through the API would take about 16k requests, so import the download tool's JSONL instead.
 - r/AskReddit (~200k comments/day) is too busy to cover.
 
-**Expected requests** (estimates; covered subreddit, build under a day old):
+**Expected requests** (estimates made before #77; covered subreddit, build under a day old). Since #77 the tail runs only up to the post, so a post older than the files needs no tail at all, as measured above:
 
 | Scan | Today | After P1–P2 | + sync (P7) | + interactions (P8b) |
 |---|---|---|---|---|
@@ -48,12 +58,14 @@ This merges two proposals:
 
 ### Page: one shared tail per covered subreddit (P1)
 
-- **The request.** Once per scan, for each covered subreddit in play (the post's own, plus covered ones in `only`), page:
-  `/api/{kind}/search?subreddit=S&after=<files through>&sort=asc&limit=auto&fields=id,author,created_utc[,link_id]`
+- **The request.** Once per scan, for each covered subreddit in play (the post's own, plus covered ones in `only`) whose files end before the post, page:
+  `/api/{kind}/search?subreddit=S&after=<files through>&before=<post time>&sort=asc&limit=100&fields=id,author,created_utc[,link_id]`
+  - Since #77 (docs/adr/0006) the tail stops at the post, as every count does. It used to run to the present.
   - Clean the rows as `build_dumps.py` does: drop `[deleted]`, `[removed]` and AutoModerator, and de-duplicate by id.
-- **The tail extends the archive.** `DumpSource.covers(sub)` reports a `through` moved forward to what the tail completed, and `timestamps()` returns file rows plus tail rows. The existing `beforeFacts`/`archiveLifetime` logic then needs no gap search and no per-user `interactions` once every wanted tail reached the present.
-- **Budget.** Pages are scaled from the post's `num_comments`: about 1 per 50 comments, min 2 and max 20 per kind. Tune it with the bench.
-  - If the budget runs out, `through` moves only as far as the tail got, and per-user requests cover the rest through the existing paths.
+- **The tail extends the archive.** `DumpSource.covers(sub)` reports a `through` moved forward to what the tail completed, and `timestamps()` returns file rows plus tail rows. The existing `beforeFacts`/`archiveLifetime` logic then needs no gap search and no per-user `interactions` once every wanted tail reaches the post.
+- **Budget.** Pages are scaled from the post's `num_comments`: about 1 per 50 comments, min 2 and max 20 per kind (`tailBudget`).
+  - Since #76, past those pages the tail goes on only if the rate they show projects reaching the post within `tailWorth` pages: about one per thread comment for an `only` scan, half that otherwise, at most 100. That's roughly what asking per commenter would cost instead.
+  - If it stops short, `through` moves only as far as the tail got, and per-user requests cover the rest through the existing paths.
   - No manifest change.
 - **Failures.**
   - `refusesMore` (busy, 429, network) fails the scan, as `collectCommenters` does (0002).
@@ -63,8 +75,9 @@ This merges two proposals:
 
 ### Page: thread from `comments_by_link` (P2)
 
-- **Covered posts.** `collectCommenters` takes the post's rows from `comments_by_link` (`$eq` on `link_id`, up to the files' `through`), plus the tail's comment rows for this `link_id`.
-  - If the tail reached the present, there's no tree request. Otherwise it uses the tree request, as today.
+- **Covered posts older than the files** (since #77, docs/adr/0006). `collectCommenters` takes the post's rows from `comments_by_link` (`$eq` on `link_id`, up to the files' cutoff), plus one `/api/comments/search?link_id=…&after=<that cutoff>` for the comments since, usually one short page.
+  - A post newer than the files uses the tree request, as before.
+  - Before #77, the thread came from the files plus the tail's comment rows for the post, with no request, once the tail reached the present. The tail now stops at the post, so it no longer holds the thread's comments.
 - **Same rules as the tree.** Exclusions and `includeOp` apply the same way, and authors keep their spelling.
 - **Manifest.** `parseManifest` accepts `comments_by_link` as an optional file, with no format bump.
 
@@ -73,20 +86,23 @@ This merges two proposals:
 - **The splice.** Given the live build and a cut C, keep each file's rows with `created_utc <= C`, add the API's rows after C (cleaned the same way), and write a new full build.
   - A normal sync uses C = cutoff − 2 h; the weekly repair uses C = cutoff − 7 days.
   - Rows after C are dropped and fetched again, so nothing is duplicated and no ids are needed.
-- **The cutoff means "complete up to"**, per kind:
-  - the time paging reached an empty page, minus ~60 s;
-  - or, if the budget ran out, the last page's newest item − 1.
+- **The cutoff means "complete up to"**, per kind. The fetcher asks for rows before a time a minute before it starts (`SETTLE`, so they've had time to be archived), and reports `complete_through`:
+  - that time − 1, once paging reaches the end;
+  - or, if the budget or an API error stopped it, the newest row's time − 1. That second's rows may be incomplete, so they aren't written.
 
   The page still subtracts `INGEST_LAG`. The manifest shape doesn't change, so there's no FORMAT/DUMP_FORMAT bump.
 - **Backfill** comes from one of two sources:
   - The API: start from an empty base and page ascending, one budget per run. Each run publishes a correct partial build (complete from the start up to its cutoff).
   - An import: build locally from download-tool JSONL, then `upload_dumps.sh --only`.
-- **The fetcher,** `tools/fetch_subreddit.mjs`, runs the page's `ArcticShiftClient` in Node:
+- **The fetcher,** `tools/fetch_subreddit.mjs` (#78), runs the page's `ArcticShiftClient` in Node:
+  - the download tool's search, `/api/{kind}/search?subreddit&after&before&sort=asc&limit=auto`, but with only the `fields` the build reads. `auto` gives 100–1000 rows a page by the server's capacity (API README), so a page under 100 rows is the end;
   - `delay: 1`, one request in flight;
-  - `appTag: "reddit-post-profiler-archive"`;
-  - a request budget.
+  - `appTag: "reddit-post-profiler-archive"`, and a User-Agent naming the repository;
+  - a budget in pages.
 
-  When the server is busy it stops with a partial result, and it never escalates.
+  It writes exactly the rows from `--after` to `complete_through` as JSON lines, in the shape `build_dumps.py` reads, plus a result file. Rows are untrusted, so it copies only checked fields.
+
+  When an API error stops it, it keeps what it had and exits 3. `busy` marks a busy or rate-limiting server, or no connection. It never escalates.
 - **Publishing one subreddit** is split between the jobs:
   - `build` merges the new entry into the **live** manifest. Versions are named `YYYY-MM-DDTHHMMSSZ`.
   - `publish_build.sh` then:
@@ -121,13 +137,14 @@ This merges two proposals:
   - No `review-route.sh` change is needed: the token-holding job runs only `tools/*.sh`, which is already security-reviewed.
   - WORKFLOW.md's "the R2 token never touches GitHub" changes in P7b, when that stops being true.
 - **P1: Shared tail in the page.**
-  - `core.js`: `iterAscending`, which `iterThreadComments` delegates to; `fetchTail`; and `archiveLifetime` skips `interactions` when every tail is complete.
+  - `core.js`: `iterAscending`, which `iterThreadComments` delegates to; `fetchTail`; and `archiveLifetime` skips `interactions` when every tail reaches the post (since #77; before it, the present).
   - `dumps.js`: `addTail`, an extended `covers()`, `timestamps()` merging file and tail rows, and a per-tab `TailCache`.
   - `app.js`: fetch the tails after the post and manifest, with `runId` checked after each await.
   - Tests: new `web/tests/tail.test.js`, plus `dumps.test.js`. Bench scenarios: "build N days old", "25-link queue", "`only` covered".
   - Docs: README, and the help text using `data-const`.
 - **P2: Thread from `comments_by_link`** (closes #55). `dumps.js` gets `threadRows(sub, linkId)`; `collectCommenters` takes a covered-post path and falls back to the tree. Tests and bench.
-- **P3: Fetcher.** A `core.js` `appTag` option and `tools/fetch_subreddit.mjs`. Tests in a new `web/tests/fetch-subreddit.test.js`.
+- **P3: Fetcher** (#78). A `core.js` `appTag` option and `tools/fetch_subreddit.mjs`. Tests in a new `web/tests/fetch-subreddit.test.js`.
+  - For P4: the splice takes the fetcher's `complete_through` as each kind's cutoff. The manifest's `*_to_utc` are then cutoffs, not the newest item.
 - **P4: Splice builder.** `build_dumps.py --splice <prev build> --cut <utc>`, `--posts-through/--comments-through` and timestamp versions. The JSONL-only mode is unchanged. Tests in a new `tools/tests/test_splice.py`.
 - **P5: Publish one subreddit.**
   - `check_upload.py merge-one` needs no token. It refuses a cutoff that goes backwards or a version that's already live. It writes the merged manifest, the updated publish log, and the live manifest's sha256.
@@ -192,7 +209,9 @@ This merges two proposals:
   3. `upload_dumps.sh --only` against a local rclone remote;
   4. prune dry run.
 - **Live, by the owner:**
-  - After P1 and P2, scan a hasan_piker thread with "only": the network log shows only the post request and the tail pages.
+  - After P1 and P2, scan a hasan_piker thread with "only":
+    - for a post older than the files, the network log shows the post request and one thread search (seen 2026-09-26: 2 requests);
+    - for a newer post, the post request, tail pages up to the post, and the comment tree.
   - After P7b:
     1. a dry run, then a real run;
     2. `tools/check_dumps.sh all`;
