@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <!-- Only this site's own files run; data comes only from Arctic Shift and the archive
+       files (keep connect-src in step with BASE_URL and DUMPS_URL; a test checks it). -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://arctic-shift.photon-reddit.com https://rpp-db.tinted979.dev; worker-src blob:; img-src data:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Reddit Post Profiler</title>
   <meta name="description" content="See how active a Reddit thread's commenters were in that subreddit before the post, and where else they post and comment. Powered by the Arctic Shift archive.">

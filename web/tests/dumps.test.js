@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { parquetMetadataAsync, parquetQuery } from "../hyparquet.js";
-import { Aborted, INGEST_LAG } from "../core.js";
-import { DUMP_FORMAT, DumpSource, DumpUnavailable, parseManifest } from "../dumps.js";
+import { Aborted, BASE_URL, INGEST_LAG } from "../core.js";
+import { DUMP_FORMAT, DUMPS_URL, DumpSource, DumpUnavailable, parseManifest } from "../dumps.js";
 
 const FIX = new URL("./fixtures/dumps/", import.meta.url);
 
@@ -114,6 +114,20 @@ test("parseManifest leaves out subreddits it can't trust", () => {
   assert.equal(parseManifest(null).size, 0);
 });
 
+test("parseManifest rejects future cutoffs, odd names and files filed under another subreddit", () => {
+  const sub = MANIFEST.subreddits.python;
+  const now = sub.comments_to_utc + 3600;
+  const one = (key, s) => parseManifest({ format: DUMP_FORMAT, subreddits: { [key]: s } }, now);
+  assert.equal(one("python", sub).size, 1);
+  // A cutoff in the future would make the page skip the API for recent activity.
+  assert.equal(one("python", { ...sub, posts_to_utc: now + 2 * 86400 }).size, 0);
+  assert.equal(one("python", { ...sub, comments_to_utc: now + 2 * 86400 }).size, 0);
+  assert.equal(one("py thon", { ...sub, name: "Py thon" }).size, 0);
+  assert.equal(one("x", { ...sub, name: "x" }).size, 0); // too short for a subreddit
+  const moved = { ...sub.files.posts_by_author, path: "r/rust/v1/posts_by_author.parquet" };
+  assert.equal(one("python", { ...sub, files: { ...sub.files, posts_by_author: moved } }).size, 0);
+});
+
 test("a lookup is read once per source, whatever the case", async () => {
   let opens = 0;
   const dumps = await openFixtures({ openFile: async (url) => (opens++, localFile(url)) });
@@ -160,4 +174,14 @@ test("onRequest counts the manifest request even when it gives no archive", asyn
   const dumps = await DumpSource.open({ baseUrl: BASE, fetchFn: serve("not found", 404), onRequest: () => count++ });
   assert.equal(dumps, null);
   assert.equal(count, 1);
+});
+
+test("the page's Content-Security-Policy lets it fetch from exactly the hosts the code uses", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const csp = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)">/)?.[1];
+  assert.ok(csp, "index.html has no CSP meta tag");
+  const directives = Object.fromEntries(csp.split(";").map((d) => d.trim().split(/\s+/)).map(([k, ...v]) => [k, v]));
+  assert.deepEqual(directives["connect-src"].sort(), [BASE_URL, DUMPS_URL].sort());
+  assert.deepEqual(directives["default-src"], ["'self'"]);
+  assert.deepEqual(directives["worker-src"], ["blob:"]); // the timer worker (app.js)
 });

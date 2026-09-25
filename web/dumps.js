@@ -13,6 +13,10 @@ const FILES = { posts: "posts_by_author", comments: "comments_by_author" };
 // Where a manifest may point: r/<subreddit>/<version>/<name>.parquet under the base URL.
 const FILE_PATH = /^r\/\w{2,21}\/\w[\w.-]{0,39}\/\w+\.parquet$/;
 const isTime = (n) => Number.isSafeInteger(n) && n > 0;
+// A subreddit name, as Reddit allows them.
+const SUBREDDIT = /^\w{2,21}$/;
+// How far past the page's clock a manifest's cutoffs may be (clock skew), in seconds.
+const CLOCK_SLACK = 86400;
 
 // The archive files can't answer (a network error, a bad file). Callers use the API.
 export class DumpUnavailable extends Error {}
@@ -36,17 +40,20 @@ async function urlFile(url, byteLength, signal, timeoutMs = 20000, { fetchFn = (
 // The covered subreddits in a manifest, keyed by lowercase name. The manifest is fetched,
 // so it's checked like any other untrusted input; anything that doesn't check out is left
 // out. `postsThrough`/`commentsThrough` are where the files can be trusted to: an hour
-// before their newest item, in case the newest were archived late.
-export function parseManifest(data) {
+// before their newest item, in case the newest were archived late. A cutoff past `now`
+// (epoch seconds) is rejected: it would make the page skip the API for recent activity.
+export function parseManifest(data, now = Date.now() / 1000) {
   const subs = new Map();
   if (data?.format !== DUMP_FORMAT || !data.subreddits || typeof data.subreddits !== "object") return subs;
   for (const [key, s] of Object.entries(data.subreddits)) {
-    if (typeof s?.name !== "string" || s.name.toLowerCase() !== key) continue;
+    if (typeof s?.name !== "string" || !SUBREDDIT.test(s.name) || s.name.toLowerCase() !== key) continue;
     if (!isTime(s.posts_to_utc) || !isTime(s.comments_to_utc)) continue;
+    if (Math.max(s.posts_to_utc, s.comments_to_utc) > now + CLOCK_SLACK) continue;
     const files = {};
     for (const [kind, name] of Object.entries(FILES)) {
       const f = s.files?.[name];
-      if (typeof f?.path === "string" && FILE_PATH.test(f.path) && Number.isSafeInteger(f.bytes) && f.bytes > 0) {
+      if (typeof f?.path === "string" && FILE_PATH.test(f.path) && f.path.startsWith(`r/${key}/`) &&
+        Number.isSafeInteger(f.bytes) && f.bytes > 0) {
         files[kind] = { path: f.path, bytes: f.bytes };
       }
     }
