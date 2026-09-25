@@ -248,6 +248,13 @@ function formatDuration(seconds) {
   return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
 }
 
+// "N Arctic Shift requests and M archive requests" (archive null: from before archive
+// requests were counted, so left out).
+function requestsText(arcticShift, archive) {
+  const api = plural(arcticShift, "Arctic Shift request");
+  return archive === null || archive === undefined ? api : `${api} and ${plural(archive, "archive request")}`;
+}
+
 function tookText({ seconds, profilingSeconds }) {
   const total = formatDuration(seconds);
   return profilingSeconds === null ? total : `${total} (profiling ${formatDuration(profilingSeconds)})`;
@@ -653,6 +660,9 @@ async function run({ fromQueue = false } = {}) {
     onPause: (until) => runId === state.runId && status.eta?.pause(until),
   });
   const counts = { done: 0, total: 0 };
+  // Requests to the archive server (R2): the manifest and each range read. The API's are
+  // client.requests.
+  let archiveRequests = 0;
   let failed = 0;
   let capped = null; // commenters in the thread, when only the top LARGE_SCAN were profiled
   let outcome = { kind: "failed", message: "" };
@@ -677,6 +687,7 @@ async function run({ fromQueue = false } = {}) {
       total: counts.total,
       thread,
       requests: client.requests,
+      archiveRequests,
       ...elapsed(),
       fromSaved: fromCache,
       after,
@@ -726,7 +737,7 @@ async function run({ fromQueue = false } = {}) {
 
     // Archive files for the post's subreddit, if there are any: "before" facts come from
     // them rather than Arctic Shift searches. No manifest, or a broken one, means the API.
-    const dumps = await DumpSource.open({ signal: controller.signal });
+    const dumps = await DumpSource.open({ signal: controller.signal, onRequest: () => archiveRequests++ });
     const archive = dumps?.covers(post.subreddit) ?? null;
 
     setStatus("Collecting commenters…");
@@ -776,7 +787,8 @@ async function run({ fromQueue = false } = {}) {
     const progress = () => {
       setStatus(`Profiled ${counts.done} of ${counts.total}` +
         (fromCache ? `, ${fromCache} from saved results` : "") +
-        (inFlight ? ` (${inFlight} in progress)` : ""));
+        (inFlight ? ` (${inFlight} in progress)` : "") +
+        `. ${requestsText(client.requests, archiveRequests)} so far`);
       setProgress(counts.done / counts.total);
       onQueueProgress(counts);
       if (counts.done >= milestone * counts.total && counts.done < counts.total) {
@@ -817,7 +829,7 @@ async function run({ fromQueue = false } = {}) {
     const notes = [fromCache && `${fromCache} from saved results`, failed && `${failed} failed`].filter(Boolean);
     const who = capped ? `the top ${counts.total} of ${plural(capped, "commenter")}` : plural(counts.total, "user");
     let text = `Done: profiled ${who}${notes.length ? ` (${notes.join(", ")})` : ""}` +
-      ` with ${plural(client.requests, "request")}. Took ${took()}.`;
+      ` with ${requestsText(client.requests, archiveRequests)}. Took ${took()}.`;
     if (archive) {
       if (dumps.broken) {
         text += ` The r/${archive.name} archive files stopped answering partway, so Arctic Shift answered for the rest.`;
@@ -847,7 +859,7 @@ async function run({ fromQueue = false } = {}) {
     if (runId === state.runId) stopEta();
     if (err instanceof Aborted) {
       const text = (counts.total ? `Stopped after ${counts.done} of ${plural(counts.total, "user")}.` : "Stopped.") +
-        ` Ran for ${took()}.`;
+        ` Ran for ${took()} with ${requestsText(client.requests, archiveRequests)}.`;
       setStatus(text);
       announce(text);
       await save(false);
@@ -1269,7 +1281,7 @@ function scanItem(scan) {
   const meta = [
     `Scanned ${formatDate(scan.scannedAt)}`,
     scan.thread && `${plural(scan.thread.comments, "comment")} from ${plural(scan.thread.people, "commenter")}`,
-    `${plural(scan.requests, "request")}`,
+    requestsText(scan.requests, scan.archiveRequests),
     `took ${tookText(scan)}`,
     !scan.complete && "stopped early",
     ...scanOptionNotes(scan.opts),
@@ -1352,7 +1364,7 @@ async function openSaved(id) {
     ? `profiled ${plural(summary.stats.profiled, "user")}`
     : `stopped after ${summary.stats.profiled} of ${plural(summary.total, "user")}`;
   const text = `Saved scan from ${formatDate(summary.scannedAt)}: ${profiled} with ` +
-    `${plural(summary.requests, "request")}. Took ${tookText(summary)}. Opened with no new requests.`;
+    `${requestsText(summary.requests, summary.archiveRequests)}. Took ${tookText(summary)}. Opened with no new requests.`;
   clearWaits();
   $("bar").hidden = true;
   setStatus(text);

@@ -132,3 +132,32 @@ test("a failed lookup isn't remembered", async () => {
   dumps.broken = false; // pretend a new scan's source; the lookup itself must not be cached
   assert.deepEqual(await dumps.timestamps("comments", "Python", "alice"), [1698000000, 1699000000, 1699500000]);
 });
+
+test("onRequest counts every request to the archive server: the manifest and each range read", async () => {
+  const sent = [];
+  // The archive server: the manifest, and byte ranges of the fixture files.
+  const fetchFn = async (url, init = {}) => {
+    const path = url.slice(BASE.length + 1);
+    if (path === "manifest.json") return new Response(JSON.stringify(MANIFEST));
+    const range = new Headers(init.headers).get("range");
+    const [, start, end] = /bytes=(\d+)-(\d*)/.exec(range);
+    const buf = readFileSync(new URL(path, FIX));
+    return new Response(buf.subarray(Number(start), end ? Number(end) + 1 : buf.byteLength), { status: 206 });
+  };
+  let count = 0;
+  const dumps = await DumpSource.open({ baseUrl: BASE, fetchFn: (url, init) => (sent.push(url), fetchFn(url, init)), onRequest: () => count++ });
+  assert.equal(count, 1, "the manifest");
+  assert.deepEqual(await dumps.timestamps("comments", "Python", "alice"), [1698000000, 1699000000, 1699500000]);
+  assert.ok(count > 1, "range reads are counted");
+  assert.equal(count, sent.length, "one count per request sent");
+  const before = count;
+  await dumps.timestamps("comments", "Python", "alice"); // remembered: no new requests
+  assert.equal(count, before);
+});
+
+test("onRequest counts the manifest request even when it gives no archive", async () => {
+  let count = 0;
+  const dumps = await DumpSource.open({ baseUrl: BASE, fetchFn: serve("not found", 404), onRequest: () => count++ });
+  assert.equal(dumps, null);
+  assert.equal(count, 1);
+});

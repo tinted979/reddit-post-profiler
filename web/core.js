@@ -1333,6 +1333,8 @@ export function importScan(rec) {
     total: isCount(s.total) && s.total >= profiles.length ? s.total : profiles.length,
     thread,
     requests: isCount(s.requests) ? s.requests : 0,
+    // Scans saved before archive requests were counted have none (null: not shown).
+    archiveRequests: isCount(s.archiveRequests) ? s.archiveRequests : null,
     seconds: isCount(s.seconds) ? s.seconds : 0,
     profilingSeconds: isCount(s.profilingSeconds) ? s.profilingSeconds : null,
     fromSaved: isCount(s.fromSaved) ? s.fromSaved : 0,
