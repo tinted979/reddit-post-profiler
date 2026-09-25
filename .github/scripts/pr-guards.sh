@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
-# Guards for PRs from claude/* branches: agents' and interactive Claude sessions' alike. CI runs
-# the base branch's copy of this script (checks.yml), so a PR can't loosen the guards on itself.
+# Guards for every PR. CI runs the base branch's copy of this script (checks.yml), so a PR
+# can't loosen the guards on itself.
 #
-# Writer branches (claude/<issue>-<slug>, pushed by agent-write.yml) may never change agent
-# rules, CI or deploy config: nothing waives that, and the owner applies any Grounding text by
-# hand. The path hook only stops an agent's Edit/Write tools; code an agent runs (a test file
-# it wrote) could still change those files, so this is the check that holds. Other checks can
-# be waived only by an ack: label the repository owner added, which re-runs this.
+# Agent work is any PR opened by, or with a commit written by, someone other than the owner
+# (the Claude App's writers, Copilot); Dependabot's action bumps are treated as the owner's.
+# It's judged by authorship, not branch name, because an agent can choose any branch name.
+# Agent work may never change agent rules, CI or deploy config (nothing waives that; the owner
+# applies any Grounding text by hand), and changes to existing tests need ack:tests. The path
+# hook only stops an agent's Edit/Write tools; code an agent runs (a test file it wrote) could
+# still change those files, so this is the check that holds. Other checks can be waived only
+# by an ack: label the owner added, which re-runs this.
 set -uo pipefail
-: "${PR:?}" "${HEAD_REF:?}" "${OWNER:?}" "${GITHUB_REPOSITORY:?}"
-case "$HEAD_REF" in claude/*) ;; *) echo "Not a claude/* branch; skipping."; exit 0 ;; esac
-writer=0
-case "$HEAD_REF" in claude/[0-9]*-*) writer=1 ;; esac
+: "${PR:?}" "${OWNER:?}" "${GITHUB_REPOSITORY:?}"
 
 base=HEAD^1   # the checkout is the PR's merge commit; its first parent is main
 changed=$(git diff --name-only "$base" HEAD)
 fail=0
+
+authors=$(gh pr view "$PR" --json author,commits --jq '.author.login, (.commits[].authors[0].login)') ||
+  { echo "::error::Couldn't read the PR's authors."; exit 1; }
+agents=$(grep -vxE "$OWNER|(app/)?dependabot(\[bot\])?" <<<"$authors" | sort -u)
+if [ -n "$agents" ]; then
+  echo "Agent work: written in part by $(paste -sd, - <<<"$agents")."
+fi
 
 owner_ack() {   # true if label $1 is on the PR and the owner was the last to add it
   gh pr view "$PR" --json labels --jq '.labels[].name' | grep -qx "$1" &&
@@ -26,8 +33,8 @@ owner_ack() {   # true if label $1 is on the PR and the owner was the last to ad
 
 protected=$(grep -iE '^(\.github/|\.claude/|CLAUDE\.md$|web/hyparquet\.js$|tools/r2-cors\.json$)' <<<"$changed")
 if [ -n "$protected" ]; then
-  if [ "$writer" = 1 ]; then
-    echo "::error::An agent branch changed files only a human may change; no label waives this. Close the PR, or apply the change yourself on another branch:"
+  if [ -n "$agents" ]; then
+    echo "::error::Agent work changed files only a human may change; no label waives this. Close the PR, or make the change yourself on another branch:"
     while read -r f; do echo "  $f"; done <<<"$protected"
     fail=1
   else
@@ -36,9 +43,9 @@ if [ -n "$protected" ]; then
   fi
 fi
 
-# Agents may add tests but not change or delete existing ones (a refactorer's hook enforces
-# it for its Edit tool only), so on a writer branch any such change needs the owner's look.
-if [ "$writer" = 1 ]; then
+# Agents may add tests but not change or delete existing ones (the refactorer's hook enforces
+# it for its Edit tool only), so any such change in agent work needs the owner's look.
+if [ -n "$agents" ]; then
   touched=$(git diff --name-only --diff-filter=MDR "$base" HEAD -- web/tests tools/tests)
   if [ -n "$touched" ]; then
     owner_ack ack:tests || {

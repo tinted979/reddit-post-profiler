@@ -809,12 +809,12 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 > - **The path hook matches case-insensitively** and turns backslashes into slashes, so `claude.md` or `.github\x` don't get past it on Windows. Tests: `.github/scripts/tests/guard-paths.test.mjs`.
 > - **The path hook is a guardrail, not a boundary** (found by the security reviewer on the Stage 4 PR, #39). A writer can run a test file it wrote, and that code can change any file. So:
 >   - CI runs the base branch's `pr-guards.sh` and `test-integrity.sh`, not the PR's.
->   - A writer branch (`claude/<number>-…`) that touches a protected path fails, and no label waives it.
->   - Changing or deleting an existing test there needs `ack:tests`.
+>   - Agent work that touches a protected path fails, and no label waives it. Agent work means a PR opened by, or with a commit written by, anyone but the owner (Dependabot aside). It's judged by authorship, not branch name, because an agent can pick any branch name.
+>   - Changing or deleting an existing test in agent work needs `ack:tests`.
 >   - A PR could still edit `checks.yml` itself. What closes that is the Claude App having no `workflows` permission.
 > - **The follow-up job refuses fork PRs and non-`claude/*` branches.** It may only `git push` or `git push origin HEAD`.
 > - **The env scrub needs `bubblewrap` and `socat` on the runner.** Claude Code 2.1.282 won't start without bubblewrap, and Bash fails without socat. Every agent job installs both, lifts Ubuntu 24.04's AppArmor block on user namespaces, and checks both work.
-> - **`pr-guards.sh` covers every `claude/*` branch,** including interactive sessions' `claude/<topic>` branches. The owner's `ack:` labels waive it the same way.
+> - **`pr-guards.sh` covers every PR, whatever its branch.** The owner's `ack:` labels waive its checks, except that agent work may never touch protected paths.
 
 These are complete, working drafts. The workflows pass `actionlint` 1.7.12 (ignoring only its unknown-key error for `queue`) and `zizmor` 1.30.1 at medium severity. The scripts were run against this repository: the rule guards pass on today's code and fail on injected violations; the test-integrity check caught a deleted test and an added `test.skip`; the hook blocked, asked and allowed as intended; the issue filer respected its cap, severity order and de-duplication. Action SHAs were resolved on 25 Sept 2026.
 
