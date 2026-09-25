@@ -38,7 +38,9 @@ PUBLIC="${DUMPS_URL:-https://rpp-db.tinted979.dev}"
 ORIGIN="https://tinted979.github.io"
 
 fail() { echo "error: $*" >&2; exit 1; }
-fetch() { curl -s --max-time 30 "$@"; }
+# curl for the checks. A host that can't be reached must go through the checks' own
+# messages (HTTP 000, no headers) rather than end the script with no word under set -e.
+fetch() { curl -s --max-time 30 "$@" || true; }
 
 for tool in rclone node curl uv; do
   command -v "$tool" >/dev/null || fail "$tool isn't installed"
@@ -68,7 +70,12 @@ case "$status" in
   404) : > "$work/live.json" ;; # nothing live yet
   *) fail "couldn't read the live manifest (HTTP $status)" ;;
 esac
-rclone lsf -R --dirs-only --max-depth 2 "$REMOTE:$BUCKET/r" > "$work/builds.txt" 2>/dev/null || : > "$work/builds.txt"
+# No r/ yet means no builds; any other failure (auth, network) must stop here, since an
+# empty list would switch off the "already on R2" check.
+if ! rclone lsf -R --dirs-only --max-depth 2 "$REMOTE:$BUCKET/r" > "$work/builds.txt" 2> "$work/lsf.err"; then
+  grep -qi "directory not found" "$work/lsf.err" || fail "couldn't list the builds on R2: $(head -1 "$work/lsf.err")"
+  : > "$work/builds.txt"
+fi
 uv run --quiet tools/check_upload.py "$DUMPS/manifest.json" "$work/live.json" "$work/builds.txt" "$@" ||
   fail "nothing was uploaded"
 

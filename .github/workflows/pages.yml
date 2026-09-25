@@ -28,10 +28,10 @@ jobs:
         run: npm test
       - name: Local files load only as `from "./x.js"`
         # The deploy's missing-file check and cache busting only see that form, so fail on
-        # any other way of loading a local file: a side-effect or dynamic import, single
-        # quotes, or a relative new URL or Worker.
+        # any other way of loading a local file: a side-effect import, any dynamic import(),
+        # single quotes, or a relative new URL or Worker from a string or template literal.
         run: |
-          if grep -nE "import\s*\(\s*['\"]\.|import\s+['\"]\.|from\s*'\./|new URL\(\s*['\"]\./|new Worker\(\s*['\"]" web/*.js; then
+          if grep -nE "import\s*\(\s*[^)[:space:]]|import\s+['\"]|from\s*'\./|new URL\(\s*[^A-Za-z_[:space:]]\.|new Worker\(\s*[^A-Za-z_[:space:]]" web/*.js; then
             echo 'Load local modules with: import … from "./x.js"'
             exit 1
           fi
