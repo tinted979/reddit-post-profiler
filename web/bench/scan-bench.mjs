@@ -17,9 +17,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { APP_TAG, ArcticShiftClient, BASE_URL, DAY, SCAN_DEFAULTS, buildProfile } from "../core.js";
+import * as core from "../core.js";
 import { MemoryBackend, ProfileCache } from "../cache.js";
 import { DumpSource } from "../dumps.js";
+
+// A namespace import, so `--base` can run this script against code from before a function
+// existed: scenarios that need a missing one are left out there.
+const { APP_TAG, ArcticShiftClient, BASE_URL, DAY, SCAN_DEFAULTS, buildProfile } = core;
 
 const FIXTURES = new URL("../tests/fixtures/dumps/", import.meta.url);
 // Where the bench's archive "lives". Never contacted: DumpSource gets a local fetch.
@@ -34,6 +38,9 @@ const W = 1_000_000;
 // fixtures cover; they run to just before this post, so a covered lookup still asks the API
 // about the gap.
 export const POST = { id: "bench1", author: "op_user", subreddit: "Python", createdUtc: 1_700_000_000, title: "bench", numComments: 10 };
+
+// When a scan fetches a covered subreddit's tail (see fetchTails): a day after the post.
+const TAIL_NOW = POST.createdUtc + DAY;
 
 // n timestamps, one a day, the newest a day before `end`.
 const daily = (n, end = POST.createdUtc) => Array.from({ length: n }, (_, i) => end - (i + 1) * DAY);
@@ -83,15 +90,26 @@ const within = (t, u) => {
 // An in-memory Arctic Shift for one user. `lifetime` is {posts, comments} as [[subreddit,
 // n], …]; `before` the timestamps of their items in the post's subreddit; `recent` the
 // interactions rows ([[subreddit, posts, comments], …]) answered for a query with `after`;
-// `timeouts` makes the unfiltered lifetime aggregates time out. Anything else is
-// unexpected: it's recorded in `unexpected` and answered with a 400.
-export function apiModel({ user, lifetime = {}, before = {}, recent = [], timeouts = false }, unexpected) {
+// `timeouts` makes the unfiltered lifetime aggregates time out; `tail` ({posts, comments}
+// as [{id, author, created_utc, link_id}, …]) is everyone's activity in the post's
+// subreddit, for subreddit-wide searches. Anything else is unexpected: it's recorded in
+// `unexpected` and answered with a 400.
+export function apiModel({ user, lifetime = {}, before = {}, recent = [], timeouts = false, tail = null }, unexpected) {
   const refuse = (u) => {
     unexpected.push(u.toString());
     return json({ error: "unexpected request in the bench" }, 400);
   };
   return (u) => {
     if (u.origin !== new URL(BASE_URL).origin || u.searchParams.get("meta-app") !== APP_TAG) return refuse(u);
+    const whole = /^\/api\/(posts|comments)\/search$/.exec(u.pathname);
+    if (tail && whole && !u.searchParams.has("author")) {
+      const kind = whole[1];
+      const fields = kind === "posts" ? "id,author,created_utc" : "id,author,created_utc,link_id";
+      if (u.searchParams.get("subreddit")?.toLowerCase() !== POST.subreddit.toLowerCase() ||
+        u.searchParams.get("fields") !== fields || u.searchParams.get("sort") !== "asc") return refuse(u);
+      const rows = (tail[kind] ?? []).filter((r) => within(r.created_utc, u)).sort((a, b) => a.created_utc - b.created_utc);
+      return json({ data: rows.slice(0, Number(u.searchParams.get("limit"))) });
+    }
     if (u.searchParams.get("author")?.toLowerCase() !== user.toLowerCase()) return refuse(u);
     const m = /^\/api\/(posts|comments)\/search(\/aggregate)?$/.exec(u.pathname);
     if (m) {
@@ -183,6 +201,27 @@ const ARCHIVED = {
   recent: [["Python", 0, 2], ["rust", 0, 1]],
 };
 
+// The same user once everyone's activity after the files end is fetched per scan: alice's
+// comment before the post and one in the thread, among others'.
+const others = (n, from, step) => Array.from({ length: n }, (_, i) => ({ id: `o${i}`, author: `other${i % 40}`, created_utc: from + i * step, link_id: "t3_elsewhere" }));
+const ARCHIVED_TAIL = {
+  ...ARCHIVED,
+  tail: {
+    posts: [],
+    comments: [
+      ...others(30, 1_699_990_000, 300),
+      { id: "a1", author: "alice", created_utc: 1_699_998_000, link_id: "t3_elsewhere" },
+      { id: "a2", author: "alice", created_utc: POST.createdUtc + 600, link_id: `t3_${POST.id}` },
+    ],
+  },
+};
+// The same, when the files are a week behind: a busy subreddit's week of comments since they
+// end (~200 a day).
+const STALE_TAIL = {
+  ...ARCHIVED_TAIL,
+  tail: { posts: [], comments: [...others(1_500, 1_699_990_000, 400), ...ARCHIVED_TAIL.tail.comments.slice(-2)] },
+};
+
 // Seconds since the epoch the cache thinks it is: a month after the post, so saved
 // answers count as fetched well after the thread.
 const CACHE_NOW = POST.createdUtc + 30 * DAY;
@@ -194,6 +233,9 @@ export const SCENARIOS = Object.freeze([
   { name: "lifetime-timeout-warm", about: "the same user again with a warm MemoryBackend cache", world: TIMEOUTS, warm: true },
   { name: "archive-before", about: "a subreddit the archive covers: \"before\" from the files, the gap from the API", world: ARCHIVED, archive: true },
   { name: "archive-only", about: "a scan limited to the covered subreddit: lifetime from the files + one interactions query", world: ARCHIVED, archive: true, only: ["Python"] },
+  { name: "archive-tail-only", about: "the same scan after one fetch of the subreddit's activity since the files (per scan, not per user): nothing per user", world: ARCHIVED_TAIL, archive: true, tail: true, only: ["Python"] },
+  { name: "archive-tail-full", about: "a full scan of a covered post after that fetch: only the two lifetime aggregates per user", world: ARCHIVED_TAIL, archive: true, tail: true },
+  { name: "archive-tail-stale", about: "a build a week old (1,500 comments since): the tail's pages grow with its age, but are still one set per scan", world: STALE_TAIL, archive: true, tail: true, only: ["Python"], post: { numComments: 1000 } },
 ]);
 
 // One buildProfile on a fresh client. Returns the counts and the profile.
@@ -206,7 +248,9 @@ async function profileOnce(scenario, { cache = null, unexpected }) {
     maxInFlight: SCAN_DEFAULTS.concurrency,
     fetchFn: async (url) => {
       const u = new URL(url);
-      byEndpoint[u.pathname] = (byEndpoint[u.pathname] ?? 0) + 1;
+      const whole = u.pathname.endsWith("/search") && u.searchParams.has("subreddit") && !u.searchParams.has("author");
+      const key = whole ? `${u.pathname} (whole subreddit)` : u.pathname;
+      byEndpoint[key] = (byEndpoint[key] ?? 0) + 1;
       await clock.sleep(LATENCY);
       return handler(u);
     },
@@ -219,9 +263,11 @@ async function profileOnce(scenario, { cache = null, unexpected }) {
     ? await DumpSource.open({ baseUrl: ARCHIVE_URL, fetchFn: archiveServer(archive, unexpected) })
     : null;
   if (scenario.archive && !dumps) throw new Error(`${scenario.name}: the fixture manifest gave no archive`);
+  const post = { ...POST, ...scenario.post };
   const start = clock.now();
+  if (scenario.tail) await core.fetchTails(client, dumps, post, { only: scenario.only ?? null, now: () => TAIL_NOW });
   const threadComments = 1;
-  const profile = await buildProfile(client, scenario.world.user, threadComments, POST, {
+  const profile = await buildProfile(client, scenario.world.user, threadComments, post, {
     only: scenario.only ?? null,
     lastCommentUtc: POST.createdUtc + 600,
     cache,
@@ -266,6 +312,7 @@ export async function runScenarios() {
   const scenarios = await withoutNetwork(unexpected, async () => {
     const out = [];
     for (const scenario of SCENARIOS) {
+      if (scenario.tail && !core.fetchTails) continue; // older code, from --base
       let cache = null;
       if (scenario.warm) {
         cache = new ProfileCache({ backend: new MemoryBackend(), ttlDays: 7, now: () => CACHE_NOW });

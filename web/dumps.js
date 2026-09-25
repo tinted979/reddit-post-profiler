@@ -1,6 +1,8 @@
 // Archive files for covered subreddits (built by tools/build_dumps.py and served from R2):
 // each author's posts and comments in the subreddit, read with range requests, so the
-// "before" facts need no Arctic Shift searches. See CLAUDE.md, "Subreddit dumps".
+// "before" facts need no Arctic Shift searches. What's newer than the files is a tail that
+// core.js's fetchTails gets once per scan for the whole subreddit (TailStore below).
+// See .claude/rules/archive.md and docs/adr/0005.
 
 import { Aborted, INGEST_LAG } from "./core.js";
 import { asyncBufferFromUrl, cachedAsyncBuffer, parquetMetadataAsync, parquetQuery } from "./hyparquet.js";
@@ -13,10 +15,15 @@ const FILES = { posts: "posts_by_author", comments: "comments_by_author" };
 // Where a manifest may point: r/<subreddit>/<version>/<name>.parquet under the base URL.
 const FILE_PATH = /^r\/\w{2,21}\/\w[\w.-]{0,39}\/\w+\.parquet$/;
 const isTime = (n) => Number.isSafeInteger(n) && n > 0;
+// Where a covered subreddit's `kind` file is trusted to.
+const filesThrough = (s, kind) => (kind === "posts" ? s.postsThrough : s.commentsThrough);
 // A subreddit name, as Reddit allows them.
 const SUBREDDIT = /^\w{2,21}$/;
 // How far past the page's clock a manifest's cutoffs may be (clock skew), in seconds.
 const CLOCK_SLACK = 86400;
+const KINDS = ["posts", "comments"];
+// Accounts the archive leaves out, as tools/build_dumps.py does.
+const SKIPPED = new Set(["[deleted]", "[removed]", "automoderator"]);
 
 // The archive files can't answer (a network error, a bad file). Callers use the API.
 export class DumpUnavailable extends Error {}
@@ -68,10 +75,38 @@ export function parseManifest(data, now = Date.now() / 1000) {
   return subs;
 }
 
+// Activity in covered subreddits after their files end, fetched by core.js's fetchTails once
+// per scan rather than once per commenter, and kept for the tab so the next scan asks only
+// for what's new. Per subreddit and kind: the files' cutoff it follows (`base`; a new build
+// starts afresh), how far it's complete (`through`), the ids seen (to drop repeats), and each
+// author's times.
+export class TailStore {
+  constructor() {
+    this._tails = new Map(); // "kind|sub" -> {base, through, ids, times}
+  }
+
+  // The tail following files trusted to `base`, or null.
+  find(kind, key, base) {
+    const t = this._tails.get(`${kind}|${key}`);
+    return t?.base === base ? t : null;
+  }
+
+  // The tail following files trusted to `base`, started afresh if there's none yet or it
+  // followed an older build.
+  open(kind, key, base) {
+    let t = this.find(kind, key, base);
+    if (!t) {
+      t = { base, through: base, ids: new Set(), times: new Map() };
+      this._tails.set(`${kind}|${key}`, t);
+    }
+    return t;
+  }
+}
+
 export class DumpSource {
   constructor(subs, {
     baseUrl = DUMPS_URL, openFile = urlFile, signal = null, readTimeoutMs = 20000,
-    fetchFn = (...a) => globalThis.fetch(...a), onRequest = null,
+    fetchFn = (...a) => globalThis.fetch(...a), onRequest = null, tails = new TailStore(),
   } = {}) {
     this.baseUrl = baseUrl;
     this.signal = signal;
@@ -85,15 +120,18 @@ export class DumpSource {
     this._onRequest = onRequest; // called once per request sent to the archive server
     this._files = new Map(); // path -> Promise<{file, metadata}>
     this._lookups = new Map(); // "kind|sub|author" -> Promise<number[]>, for this scan
+    this._tails = tails;
+    this._current = new Set(); // "kind|sub" tails that reached the present during this scan
   }
 
   // The archive, or null if there's no usable manifest (missing, unreachable, slow,
   // malformed, or covering nothing). Throws Aborted only when `signal` aborts.
   // `onRequest` is called once per request sent to the archive server, the manifest's
   // included (even when it leads to null), so the page can count them.
+  // `tails` is the tab's TailStore, so a scan picks up where the last one's tail ended.
   static async open({
     baseUrl = DUMPS_URL, fetchFn = (...a) => globalThis.fetch(...a), openFile = urlFile,
-    signal = null, timeoutMs = 5000, readTimeoutMs = 20000, onRequest = null,
+    signal = null, timeoutMs = 5000, readTimeoutMs = 20000, onRequest = null, tails = new TailStore(),
   } = {}) {
     if (signal?.aborted) throw new Aborted("stopped");
     try {
@@ -102,7 +140,7 @@ export class DumpSource {
       const resp = await fetchFn(`${baseUrl}/manifest.json`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
       if (!resp.ok) return null;
       const subs = parseManifest(await resp.json());
-      return subs.size ? new DumpSource(subs, { baseUrl, openFile, signal, readTimeoutMs, fetchFn, onRequest }) : null;
+      return subs.size ? new DumpSource(subs, { baseUrl, openFile, signal, readTimeoutMs, fetchFn, onRequest, tails }) : null;
     } catch {
       if (signal?.aborted) throw new Aborted("stopped");
       return null;
@@ -124,15 +162,67 @@ export class DumpSource {
   }
 
   // {name, postsThrough, commentsThrough} for a covered subreddit (any case), else null.
-  covers(subreddit) {
+  // Each kind is covered to where its files end, or further if its tail got further (unless
+  // `withTail` is false).
+  covers(subreddit, { withTail = true } = {}) {
     if (this.broken) return null;
-    const s = this._subs.get(String(subreddit).toLowerCase());
-    return s ? { name: s.name, postsThrough: s.postsThrough, commentsThrough: s.commentsThrough } : null;
+    const key = String(subreddit).toLowerCase();
+    const s = this._subs.get(key);
+    if (!s) return null;
+    const through = (kind) => (withTail && this._tails.find(kind, key, filesThrough(s, kind))?.through) || filesThrough(s, kind);
+    return { name: s.name, postsThrough: through("posts"), commentsThrough: through("comments") };
+  }
+
+  // True when both kinds' tails reached the present during this scan: the files and tail
+  // then hold everything in the subreddit, so nothing about it needs asking per user.
+  isCurrent(subreddit) {
+    const key = String(subreddit).toLowerCase();
+    return !this.broken && this._subs.has(key) && KINDS.every((kind) => this._current.has(`${kind}|${key}`));
+  }
+
+  // Where a covered subreddit's next tail fetch starts (`after`, exclusive): where the files
+  // end, or an hour before the tab's tail was complete to, in case its newest rows were
+  // archived late (the rows fetched again are dropped by id).
+  tailFrom(kind, subreddit) {
+    const key = String(subreddit).toLowerCase();
+    const base = filesThrough(this._subs.get(key), kind);
+    const t = this._tails.find(kind, key, base);
+    return t && t.through > base ? Math.max(base, t.through - INGEST_LAG) : base;
+  }
+
+  // Adds a page of fetched rows ({id, author, created_utc}) to a subreddit's tail. The API's
+  // rows are untrusted: ones without an id, author or time, by the accounts the archive
+  // leaves out, from before the files end, or already seen are dropped.
+  addTail(kind, subreddit, rows) {
+    const key = String(subreddit).toLowerCase();
+    const t = this._tails.open(kind, key, filesThrough(this._subs.get(key), kind));
+    for (const row of rows) {
+      const id = row?.id;
+      const author = row?.author;
+      const time = Math.trunc(Number(row?.created_utc));
+      if (typeof id !== "string" || !id || t.ids.has(id) || typeof author !== "string" || !author) continue;
+      if (SKIPPED.has(author.toLowerCase()) || !isTime(time) || time <= t.base) continue;
+      t.ids.add(id);
+      const times = t.times.get(author.toLowerCase());
+      if (times) times.push(time);
+      else t.times.set(author.toLowerCase(), [time]);
+    }
+  }
+
+  // Records how far a subreddit's tail is complete (`through`, epoch seconds; it never moves
+  // back), and whether it reached the present during this scan (`current`).
+  endTail(kind, subreddit, { through, current }) {
+    const key = String(subreddit).toLowerCase();
+    const t = this._tails.open(kind, key, filesThrough(this._subs.get(key), kind));
+    if (through > t.through) t.through = through;
+    if (current) this._current.add(`${kind}|${key}`);
   }
 
   // Creation times (epoch seconds, oldest first) of every post or comment `author` has in
-  // the subreddit's files. Throws Aborted once stopped, else DumpUnavailable. A lookup is
-  // read once per source (one scan) and shared; callers must not change the array.
+  // the subreddit's files, and in its tail: once there's a tail, the files count only up to
+  // where they're trusted, since the tail fetched what's after that again. Throws Aborted
+  // once stopped, else DumpUnavailable. A lookup is read once per source (one scan) and
+  // shared; callers must not change the array.
   timestamps(kind, subreddit, author) {
     const key = `${kind}|${String(subreddit).toLowerCase()}|${String(author).toLowerCase()}`;
     let lookup = this._lookups.get(key);
@@ -146,8 +236,11 @@ export class DumpSource {
 
   // Internal method that actually reads from the archive.
   async _read(kind, subreddit, author) {
-    const f = this._subs.get(String(subreddit).toLowerCase())?.files[kind];
+    const key = String(subreddit).toLowerCase();
+    const s = this._subs.get(key);
+    const f = s?.files[kind];
     if (!f || this.broken) throw new DumpUnavailable(`no usable ${kind} file for r/${subreddit}`);
+    const tail = this._tails.find(kind, key, filesThrough(s, kind));
     try {
       const { file, metadata } = await this._race(this._open(f));
       // $eq, not a plain value: only operator filters let hyparquet skip row groups by
@@ -156,7 +249,10 @@ export class DumpSource {
         file, metadata, columns: ["author", "created_utc"], filter: { author: { $eq: String(author).toLowerCase() } },
       }));
       this.reads++;
-      return rows.map((r) => Number(r.created_utc)).filter(isTime).sort((a, b) => a - b);
+      const saved = rows.map((r) => Number(r.created_utc)).filter(isTime);
+      if (!tail) return saved.sort((a, b) => a - b);
+      const recent = tail.times.get(String(author).toLowerCase()) ?? [];
+      return [...saved.filter((t) => t <= tail.base), ...recent].sort((a, b) => a - b);
     } catch (err) {
       if (this.signal?.aborted) throw new Aborted("stopped");
       this.broken = true;

@@ -80,3 +80,25 @@ test("the scan bench covers the paths it's meant to measure", async () => {
     assert.equal(s.api.total, sum, `${s.name}: total matches the per-endpoint counts`);
   }
 });
+
+test("the tail scenarios ask about the whole subreddit once, then little or nothing per user", async () => {
+  const { scenarios } = await runScenarios();
+  const by = Object.fromEntries(scenarios.map((s) => [s.name, s]));
+  const hits = (name, path) => by[name].api.byEndpoint[path] ?? 0;
+  const tail = (name) => hits(name, "/api/posts/search (whole subreddit)") + hits(name, "/api/comments/search (whole subreddit)");
+
+  // Limited to the covered subreddit: one short page per kind, then nothing for the user.
+  assert.equal(tail("archive-tail-only"), 2);
+  assert.equal(by["archive-tail-only"].api.total, 2);
+  assert.deepEqual(by["archive-tail-only"].result.subreddits, by["archive-only"].result.subreddits);
+
+  // A full scan: the tail, then only the user's two lifetime aggregates (no gap searches).
+  assert.equal(tail("archive-tail-full"), 2);
+  assert.equal(hits("archive-tail-full", "/api/comments/search"), 0);
+  assert.equal(hits("archive-tail-full", "/api/posts/search/aggregate"), 1);
+  assert.equal(by["archive-tail-full"].result.commentsBefore, by["archive-before"].result.commentsBefore);
+
+  // A build a week old: many tail pages, still one set per scan however many commenters.
+  assert.ok(tail("archive-tail-stale") > 10);
+  assert.equal(by["archive-tail-stale"].api.total, tail("archive-tail-stale"));
+});

@@ -225,10 +225,14 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    "before" query when the lifetime counts leave no room for one, e.g. when all of a
    user's comments in the subreddit are in this thread. For a subreddit with archive files on
    the project's R2 bucket, listed in the bucket's manifest
-   (`https://rpp-db.tinted979.dev/manifest.json`), those come from the files instead, with
-   Arctic Shift asked only about the days since the files were built. If you limit a scan
-   to subreddits the archive covers (Only check subreddits), each user's counts there also
-   come from the files, plus one request for anything newer.
+   (`https://rpp-db.tinted979.dev/manifest.json`), those come from the files instead.
+   What's newer than the files is fetched once per scan for the whole subreddit rather than
+   once per commenter: `GET /api/{posts,comments}/search?subreddit=…&after=<the files' end>&sort=asc&limit=100`,
+   a page per 100 posts or comments, up to one page per 50 comments in the thread (2–20
+   pages). The tab keeps what it fetched, so the next scan asks only for what's new since.
+   If you limit a scan to subreddits the archive covers (Only check subreddits), each
+   user's counts there also come from the files and those pages, with no requests per user.
+   If the pages run out before the present, Arctic Shift is asked per user about the rest.
 
 Aggregations can time out for very active users. The page then tries
 `GET /api/users/interactions/subreddits`, which answers for posts and comments in one query
