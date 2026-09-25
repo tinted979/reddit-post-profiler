@@ -10,6 +10,8 @@ const KEY = QUEUE_KEY;
 // Most scans waiting at once: the queue runs unattended, so keep it from piling up a day's
 // worth of requests on the free API.
 export const MAX_WAITING = 25;
+// Most users profiled in parallel by a queued scan, which runs unattended.
+export const QUEUE_CONCURRENCY = 2;
 
 // Statuses: waiting → running → done | failed | stopped.
 const FINISHED = new Set(["done", "failed", "stopped"]);

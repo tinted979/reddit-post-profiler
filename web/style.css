@@ -4,6 +4,8 @@
   --text: #1c1c1a;
   --muted: #63635e;
   --border: #e0e0da;
+  /* Input edges: at least 3:1 against --surface and --bg (WCAG 1.4.11), unlike --border. */
+  --control-border: #86867f;
   --accent: #c23300;
   --accent-text: #ffffff;
   --accent-soft: #fdeee7;
@@ -24,6 +26,7 @@
     --text: #ececea;
     --muted: #a0a09a;
     --border: #33332f;
+    --control-border: #74746e;
     --accent: #ff6a33;
     --accent-text: #1a0a03;
     --accent-soft: #3a2117;
@@ -58,7 +61,7 @@ input, button, select { font: inherit; color: inherit; }
 input[type="text"], input[type="search"], input[type="number"], select {
   background: var(--surface);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   padding: 9px 11px;
   min-width: 0;
@@ -97,7 +100,7 @@ button.link {
 .scheduler-body { margin-top: 12px; }
 textarea {
   display: block; width: 100%; font: inherit; color: var(--text); background: var(--surface);
-  border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; resize: vertical;
+  border: 1px solid var(--control-border); border-radius: 8px; padding: 9px 11px; resize: vertical;
 }
 textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .queue-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
