@@ -132,6 +132,11 @@ https://tinted979.github.io/reddit-post-profiler/?post=https://redd.it/1l7d1e4&m
 
 - The page has no server of its own and no analytics. Your browser sends every query
   straight to Arctic Shift, which sees the post and the usernames you look up.
+- Every scan also fetches the list of archive files (`manifest.json`) from
+  `rpp-db.tinted979.dev`, the project's file host on Cloudflare R2. For a subreddit it
+  covers, the page reads parts of those files instead of asking Arctic Shift. The files
+  are sorted by username, so the host (Cloudflare) sees your IP address, the subreddit, and
+  roughly where in the alphabet each looked-up name falls, but not the names themselves.
 - Results are saved in this browser's IndexedDB (database `reddit-tool`, the project's earlier name, kept so saved data carries over): each user's
   per-subreddit counts, and their "before" counts, days active and first date for each
   post you scan. They're reused
@@ -222,7 +227,7 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    the project's R2 bucket, listed in the bucket's manifest
    (`https://rpp-db.tinted979.dev/manifest.json`), those come from the files instead, with
    Arctic Shift asked only about the days since the files were built. If you limit a scan
-   to subreddits the archive covers (Only these subreddits), each user's counts there also
+   to subreddits the archive covers (Only check subreddits), each user's counts there also
    come from the files, plus one request for anything newer.
 
 Aggregations can time out for very active users. The page then tries
@@ -244,14 +249,15 @@ saved scans keep both counts.
 ## Development
 
 ```sh
-cd web && npm test       # web app core (Node 22+, no dependencies)
+cd web && npm test       # web app tests (Node 22+, no dependencies)
+uv run --with duckdb --with pytest pytest tools   # dump build and upload-check tests
 ```
 
 To try the web app locally, serve `web/` with any static server (ES modules don't load
 from `file://`), e.g. `python3 -m http.server -d web`, and open http://localhost:8000.
 
-`.github/workflows/pages.yml` runs the tests on every push and pull request. On the
-default branch (`main`) it then publishes the page files at the top of `web/` (`*.html`, `*.js`,
+`.github/workflows/pages.yml` runs the tests on every pull request and push to `main`, and
+on `main` it then publishes the page files at the top of `web/` (`*.html`, `*.js`,
 `*.css`) to GitHub Pages, failing if a module imports a file that isn't among them, and tags each script and stylesheet
 with the commit so browsers don't mix cached versions; any
 other kind of file the page needs must be added to its copy step. One-time setup: in the
@@ -266,7 +272,7 @@ The archive files are built with `tools/build_dumps.py` and uploaded with
 (`tools/check_upload.py`: no live subreddit dropped, no build directory reused), then checks
 the public URL serves the new files correctly (range requests, CORS for the page's origin
 only, no compression) before the manifest that points at them goes up. The bucket's Cloudflare
-settings are listed in [CLAUDE.md](CLAUDE.md#subreddit-dumps-in-progress).
+settings are listed in [CLAUDE.md](CLAUDE.md#subreddit-dumps).
 
 `.github/workflows/code-review.yml` has Claude review each pull request once when it's
 opened, reopened or marked ready for review (drafts wait), and post its findings as inline

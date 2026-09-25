@@ -52,7 +52,7 @@ function json(body, status = 200) {
 
 // A client whose fetch is served by `handler(url) -> Response`; records calls and sleeps.
 // Time is simulated: `sleep` advances the clock instantly.
-function makeClient(handler, { delay = 0 } = {}) {
+function makeClient(handler, { delay = 0, random = () => 0.5 } = {}) {
   const calls = [];
   const starts = [];
   const sleeps = [];
@@ -70,6 +70,7 @@ function makeClient(handler, { delay = 0 } = {}) {
       clock.t += s;
     },
     now: () => clock.t,
+    random,
   });
   return { client, calls, starts, sleeps, clock };
 }
@@ -218,6 +219,20 @@ test("slow down is retried with backoff", async () => {
   const { client, sleeps } = makeClient(sequence(slow, slow, () => json({ data: [{ key: "a", count: "1" }] })));
   assert.deepEqual([...(await client.subredditCounts("posts", "alice"))], [["a", 1]]);
   assert.deepEqual(sleeps, [2, 4]);
+});
+
+test("a request's own retries are jittered by up to 20%, so parallel ones don't retry in step", async () => {
+  const slow = () => json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422);
+  const ok = () => json({ data: [{ key: "a", count: "1" }] });
+  for (const [random, expected] of [[() => 0, [1.6, 3.2]], [() => 1, [2.4, 4.8]]]) {
+    const { client, sleeps } = makeClient(sequence(slow, slow, ok), { random });
+    await client.subredditCounts("posts", "alice");
+    assert.deepEqual(sleeps.map((s) => Math.round(s * 10) / 10), expected);
+  }
+  // A shared pause (429) isn't jittered: every request waits for the same moment anyway.
+  const { client, sleeps } = makeClient(sequence(() => json({ error: "Too many requests" }, 429), ok), { random: () => 0 });
+  await client.subredditCounts("posts", "alice");
+  assert.deepEqual(sleeps, [30]);
 });
 
 test("network errors retry, then fail", async () => {

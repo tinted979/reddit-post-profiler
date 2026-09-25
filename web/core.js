@@ -29,6 +29,11 @@ const TIMELINE_LIMIT = 100;
 // Pacing a scan starts with, and the range the page accepts. The server tops out at about
 // 0.8 requests/s whatever the settings, so going faster only brings more "slow down"
 // replies (see SECONDS_PER_REQUEST).
+// Seconds in a day, for epoch-second arithmetic.
+export const DAY = 86400;
+// The history windows a scan can be limited to (years back from today).
+export const HISTORY_YEARS = Object.freeze([1, 5, 10]);
+
 export const SCAN_DEFAULTS = Object.freeze({ delay: 0.75, concurrency: 2, cacheDays: 7 });
 export const SCAN_LIMITS = Object.freeze({
   delay: Object.freeze({ min: 0.25, max: 30 }),
@@ -50,6 +55,20 @@ export function clampScanNumbers({ maxUsers, delay, concurrency, cacheDays }) {
     cacheDays: cacheDays >= 0 ? finite(cacheDays, SCAN_DEFAULTS.cacheDays, SCAN_LIMITS.cacheDays) : SCAN_DEFAULTS.cacheDays,
   };
 }
+
+// Retry waits, in seconds (n: the attempt that failed, from 1). A 429 or a network error
+// pauses every request on the client; "slow down" and 5xx replies make only that request
+// wait, jittered (see JITTER) so parallel requests don't all retry at once.
+const BACKOFF = Object.freeze({
+  network: (n) => 5 * 2 ** (n - 1), // shared: 5, 10, 20, 40
+  rateLimit: 30, // shared, when the reset header isn't readable (it isn't in browsers)
+  slowDown: (n) => 2 * 2 ** (n - 1), // this request: 2, 4, 8, 16
+  serverError: (n) => 2 ** n, // this request: 2, 4, 8, 16
+});
+// A request's own waits are scaled by 1 ± JITTER at random.
+const JITTER = 0.2;
+// Successes in a row before the in-flight cap grows by one.
+const GROW_AFTER = 10;
 
 export class ArcticShiftError extends Error {
   // `status` is the HTTP status, or null when the request never got a response.
@@ -139,8 +158,10 @@ export class ArcticShiftClient {
     signal = null,
     onWait = () => {},
     onPause = () => {},
+    random = Math.random,
   } = {}) {
     Object.assign(this, { delay, maxInFlight, maxRetries, maxRateLimitWaits, baseUrl, signal, onWait, onPause });
+    this._random = random;
     this._fetch = fetchFn;
     this._sleepFn = sleep;
     this._now = now;
@@ -224,13 +245,17 @@ export class ArcticShiftClient {
     }
   }
 
+  _jitter(seconds) {
+    return seconds * (1 + JITTER * (2 * this._random() - 1));
+  }
+
   _congested() {
     this._limit = Math.max(1, Math.floor(this._limit / 2));
     this._streak = 0;
   }
 
   _succeeded() {
-    if (++this._streak >= 10 && this._limit < this.maxInFlight) {
+    if (++this._streak >= GROW_AFTER && this._limit < this.maxInFlight) {
       this._limit++;
       this._streak = 0;
       this._wake();
@@ -294,7 +319,7 @@ export class ArcticShiftClient {
           throw new ArcticShiftError(`network error on ${path}: ${err.message ?? err}`);
         }
         this._congested();
-        this._pause(5 * 2 ** (failures - 1), "network error, retrying");
+        this._pause(BACKOFF.network(failures), "network error, retrying");
         continue;
       }
 
@@ -306,7 +331,7 @@ export class ArcticShiftClient {
         // expose it via CORS, so browsers wait 30 s.
         const reset = Number(resp.headers.get("X-RateLimit-Reset"));
         this._congested();
-        this._pause(Number.isFinite(reset) && reset > 0 ? reset + 1 : 30, "rate limited");
+        this._pause(Number.isFinite(reset) && reset > 0 ? reset + 1 : BACKOFF.rateLimit, "rate limited");
         continue;
       }
 
@@ -318,14 +343,14 @@ export class ArcticShiftClient {
         // waits; the lower in-flight cap is what eases the load.
         if (++slowdowns > this.maxRetries) throw new ServerBusy(`server busy: ${error}`, resp.status);
         this._congested();
-        await this._sleep(2 * 2 ** (slowdowns - 1), "server busy");
+        await this._sleep(this._jitter(BACKOFF.slowDown(slowdowns)), "server busy");
         continue;
       }
       if (resp.status >= 500 || (resp.ok && (payload === null || typeof payload !== "object" || !("data" in payload)))) {
         if (++failures > this.maxRetries) {
           throw new ArcticShiftError(`HTTP ${resp.status} on ${path}: ${error ?? "bad response"}`, resp.status);
         }
-        await this._sleep(2 ** failures, "server error, retrying");
+        await this._sleep(this._jitter(BACKOFF.serverError(failures)), "server error, retrying");
         continue;
       }
       if (!resp.ok || error) {
@@ -758,7 +783,7 @@ async function beforeFacts(client, username, post, { after, needPosts, needComme
   ]);
   const parts = [posts, comments].filter(Boolean);
   const known = parts.every((p) => p.times !== null);
-  const days = new Set(parts.flatMap((p) => p.times ?? []).map((t) => Math.floor(t / 86400)));
+  const days = new Set(parts.flatMap((p) => p.times ?? []).map((t) => Math.floor(t / DAY)));
   const firsts = parts.map((p) => p.first).filter((t) => t !== null);
   return {
     posts: posts?.count ?? 0,
@@ -802,7 +827,7 @@ async function cacheSet(cache, key, value) {
 }
 
 // Round the window start to the day so cache keys stay stable between runs.
-const windowBucket = (after) => (after === null ? "all" : String(Math.floor(after / 86400)));
+const windowBucket = (after) => (after === null ? "all" : String(Math.floor(after / DAY)));
 const lifetimeKey = (user, bucket) => `${CACHE_VERSION}|life|${user.toLowerCase()}|${bucket}`;
 // Archive-derived lifetime rows for one `only` set (see archiveLifetime): keyed separately
 // from the full lifetime totals, since they cover just the wanted subreddits. Case- and
@@ -1115,7 +1140,7 @@ export function profileFacts(p, post) {
   return {
     n,
     days: n === 0 ? 0 : Number.isFinite(p.targetDaysBefore) ? p.targetDaysBefore : null,
-    tenureDays: first === null ? null : Math.max(0, (post.createdUtc - first) / 86400),
+    tenureDays: first === null ? null : Math.max(0, (post.createdUtc - first) / DAY),
     exact: p.targetTimelineComplete !== false,
   };
 }
@@ -1379,7 +1404,7 @@ export function importScan(rec) {
   // Cleaned the same way as the form's fields, so files saved before "Skip users" dropped
   // "u/" prefixes keep those names.
   const list = (v, parse) => (Array.isArray(v) ? parse(v.filter((x) => typeof x === "string")) : []);
-  const years = [1, 5, 10].includes(o.years) ? o.years : null;
+  const years = HISTORY_YEARS.includes(o.years) ? o.years : null;
   const thread = s.thread && isCount(s.thread.comments) && isCount(s.thread.people)
     ? { comments: s.thread.comments, people: s.thread.people }
     : null;

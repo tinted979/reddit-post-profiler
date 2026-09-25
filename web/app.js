@@ -35,6 +35,8 @@ import {
   redditPostUrl,
   redditSubredditUrl,
   SCAN_DEFAULTS,
+  DAY,
+  HISTORY_YEARS,
   clampScanNumbers,
   scanStats,
   serializeProfile,
@@ -44,13 +46,11 @@ import {
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
 import { DumpSource } from "./dumps.js";
-import { LinkQueue, MAX_WAITING, QUEUE_KEY } from "./queue.js";
+import { LinkQueue, MAX_WAITING, QUEUE_CONCURRENCY, QUEUE_KEY } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
 const TITLE = document.title;
 const DEFAULTS = SCAN_DEFAULTS;
-// Most users profiled in parallel by a queued scan, which runs unattended.
-const QUEUE_CONCURRENCY = 2;
 
 const state = {
   runId: 0, // bumped for every run; callbacks from an older run are ignored
@@ -99,7 +99,7 @@ function readOptions() {
     includeOp: $("include-op").checked,
     exclude: parseUsernames($("exclude").value.split(/[\s,]+/)),
     only: parseSubreddits($("only-subs").value.split(/[\s,]+/)),
-    years: [1, 5, 10].includes(years) ? years : null,
+    years: HISTORY_YEARS.includes(years) ? years : null,
     ...clampScanNumbers({
       maxUsers: num("max-users"), delay: num("delay"), concurrency: num("concurrency"), cacheDays: num("cache-days"),
     }),
@@ -282,12 +282,16 @@ function onWait(reason, seconds) {
   if (reason) {
     status.waits++;
     const until = Date.now() / 1000 + seconds;
+    // Every request waiting out one pause reports it, a moment apart: announce the pause
+    // once, and again only if a later wait pushes its end out by more than a few seconds.
+    if (seconds >= 10 && until > status.until + 5) {
+      announce(`Paused: ${reason}. Resuming in ${Math.round(seconds)} seconds.`);
+    }
     if (until > status.until) {
       status.until = until;
       status.reason = reason;
     }
     status.timer ??= setInterval(renderStatus, 1000);
-    if (seconds >= 10) announce(`Paused: ${reason}. Resuming in ${Math.round(seconds)} seconds.`);
   } else if (--status.waits <= 0) {
     clearWaits();
   }
@@ -355,8 +359,7 @@ function setRunning(running) {
 function askLargeScan(est, signal) {
   if (signal.aborted) return Promise.resolve("cancel"); // Stop was pressed while estimating
   const box = $("confirm");
-  const mins = Math.max(1, Math.round(est.seconds / 60));
-  const time = mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)} h ${mins % 60} min`;
+  const time = formatDuration(Math.max(1, Math.round(est.seconds / 60)) * 60); // whole minutes: it's rough
   $("confirm-text").textContent =
     `This thread has ${est.users.toLocaleString()} commenters to profile` +
     (est.saved ? `, ${est.saved.toLocaleString()} with saved results` : "") +
@@ -635,7 +638,7 @@ async function run({ fromQueue = false } = {}) {
   if (!fromQueue) history.replaceState(null, "", shareUrl(postId, opts));
 
   // Start of the history window, in epoch seconds (null = all time).
-  const after = opts.years ? Math.floor(Date.now() / 1000 - opts.years * 365.25 * 86400) : null;
+  const after = opts.years ? Math.floor(Date.now() / 1000 - opts.years * 365.25 * DAY) : null;
   const runId = ++state.runId;
   const controller = new AbortController();
   Object.assign(state, {
@@ -938,6 +941,10 @@ function backgroundSleep(seconds, signal = null) {
 const queue = new LinkQueue();
 const QUEUE_GAP = 3; // seconds between queued scans, to go easy on the API
 let pumping = false;
+// No queued scan starts before this (epoch seconds): the gap after the last one holds
+// whoever calls pumpQueue (Retry, Start, a manual scan ending), and one wait covers it.
+let gapUntil = 0;
+let gapWaiting = false;
 // Only one tab runs the queue (it's shared through localStorage, so two tabs would overwrite
 // each other's changes). The others show it read-only until that tab closes.
 let queueOwner = false;
@@ -989,7 +996,9 @@ function renderQueue() {
       actions.append(b);
       return b;
     };
-    if (item.status === "done" && item.saved) button("Open", () => openSaved(item.postId)).disabled = busy;
+    // `saved` is set when the scan ends; the saved scan may have been deleted since.
+    const openable = item.saved && (savedIds === null || savedIds.has(item.postId));
+    if (item.status === "done" && openable) button("Open", () => openSaved(item.postId)).disabled = busy;
     if (item.status === "failed" || item.status === "stopped") button("Retry", () => retryQueued(item.id)).disabled = !queueOwner;
     if (item.status !== "running") button("Remove", () => removeQueued(item.id)).disabled = !queueOwner;
     const note = [item.note, ...scanOptionNotes(item.opts)].filter(Boolean).join(" · ");
@@ -1093,6 +1102,15 @@ function fillFromItem(item) {
 // a scan (including a manual run) calls this, so it's safe to call any time.
 async function pumpQueue() {
   if (!queueOwner || pumping || !queue.active || state.controller) return;
+  const gap = gapUntil - Date.now() / 1000;
+  if (gap > 0) {
+    if (gapWaiting) return; // already waiting it out
+    gapWaiting = true;
+    await backgroundSleep(gap);
+    gapWaiting = false;
+    pumpQueue();
+    return;
+  }
   const item = queue.next();
   if (!item) {
     queue.setActive(false);
@@ -1123,7 +1141,7 @@ async function pumpQueue() {
   } else if (outcome.kind === "stopped") {
     patch.status = "stopped";
     queue.setActive(false); // Stop means stop, not skip to the next one
-  } else if (outcome.kind === "offline" || outcome.kind === "busy") {
+  } else if (outcome.kind === "offline") {
     patch.status = "waiting";
     queue.setActive(false);
   } else {
@@ -1132,8 +1150,7 @@ async function pumpQueue() {
   queue.update(item.id, patch);
   renderQueue();
   pumping = false;
-  if (!queue.active) return;
-  await backgroundSleep(QUEUE_GAP);
+  gapUntil = Date.now() / 1000 + QUEUE_GAP;
   pumpQueue();
 }
 
@@ -1180,12 +1197,18 @@ async function onNotifyChange() {
 // ---- Saved scans ----
 
 let savedRender = 0;
+// Post ids with a saved scan, as of the last renderSaved (null until the first).
+let savedIds = null;
 
 // The list of saved scans, newest first.
 async function renderSaved() {
   const token = ++savedRender;
   const scans = await openScans().list();
   if (token !== savedRender) return; // a newer render started
+  const ids = new Set(scans.map((s) => s.id));
+  const changed = savedIds === null || ids.size !== savedIds.size || [...ids].some((id) => !savedIds.has(id));
+  savedIds = ids;
+  if (changed) renderQueue(); // its Open buttons follow the saved scans
   $("saved-count").textContent = scans.length ? `(${scans.length})` : "";
   $("saved-legend").hidden = !scans.length;
   $("saved-empty").hidden = Boolean(scans.length);
