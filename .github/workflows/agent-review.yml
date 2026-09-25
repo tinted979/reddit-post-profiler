@@ -92,6 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 2    # the merge commit and main, so `git diff HEAD^1 HEAD` is the change
           persist-credentials: false
       - name: Install bubblewrap and socat (the env scrub's subprocess sandbox needs both)
         run: |
@@ -116,10 +117,18 @@ jobs:
             That file and the finding-format skill (.claude/skills/finding-format/SKILL.md; read it
             if it isn't already in your context) define what to report and how. CLAUDE.md and
             .claude/ are the base branch's; the PR's versions of them, if it changes them, are
-            under .claude-pr/. Use `gh pr diff` and `gh pr view`; read changed files in full
-            before commenting on them. Post findings as inline comments, then one summary
-            comment with `gh pr comment`.
+            under .claude-pr/. Read changed files in full before commenting on them. Post
+            findings as inline comments, then one summary comment with `gh pr comment`.
+
+            Your tools: Read, Grep and Glob for files; and only these shell commands, so don't
+            try others (ls, cat, find, node, npm...), which are refused and waste turns:
+            `gh pr diff`, `gh pr view`, `gh pr comment`, and read-only `git diff`, `git log`
+            and `git show`. HEAD is the PR merged into the base branch and HEAD^1 is the base,
+            so `git diff HEAD^1 HEAD` is the whole change. Don't run the PR's code; the checks
+            have already run the tests. You have a limited number of turns: read what the
+            change needs, not the whole codebase, and always end by posting the summary, even
+            if you couldn't check everything (say what you didn't).
           claude_args: >-
             --agent ${{ matrix.role }}
-            --max-turns 30
-            --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment"
+            --max-turns 50
+            --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment"
