@@ -807,6 +807,13 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 > - **`test-integrity.sh` exits 2 when it can't count tests** (a checkout, `npm ci` or uv failure), so a setup failure doesn't pass as a lower count. `pr-guards.sh` reports exit 2 as its own error, and `ack:tests` doesn't waive it.
 > - **Writers get Python from a uv venv** put on `PATH` (so `python -m pytest` works), and `npm ci` runs in a workflow step before Claude starts. They run web tests with `npm --prefix web test`. Checked in Claude Code 2.1.281: the env scrub removes the Claude token, the Actions OIDC request token and cloud credentials, but not `GH_TOKEN`, so `git push` (through the action's credential helper) and `gh` still work.
 > - **The path hook matches case-insensitively** and turns backslashes into slashes, so `claude.md` or `.github\x` don't get past it on Windows. Tests: `.github/scripts/tests/guard-paths.test.mjs`.
+> - **The path hook is a guardrail, not a boundary** (found by the security reviewer on the Stage 4 PR, #39). A writer can run a test file it wrote, and that code can change any file. So:
+>   - CI runs the base branch's `pr-guards.sh` and `test-integrity.sh`, not the PR's.
+>   - A writer branch (`claude/<number>-…`) that touches a protected path fails, and no label waives it.
+>   - Changing or deleting an existing test there needs `ack:tests`.
+>   - A PR could still edit `checks.yml` itself. What closes that is the Claude App having no `workflows` permission.
+> - **The follow-up job refuses fork PRs and non-`claude/*` branches.** It may only `git push` or `git push origin HEAD`.
+> - **The env scrub needs `bubblewrap` and `socat` on the runner.** Claude Code 2.1.282 won't start without bubblewrap, and Bash fails without socat. Every agent job installs both, lifts Ubuntu 24.04's AppArmor block on user namespaces, and checks both work.
 > - **`pr-guards.sh` covers every `claude/*` branch,** including interactive sessions' `claude/<topic>` branches. The owner's `ack:` labels waive it the same way.
 
 These are complete, working drafts. The workflows pass `actionlint` 1.7.12 (ignoring only its unknown-key error for `queue`) and `zizmor` 1.30.1 at medium severity. The scripts were run against this repository: the rule guards pass on today's code and fail on injected violations; the test-integrity check caught a deleted test and an added `test.skip`; the hook blocked, asked and allowed as intended; the issue filer respected its cap, severity order and de-duplication. Action SHAs were resolved on 25 Sept 2026.

@@ -93,15 +93,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install bubblewrap (the env scrub isolates Claude's subprocesses with it)
+      - name: Install bubblewrap and socat (the env scrub's subprocess sandbox needs both)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap
+          sudo apt-get install -y -qq bubblewrap socat
           # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor, and bwrap needs
           # them. This runner is thrown away after the job.
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+          command -v socat
           bwrap --ro-bind / / --unshare-pid true && echo "bubblewrap works"
       - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
         with:

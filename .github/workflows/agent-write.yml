@@ -75,15 +75,16 @@ jobs:
           uv venv --python 3.12 "$RUNNER_TEMP/py"
           uv pip install --python "$RUNNER_TEMP/py" "duckdb>=1.1,<2" pytest
           echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
-      - name: Install bubblewrap (the env scrub isolates Claude's subprocesses with it)
+      - name: Install bubblewrap and socat (the env scrub's subprocess sandbox needs both)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap
+          sudo apt-get install -y -qq bubblewrap socat
           # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor, and bwrap needs
           # them. This runner is thrown away after the job.
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+          command -v socat
           bwrap --ro-bind / / --unshare-pid true && echo "bubblewrap works"
       - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
         with:
@@ -123,6 +124,16 @@ jobs:
       AGENT_ROLE: implementer
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
     steps:
+      - name: Only agent branches in this repository
+        # A fork's PR would run the fork's code (its tests, its package.json) next to the App's
+        # write credentials, and a non-claude/* branch isn't the agents' to push to.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+        run: |
+          read -r cross head < <(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json isCrossRepository,headRefName --jq '"\(.isCrossRepository) \(.headRefName)"')
+          if [ "$cross" != false ]; then echo "::error::#$PR comes from a fork; @claude only works on this repository's branches."; exit 1; fi
+          case "$head" in claude/*) ;; *) echo "::error::#$PR's branch $head isn't a claude/* branch; @claude only pushes to those."; exit 1 ;; esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -135,15 +146,16 @@ jobs:
       # No prompt: tag mode. The action reads the owner's comment, checks out the PR branch and
       # pushes follow-up commits to it. Only the owner's and the reviewers' (github-actions[bot])
       # comments are passed to Claude, so nobody else can steer it through the PR thread.
-      - name: Install bubblewrap (the env scrub isolates Claude's subprocesses with it)
+      - name: Install bubblewrap and socat (the env scrub's subprocess sandbox needs both)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap
+          sudo apt-get install -y -qq bubblewrap socat
           # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor, and bwrap needs
           # them. This runner is thrown away after the job.
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+          command -v socat
           bwrap --ro-bind / / --unshare-pid true && echo "bubblewrap works"
       - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
         with:
@@ -152,4 +164,4 @@ jobs:
           claude_args: >-
             --agent implementer
             --max-turns 40
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push),Bash(git push origin HEAD)"
