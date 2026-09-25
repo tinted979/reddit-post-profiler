@@ -709,17 +709,17 @@ async function lifetimeCounts(client, username, { wanted, after, skipInteraction
 // each wanted subreddit's items up to one cutoff (the earliest point every file can be
 // trusted to), plus one interactions query for everything after it, posts and comments
 // together (its `after` is exclusive, so nothing is counted twice). One request instead
-// of two aggregates. Returns {counts, partial: true, source: "archive"} (only the wanted
-// subreddits, so it's cached under its own `lifeonly` key rather than as the user's full
-// profile), null when the archive doesn't cover them all or can't be read (the aggregates
-// then answer as usual), or {skipInteractions: true} when interactions can't answer: the
-// aggregates answer instead, but without retrying the interactions query they already
-// found unusable.
+// of two aggregates. Returns one shape on every path, tagged by `status`:
+// {status: "answered", counts} for the wanted subreddits (so it's cached under its own
+// `lifeonly` key rather than as the user's full profile); {status: "unavailable"} when the
+// archive doesn't cover them all or can't be read (the aggregates then answer as usual);
+// or {status: "no-interactions"} when interactions can't answer: the aggregates answer
+// instead, but without retrying the interactions query they already found unusable.
 async function archiveLifetime(client, dumps, username, wanted, after) {
   const covered = wanted.map((sub) => dumps.covers(sub));
-  if (covered.some((c) => !c)) return null;
+  if (covered.some((c) => !c)) return { status: "unavailable" };
   const cutoff = minOf(covered.flatMap((c) => [c.postsThrough, c.commentsThrough]));
-  if (!Number.isFinite(cutoff)) return null;
+  if (!Number.isFinite(cutoff)) return { status: "unavailable" };
   const counts = new Map();
   const byKey = new Map();
   const upToCutoff = (times) => times.filter((t) => t <= cutoff && (after === null || t > after)).length;
@@ -734,13 +734,13 @@ async function archiveLifetime(client, dumps, username, wanted, after) {
     }
   } catch (err) {
     if (err instanceof Aborted) throw err;
-    return null;
+    return { status: "unavailable" };
   }
   let recent;
   try {
     recent = await client.interactionCounts(username, { after: after === null ? cutoff : Math.max(after, cutoff) });
   } catch (err) {
-    if (err instanceof QueryTimeout || err instanceof Unsupported) return { skipInteractions: true };
+    if (err instanceof QueryTimeout || err instanceof Unsupported) return { status: "no-interactions" };
     throw err;
   }
   for (const [sub, c] of recent) {
@@ -751,8 +751,37 @@ async function archiveLifetime(client, dumps, username, wanted, after) {
   }
   // For the end-of-scan note: a scan limited to covered subreddits whose lifetime counts
   // came from the archive files rather than Arctic Shift's aggregates.
-  if (dumps) dumps.lifetimeReads = (dumps.lifetimeReads ?? 0) + 1;
-  return { counts, partial: true, source: "archive" };
+  dumps.lifetimeReads = (dumps.lifetimeReads ?? 0) + 1;
+  return { status: "answered", counts };
+}
+
+// The whole lifetime block for buildProfile, as rows ([subreddit, posts, comments][]):
+// the `life` cache, the `lifeonly` cache (only with `only` and `dumps`), the archive
+// attempt, the aggregate fallback (skipping the interactions retry once the archive
+// already found it unusable), and the cache writes. Returns {rows, hit}: `hit` is the
+// cache entry the rows came from (for its `fetchedAt`), or null when they're fresh.
+async function lifetimeRows(client, dumps, cache, username, wanted, after, bucket) {
+  const user = username.toLowerCase();
+  const lifeKey = lifetimeKey(user, bucket);
+  const hit = await cacheGet(cache, lifeKey, isRows);
+  if (hit) return { rows: hit.value, hit };
+
+  const onlyKey = wanted && dumps ? lifeOnlyKey(user, bucket, wanted) : null;
+  const onlyHit = onlyKey ? await cacheGet(cache, onlyKey, isRows) : null;
+  if (onlyHit) return { rows: onlyHit.value, hit: onlyHit };
+
+  const archived = wanted && dumps ? await archiveLifetime(client, dumps, username, wanted, after) : null;
+  const life = archived?.status === "answered"
+    ? { counts: archived.counts, partial: true, source: "archive" }
+    : await lifetimeCounts(client, username, { wanted, after, skipInteractions: archived?.status === "no-interactions" });
+
+  const rows = [...life.counts].map(([sub, c]) => [sub, c.posts, c.comments]);
+  if (!life.partial) {
+    await cacheSet(cache, lifeKey, rows);
+  } else if (life.source === "archive" && onlyKey) {
+    await cacheSet(cache, onlyKey, rows);
+  }
+  return { rows, hit: null };
 }
 
 // [posts map, comments map] -> Map<subreddit, {posts, comments}>
@@ -949,35 +978,7 @@ export async function buildProfile(client, username, threadComments, post, { onl
   const bucket = windowBucket(after);
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
 
-  const lifeKey = lifetimeKey(user, bucket);
-  let hit = await cacheGet(cache, lifeKey, isRows);
-  let rows;
-  if (hit) {
-    rows = hit.value;
-  } else {
-    const onlyKey = wanted && dumps ? lifeOnlyKey(user, bucket, wanted) : null;
-    if (onlyKey) hit = await cacheGet(cache, onlyKey, isRows);
-    if (hit) {
-      rows = hit.value;
-    } else {
-      let archived = null;
-      let skipInteractions = false;
-      if (wanted && dumps) {
-        archived = await archiveLifetime(client, dumps, username, wanted, after);
-        if (archived?.skipInteractions) {
-          skipInteractions = true;
-          archived = null;
-        }
-      }
-      const life = archived ?? await lifetimeCounts(client, username, { wanted, after, skipInteractions });
-      rows = [...life.counts].map(([sub, c]) => [sub, c.posts, c.comments]);
-      if (!life.partial) {
-        await cacheSet(cache, lifeKey, rows);
-      } else if (life.source === "archive" && onlyKey) {
-        await cacheSet(cache, onlyKey, rows);
-      }
-    }
-  }
+  const { rows, hit } = await lifetimeRows(client, dumps, cache, username, wanted, after, bucket);
 
   const byKey = new Map();
   for (const [sub, posts, comments] of rows) {
