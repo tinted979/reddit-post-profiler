@@ -14,7 +14,13 @@ import { fileURLToPath } from "node:url";
 const RANK = { high: 0, medium: 1 };
 const ROLES = new Set(["bug-hunter", "perf-auditor", "architecture-reviewer", "context-steward"]);
 // A zero-width space after @ keeps the text readable but stops it being a mention.
-const clean = (s, n) => String(s ?? "").slice(0, n).replace(/@(?=[A-Za-z0-9_-])/g, "@​");
+const code = (s, n) => String(s ?? "").slice(0, n).replace(/@(?=[A-Za-z0-9_-])/g, "@\u200b");
+// Prose is also HTML-escaped: GitHub hides HTML comments and folds <details> when it renders
+// an issue, but a writer reads the raw text, so agent text could otherwise hide instructions
+// from the owner who reads the issue before labelling it. Escaped, they show as plain text.
+const clean = (s, n) => code(s, n).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+// Only this exact marker counts, and escaped agent text can't produce it.
+const MARKER = /<!-- finding-id: ([0-9a-f]{12}) -->/g;
 const fingerprint = (f) =>
   createHash("sha256")
     .update([f.role, f.location, f.title].map((s) => String(s ?? "").trim().toLowerCase()).join("|"))
@@ -26,7 +32,7 @@ const fingerprint = (f) =>
 export function fileFindings(files, { gh, max = 3 }) {
   const log = [];
   const known = gh("issue", "list", "--label", "agent:finding", "--state", "all", "--limit", "1000", "--json", "body");
-  const seen = new Set([...known.matchAll(/finding-id: ([0-9a-f]{12})/g)].map((m) => m[1]));
+  const seen = new Set([...known.matchAll(MARKER)].map((m) => m[1]));
 
   const all = [];
   for (const [file, text] of Object.entries(files)) {
@@ -64,13 +70,13 @@ export function fileFindings(files, { gh, max = 3 }) {
       "",
       clean(f.evidence, 4000),
       "",
-      ...(f.repro_test ? ["Reproduction:", "", "~~~js", clean(f.repro_test, 4000).replaceAll("~~~", "~ ~ ~"), "~~~", ""] : []),
+      ...(f.repro_test ? ["Reproduction:", "", "~~~js", code(f.repro_test, 4000).replaceAll("~~~", "~ ~ ~"), "~~~", ""] : []),
       `**Suggested fix:** ${clean(f.suggestion, 2000)}`,
       "",
       "<sub>Written by an agent: read it before labelling it for a writer. Wrong or not worth doing? Close it as not planned; it won't be filed again.</sub>",
       `<!-- finding-id: ${id} -->`,
     ].join("\n");
-    gh("issue", "create", "--title", clean(f.title, 120) || "(untitled finding)", "--body", body, "--label", `agent:finding,agent:${f.role}`);
+    gh("issue", "create", "--title", code(f.title, 120) || "(untitled finding)", "--body", body, "--label", `agent:finding,agent:${f.role}`);
     seen.add(id);
     filed++;
   }
