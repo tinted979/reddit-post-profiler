@@ -75,6 +75,16 @@ jobs:
           uv venv --python 3.12 "$RUNNER_TEMP/py"
           uv pip install --python "$RUNNER_TEMP/py" "duckdb>=1.1,<2" pytest
           echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+      - name: Install bubblewrap (the env scrub isolates Claude's subprocesses with it)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor, and bwrap needs
+          # them. This runner is thrown away after the job.
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-pid true && echo "bubblewrap works"
       - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -125,6 +135,16 @@ jobs:
       # No prompt: tag mode. The action reads the owner's comment, checks out the PR branch and
       # pushes follow-up commits to it. Only the owner's and the reviewers' (github-actions[bot])
       # comments are passed to Claude, so nobody else can steer it through the PR thread.
+      - name: Install bubblewrap (the env scrub isolates Claude's subprocesses with it)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor, and bwrap needs
+          # them. This runner is thrown away after the job.
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-pid true && echo "bubblewrap works"
       - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
