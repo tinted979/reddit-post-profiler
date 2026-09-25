@@ -52,7 +52,7 @@ function json(body, status = 200) {
 
 // A client whose fetch is served by `handler(url) -> Response`; records calls and sleeps.
 // Time is simulated: `sleep` advances the clock instantly.
-function makeClient(handler, { delay = 0, random = () => 0.5 } = {}) {
+function makeClient(handler, { delay = 0, random = () => 0.5, maxInFlight = SCAN_DEFAULTS.concurrency, onWait = () => {}, onPause = () => {} } = {}) {
   const calls = [];
   const starts = [];
   const sleeps = [];
@@ -71,6 +71,9 @@ function makeClient(handler, { delay = 0, random = () => 0.5 } = {}) {
     },
     now: () => clock.t,
     random,
+    maxInFlight,
+    onWait,
+    onPause,
   });
   return { client, calls, starts, sleeps, clock };
 }
@@ -382,7 +385,7 @@ test("when interactions can't answer either, only the timed-out kind is split in
   });
   clock.t = Date.UTC(2024, 5, 1) / 1000;
   const p = await buildProfile(client, "busy", 1, POST);
-  const years = yearlyRanges(null, client._now()).length;
+  const years = yearlyRanges(null, clock.t).length;
   assert.equal(years, 2024 - 2005 + 1);
   assert.equal(calls.filter((u) => u.pathname.includes("/posts/")).length, 1);
   // The full comments query is sent twice, and not again once interactions has failed.
@@ -401,11 +404,10 @@ test("concurrent requests are spaced by the delay", async () => {
 
 test("a rate limit pauses every request on the client", async () => {
   let n = 0;
-  const { client, starts, sleeps } = makeClient(() =>
-    ++n === 1 ? json({ error: "Too many requests" }, 429) : json({ data: [] }),
-  );
   // One request in flight at a time, so b and c queue behind a.
-  client.maxInFlight = client._limit = 1;
+  const { client, starts, sleeps } = makeClient(() =>
+    ++n === 1 ? json({ error: "Too many requests" }, 429) : json({ data: [] }), { maxInFlight: 1 },
+  );
   await Promise.all(["a", "b", "c"].map((user) => client.subredditCounts("posts", user)));
   // a's 429 pauses its own retry and the requests queued behind it.
   assert.equal(starts[0], 1000);
@@ -449,14 +451,95 @@ test("requests in flight never exceed the cap", async () => {
 test("slow down halves the cap, and successes raise it again", async () => {
   let slow = true;
   const { client } = makeClient(() =>
-    slow ? json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422) : json({ data: [] }),
+    slow ? json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422) : json({ data: [] }), { maxInFlight: 4 },
   );
-  client.maxInFlight = client._limit = 4;
-  await assert.rejects(client._get("/api/posts/ids", {}), ServerBusy);
-  assert.equal(client._limit, 1);
+  await assert.rejects(client.getPost("abc123"), ServerBusy);
+  assert.equal(client.stats().limit, 1);
   slow = false;
-  for (let i = 0; i < 30; i++) await client._get("/api/posts/ids", {});
-  assert.equal(client._limit, 4);
+  for (let i = 0; i < 30; i++) await client.getPost("abc123");
+  assert.equal(client.stats().limit, 4);
+});
+
+test("a request that gives up on a busy server pauses the whole client", async () => {
+  const slow = () => json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422);
+  let busy = true;
+  const pauses = [];
+  const { client, starts, clock } = makeClient(() => (busy ? slow() : json({ data: [] })), {
+    onPause: (until) => pauses.push(until),
+  });
+  await assert.rejects(client.getPost("abc123"), ServerBusy);
+  const gaveUp = clock.t;
+  assert.deepEqual(pauses, [gaveUp + 60]);
+  // The next request (another user's, say) waits out the pause instead of starting afresh.
+  busy = false;
+  await client.getPost("def456");
+  assert.ok(starts.at(-1) >= gaveUp + 60, `started at ${starts.at(-1)}, gave up at ${gaveUp}`);
+});
+
+test("once one part of a split gives up on a busy server, the parts not yet sent are dropped", async () => {
+  const { client, calls, clock } = makeClient((u) => {
+    if (!u.searchParams.has("after")) return json({ error: "Query timed out" }); // the whole-history query
+    return json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422);
+  });
+  clock.t = Date.UTC(2024, 5, 1) / 1000; // about 20 yearly parts
+  await assert.rejects(client.subredditCounts("comments", "busy"), ServerBusy);
+  const parts = calls.filter((u) => u.searchParams.has("after"));
+  // Without the group, every one of the ~20 parts would make its own 5 retries (100+).
+  assert.ok(parts.length <= 2 * (client.maxRetries + 1), `${parts.length} part requests`);
+});
+
+test("a server error lowers the in-flight cap like a slow-down", async () => {
+  let n = 0;
+  const { client } = makeClient(() => (++n === 1 ? json({ error: "Bad gateway" }, 502) : json({ data: [] })), { maxInFlight: 4 });
+  await client.getPost("abc123");
+  assert.equal(client.stats().limit, 2);
+});
+
+test("stats() shows the cap, the requests in flight and those waiting for a slot", () => {
+  const { client } = makeClient(() => json({ data: [] }), { maxInFlight: 3 });
+  assert.deepEqual(client.stats(), { limit: 3, inFlight: 0, waiting: 0 });
+});
+
+test("a readable X-RateLimit-Reset sets the pause, and a lasting 429 is given up on", async () => {
+  const limited = () => new Response(JSON.stringify({ error: "Too many requests" }), { status: 429, headers: { "X-RateLimit-Reset": "12" } });
+  const once = makeClient(sequence(limited, () => json({ data: [] })));
+  await once.client.getPost("abc123");
+  assert.deepEqual(once.sleeps, [13]); // reset + 1
+  const always = makeClient(limited);
+  const err = await always.client.getPost("abc123").catch((e) => e);
+  assert.ok(err instanceof ArcticShiftError && err.status === 429);
+  assert.equal(always.calls.length, always.client.maxRateLimitWaits + 1);
+});
+
+test("a garbled 200 and server errors are retried with growing waits", async () => {
+  const garbled = () => new Response("<html>oops</html>", { status: 200 });
+  const { client, sleeps } = makeClient(sequence(garbled, () => json({ error: "x" }, 503), () => json({ data: [] })));
+  assert.equal(await client.getPost("abc123"), null);
+  assert.deepEqual(sleeps, [2, 4]);
+});
+
+test("network errors pause every request for 5, 10, 20, then 40 s, and say why", async () => {
+  const waits = [];
+  const { client, sleeps } = makeClient(() => { throw new TypeError("Failed to fetch"); }, {
+    onWait: (reason, s) => waits.push(reason ? [reason, s] : "done"),
+  });
+  await assert.rejects(client.getPost("abc123"), ArcticShiftError);
+  assert.deepEqual(sleeps, [5, 10, 20, 40]);
+  assert.ok(waits.filter(Array.isArray).every(([reason]) => reason === "network error, retrying"));
+});
+
+test("every wait the client reports is ended, whatever the outcome", async () => {
+  for (const handler of [
+    sequence(() => json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422), () => json({ data: [] })),
+    () => json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422),
+    sequence(() => json({ error: "x" }, 500), () => json({ data: [] })),
+    sequence(() => json({ error: "Too many requests" }, 429), () => json({ data: [] })),
+  ]) {
+    let open = 0;
+    const { client } = makeClient(handler, { onWait: (reason) => (open += reason ? 1 : -1) });
+    await client.getPost("abc123").catch(() => {});
+    assert.equal(open, 0);
+  }
 });
 
 test("mapPool limits concurrency and passes indexes", async () => {
@@ -752,7 +835,7 @@ test("Stop releases requests queued for a slot", async () => {
   const first = client.getPost("a");
   const queued = client.getPost("b");
   await new Promise((r) => setTimeout(r, 10));
-  assert.equal(client._waiters.length, 1);
+  assert.equal(client.stats().waiting, 1);
   controller.abort();
   await assert.rejects(first, Aborted);
   await assert.rejects(queued, Aborted);
@@ -791,16 +874,17 @@ test("a 4xx that isn't JSON fails at once, with its status", async () => {
   assert.deepEqual(sleeps, []);
 });
 
-test("an interactions query that keeps failing falls through to the split", async () => {
+test("an interactions query that keeps getting server errors fails the user instead of splitting into years", async () => {
   const { client, calls, clock } = makeClient((u) => {
     if (isInteractions(u)) return json({ error: "Internal error" }, 500);
     if (u.pathname.includes("/posts/")) return json({ data: [] });
     return u.searchParams.has("after") ? json({ data: [{ key: "rust", count: "1" }] }) : json({ error: "Query timed out" });
   });
   clock.t = Date.UTC(2024, 5, 1) / 1000;
-  const p = await buildProfile(client, "busy", 1, POST);
+  const err = await buildProfile(client, "busy", 1, POST).catch((e) => e);
+  assert.ok(err instanceof ArcticShiftError && err.status === 500, String(err));
   assert.equal(calls.filter(isInteractions).length, client.maxRetries + 1);
-  assert.equal(p.subreddits.get("rust").comments, yearlyRanges(null, client._now()).length);
+  assert.ok(!calls.some((u) => u.searchParams.has("after")), "split into years anyway");
 });
 
 test("aggregate rows that can't be counts are skipped", async () => {
@@ -856,10 +940,11 @@ test("a lowered cap applies to requests already waiting for their start", async 
     },
   });
   // Both requests take a slot, then wait out a pause; the cap drops to 1 meanwhile.
+  // (Private calls on purpose: this needs the cap lowered at an exact moment.)
   client._pause(10, "test");
-  const both = Promise.all([client._get("/a", {}), client._get("/b", {})]);
+  const both = Promise.all([client.getPost("a"), client.getPost("b")]);
   await new Promise((r) => setTimeout(r, 0));
-  assert.equal(client._inFlight, 2);
+  assert.equal(client.stats().inFlight, 2);
   client._congested();
   while (gates.length) gates.shift()();
   await both;
