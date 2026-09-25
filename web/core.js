@@ -64,6 +64,7 @@ const BACKOFF = Object.freeze({
   rateLimit: 30, // shared, when the reset header isn't readable (it isn't in browsers)
   slowDown: (n) => 2 * 2 ** (n - 1), // this request: 2, 4, 8, 16
   serverError: (n) => 2 ** n, // this request: 2, 4, 8, 16
+  busy: 60, // shared, after a request gives up on a busy server (ServerBusy)
 });
 // A request's own waits are scaled by 1 ± JITTER at random.
 const JITTER = 0.2;
@@ -191,6 +192,12 @@ export class ArcticShiftClient {
     if (this.signal?.aborted) throw new Aborted("stopped");
   }
 
+  // The in-flight cap, requests in flight and requests waiting for a slot (for tests and
+  // diagnostics; read-only).
+  stats() {
+    return { limit: this._limit, inFlight: this._inFlight, waiting: this._waiters.length };
+  }
+
   async _sleep(seconds, reason) {
     this._checkAbort();
     if (reason) this.onWait(reason, seconds);
@@ -264,8 +271,9 @@ export class ArcticShiftClient {
 
   // One attempt: wait for a slot and a start time, fetch and parse. Returns {resp,
   // payload} (payload is null when the body isn't JSON); throws the fetch error on a
-  // network failure, and Aborted once stopped.
-  async _attempt(url) {
+  // network failure, Aborted once stopped, and the error that made `group` give up if it
+  // did meanwhile.
+  async _attempt(url, group) {
     for (;;) {
       await this._acquire();
       try {
@@ -273,6 +281,10 @@ export class ArcticShiftClient {
       } catch (err) {
         this._release();
         throw err;
+      }
+      if (group?.failed) {
+        this._release();
+        throw group.error ?? new ServerBusy("server busy: dropped with the rest of its split"); // why the group gave up
       }
       // The cap may have been lowered while this request waited for its start.
       if (this._inFlight <= this._limit) break;
@@ -294,11 +306,28 @@ export class ArcticShiftClient {
   }
 
   // GET `path` and return the payload's `data`. Network errors, 5xx and garbled replies
-  // are retried; a 429 or a network error pauses every request, a "slow down" answer only
-  // this one, and each of those lowers the in-flight cap. Throws QueryTimeout when the
-  // query is too heavy, ServerBusy when the server stays overloaded, ArcticShiftError
-  // (with `status`) for anything else, and Aborted once stopped.
-  async _get(path, params) {
+  // are retried; a 429 or a network error pauses every request, a "slow down" answer or a
+  // 5xx only this one, and each of those lowers the in-flight cap. Throws QueryTimeout
+  // when the query is too heavy, ServerBusy when the server stays overloaded (and then
+  // pauses every request for BACKOFF.busy), ArcticShiftError (with `status`) for anything
+  // else, and Aborted once stopped.
+  //
+  // `group` ({failed}) ties the parts of one split together: once one gives up on a
+  // server that won't answer (refusesMore, or a 5xx), the parts not yet sent are dropped
+  // with that error instead of each making its own retries.
+  async _get(path, params, group = null) {
+    try {
+      return await this._request(path, params, group);
+    } catch (err) {
+      // In a split, a server error that outlasts its retries counts too: the parts ask the
+      // same endpoint, so the rest would fail the same way. (Outside a split a 5xx isn't
+      // refusesMore: a failed search still falls back to the aggregate, another endpoint.)
+      if (group && !group.failed && (refusesMore(err) || err.status >= 500)) Object.assign(group, { failed: true, error: err });
+      throw err;
+    }
+  }
+
+  async _request(path, params, group) {
     const url = new URL(path, this.baseUrl);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
     url.searchParams.set("meta-app", APP_TAG);
@@ -310,9 +339,10 @@ export class ArcticShiftClient {
       let resp;
       let payload;
       try {
-        ({ resp, payload } = await this._attempt(url.toString()));
+        ({ resp, payload } = await this._attempt(url.toString(), group));
       } catch (err) {
         this._checkAbort();
+        if (err instanceof ArcticShiftError) throw err; // our own (a dropped split part), not the network
         // Browsers surface CORS-less error responses (e.g. some 429s) as network
         // errors, so back off generously.
         if (++failures > this.maxRetries) {
@@ -341,15 +371,26 @@ export class ArcticShiftClient {
         // Undocumented: under load the server answers 422 "Timeout. Maybe slow down
         // a bit"; the same query usually succeeds after a pause. Only this request
         // waits; the lower in-flight cap is what eases the load.
-        if (++slowdowns > this.maxRetries) throw new ServerBusy(`server busy: ${error}`, resp.status);
+        // A split's parts take turns, so each would reach its own limit only after all of
+        // them had several goes: count the whole group's slow-downs too.
+        if (group) group.slowdowns = (group.slowdowns ?? 0) + 1;
+        if (++slowdowns > this.maxRetries || group?.slowdowns > this.maxRetries) {
+          // Give the server a rest: every request on the client waits, including the
+          // next users', instead of each starting its own round of retries.
+          this._pause(BACKOFF.busy, "server busy");
+          throw new ServerBusy(`server busy: ${error}`, resp.status);
+        }
         this._congested();
         await this._sleep(this._jitter(BACKOFF.slowDown(slowdowns)), "server busy");
         continue;
       }
       if (resp.status >= 500 || (resp.ok && (payload === null || typeof payload !== "object" || !("data" in payload)))) {
-        if (++failures > this.maxRetries) {
+        // Counted across a split's parts too, as with slow-downs.
+        if (group && resp.status >= 500) group.serverErrors = (group.serverErrors ?? 0) + 1;
+        if (++failures > this.maxRetries || group?.serverErrors > this.maxRetries) {
           throw new ArcticShiftError(`HTTP ${resp.status} on ${path}: ${error ?? "bad response"}`, resp.status);
         }
+        if (resp.status >= 500) this._congested();
         await this._sleep(this._jitter(BACKOFF.serverError(failures)), "server error, retrying");
         continue;
       }
@@ -464,8 +505,11 @@ export class ArcticShiftClient {
     try {
       data = await this._get("/api/users/interactions/subreddits", params);
     } catch (err) {
+      // A 4xx refusal (not a 429) means it can't answer for this user; a server that's
+      // failing (5xx), busy or unreachable fails the request instead of sending the caller
+      // on to the heavier yearly split.
       const refused = err instanceof ArcticShiftError && !(err instanceof QueryTimeout || err instanceof ServerBusy) &&
-        err.status !== null && err.status !== 429;
+        err.status !== null && err.status !== 429 && err.status < 500;
       throw refused ? new Unsupported(err.message, err.status) : err;
     }
     const counts = new Map();
@@ -486,18 +530,21 @@ export class ArcticShiftClient {
   // up to `attempts` times in all. Then, unless `split` is false (throw QueryTimeout
   // instead), it's split up: one query per subreddit in `only` when given (all we need,
   // and far cheaper for very active users), else one per year.
-  async subredditCounts(kind, author, { subreddit = null, after = null, before = null, only = null, attempts = 2, split = true } = {}) {
+  async subredditCounts(kind, author, { subreddit = null, after = null, before = null, only = null, attempts = 2, split = true, group = null } = {}) {
     for (let i = 0; i < attempts; i++) {
       try {
-        return await this._aggregate(kind, author, { subreddit, after, before });
+        return await this._aggregate(kind, author, { subreddit, after, before }, group);
       } catch (err) {
         if (!(err instanceof QueryTimeout) || (!split && i === attempts - 1)) throw err;
       }
     }
+    // One group for the whole split (and any split inside it), so a part that gives up on a
+    // busy server takes the unsent rest with it.
+    const shared = group ?? { failed: false };
     const parts = only?.length && subreddit === null
-      ? only.map((sub) => this.subredditCounts(kind, author, { subreddit: sub, after, before }))
+      ? only.map((sub) => this.subredditCounts(kind, author, { subreddit: sub, after, before, group: shared }))
       : yearlyRanges(before, this._now(), after).map(([start, end]) =>
-        this._aggregate(kind, author, { subreddit, after: start, before: end }));
+        this._aggregate(kind, author, { subreddit, after: start, before: end }, shared));
     const total = new Map();
     for (const part of await settleAll(parts)) {
       for (const [k, n] of part) total.set(k, (total.get(k) || 0) + n);
@@ -519,13 +566,13 @@ export class ArcticShiftClient {
       .filter((t) => Number.isFinite(t) && t > 0);
   }
 
-  async _aggregate(kind, author, { subreddit = null, after = null, before = null } = {}) {
+  async _aggregate(kind, author, { subreddit = null, after = null, before = null } = {}, group = null) {
     // An empty limit returns every subreddit rather than the top few.
     const params = { aggregate: "subreddit", author, limit: "" };
     if (subreddit !== null) params.subreddit = subreddit;
     if (after !== null) params.after = after;
     if (before !== null) params.before = before;
-    const data = await this._get(`/api/${kind}/search/aggregate`, params);
+    const data = await this._get(`/api/${kind}/search/aggregate`, params, group);
     const counts = new Map();
     for (const row of Array.isArray(data) ? data : []) {
       const n = Number(row?.count);
