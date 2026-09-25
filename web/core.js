@@ -271,7 +271,8 @@ export class ArcticShiftClient {
 
   // One attempt: wait for a slot and a start time, fetch and parse. Returns {resp,
   // payload} (payload is null when the body isn't JSON); throws the fetch error on a
-  // network failure, Aborted once stopped, and ServerBusy if `group` gave up meanwhile.
+  // network failure, Aborted once stopped, and the error that made `group` give up if it
+  // did meanwhile.
   async _attempt(url, group) {
     for (;;) {
       await this._acquire();
@@ -283,7 +284,7 @@ export class ArcticShiftClient {
       }
       if (group?.failed) {
         this._release();
-        throw new ServerBusy("server busy: dropped with the rest of its split");
+        throw group.error ?? new ServerBusy("server busy: dropped with the rest of its split"); // why the group gave up
       }
       // The cap may have been lowered while this request waited for its start.
       if (this._inFlight <= this._limit) break;
@@ -312,13 +313,16 @@ export class ArcticShiftClient {
   // else, and Aborted once stopped.
   //
   // `group` ({failed}) ties the parts of one split together: once one gives up on a
-  // server that won't answer (refusesMore), the parts not yet sent are dropped with
-  // ServerBusy instead of each making its own retries.
+  // server that won't answer (refusesMore, or a 5xx), the parts not yet sent are dropped
+  // with that error instead of each making its own retries.
   async _get(path, params, group = null) {
     try {
       return await this._request(path, params, group);
     } catch (err) {
-      if (group && refusesMore(err)) group.failed = true;
+      // In a split, a server error that outlasts its retries counts too: the parts ask the
+      // same endpoint, so the rest would fail the same way. (Outside a split a 5xx isn't
+      // refusesMore: a failed search still falls back to the aggregate, another endpoint.)
+      if (group && !group.failed && (refusesMore(err) || err.status >= 500)) Object.assign(group, { failed: true, error: err });
       throw err;
     }
   }
@@ -381,7 +385,9 @@ export class ArcticShiftClient {
         continue;
       }
       if (resp.status >= 500 || (resp.ok && (payload === null || typeof payload !== "object" || !("data" in payload)))) {
-        if (++failures > this.maxRetries) {
+        // Counted across a split's parts too, as with slow-downs.
+        if (group && resp.status >= 500) group.serverErrors = (group.serverErrors ?? 0) + 1;
+        if (++failures > this.maxRetries || group?.serverErrors > this.maxRetries) {
           throw new ArcticShiftError(`HTTP ${resp.status} on ${path}: ${error ?? "bad response"}`, resp.status);
         }
         if (resp.status >= 500) this._congested();

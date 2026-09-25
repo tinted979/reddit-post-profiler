@@ -488,6 +488,18 @@ test("once one part of a split gives up on a busy server, the parts not yet sent
   assert.ok(parts.length <= 2 * (client.maxRetries + 1), `${parts.length} part requests`);
 });
 
+test("a split whose parts keep getting server errors gives up together too", async () => {
+  const { client, calls, clock } = makeClient((u) => {
+    if (!u.searchParams.has("after")) return json({ error: "Query timed out" });
+    return json({ error: "Internal error" }, 500);
+  });
+  clock.t = Date.UTC(2024, 5, 1) / 1000; // about 20 yearly parts
+  const err = await client.subredditCounts("comments", "busy").catch((e) => e);
+  assert.ok(err instanceof ArcticShiftError && err.status === 500, String(err));
+  const parts = calls.filter((u) => u.searchParams.has("after"));
+  assert.ok(parts.length <= 2 * (client.maxRetries + 1), `${parts.length} part requests`);
+});
+
 test("a server error lowers the in-flight cap like a slow-down", async () => {
   let n = 0;
   const { client } = makeClient(() => (++n === 1 ? json({ error: "Bad gateway" }, 502) : json({ data: [] })), { maxInFlight: 4 });
