@@ -191,8 +191,11 @@ export class ArcticShiftClient {
     this._inFlight = 0;
     this._waiters = [];
     this._streak = 0;
-    // Requests actually sent, for the status line.
+    // Requests actually sent, for the status line, and the same by what each was for
+    // (requestLabel) and the retries among them by reason, for the request breakdown.
     this.requests = 0;
+    this.byLabel = new Map();
+    this.retries = new Map();
     // On Stop, release everything queued for a slot so it can see the abort.
     signal?.addEventListener("abort", () => {
       const waiters = this._waiters;
@@ -286,7 +289,7 @@ export class ArcticShiftClient {
   // payload} (payload is null when the body isn't JSON); throws the fetch error on a
   // network failure, Aborted once stopped, and the error that made `group` give up if it
   // did meanwhile.
-  async _attempt(url, group) {
+  async _attempt(url, group, label) {
     for (;;) {
       await this._acquire();
       try {
@@ -305,6 +308,7 @@ export class ArcticShiftClient {
     }
     try {
       this.requests++;
+      this.byLabel.set(label, (this.byLabel.get(label) ?? 0) + 1);
       const resp = await this._fetch(url, { signal: this.signal ?? undefined });
       let payload = null;
       try {
@@ -340,7 +344,12 @@ export class ArcticShiftClient {
     }
   }
 
+  _retried(reason) {
+    this.retries.set(reason, (this.retries.get(reason) ?? 0) + 1);
+  }
+
   async _request(path, params, group) {
+    const label = requestLabel(path, params);
     const url = new URL(path, this.baseUrl);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
     url.searchParams.set("meta-app", APP_TAG);
@@ -352,7 +361,7 @@ export class ArcticShiftClient {
       let resp;
       let payload;
       try {
-        ({ resp, payload } = await this._attempt(url.toString(), group));
+        ({ resp, payload } = await this._attempt(url.toString(), group, label));
       } catch (err) {
         this._checkAbort();
         if (err instanceof ArcticShiftError) throw err; // our own (a dropped split part), not the network
@@ -362,6 +371,7 @@ export class ArcticShiftClient {
           throw new ArcticShiftError(`network error on ${path}: ${err.message ?? err}`);
         }
         this._congested();
+        this._retried("network error");
         this._pause(BACKOFF.network(failures), "network error, retrying");
         continue;
       }
@@ -374,6 +384,7 @@ export class ArcticShiftClient {
         // expose it via CORS, so browsers wait 30 s.
         const reset = Number(resp.headers.get("X-RateLimit-Reset"));
         this._congested();
+        this._retried("rate limited");
         this._pause(Number.isFinite(reset) && reset > 0 ? reset + 1 : BACKOFF.rateLimit, "rate limited");
         continue;
       }
@@ -394,6 +405,7 @@ export class ArcticShiftClient {
           throw new ServerBusy(`server busy: ${error}`, resp.status);
         }
         this._congested();
+        this._retried("server busy");
         await this._sleep(this._jitter(BACKOFF.slowDown(slowdowns)), "server busy");
         continue;
       }
@@ -404,6 +416,7 @@ export class ArcticShiftClient {
           throw new ArcticShiftError(`HTTP ${resp.status} on ${path}: ${error ?? "bad response"}`, resp.status);
         }
         if (resp.status >= 500) this._congested();
+        this._retried("server error");
         await this._sleep(this._jitter(BACKOFF.serverError(failures)), "server error, retrying");
         continue;
       }
@@ -495,7 +508,11 @@ export class ArcticShiftClient {
       const query = { ...params, limit: pageSize, sort: "asc" };
       if (cursor !== null) query.after = cursor;
       const page = await this._get(path, query);
-      if (!Array.isArray(page) || !page.length) return true;
+      // An empty page is yielded too, so a caller counting pages counts every answer.
+      if (!Array.isArray(page) || !page.length) {
+        yield [];
+        return true;
+      }
       const fresh = [];
       for (const row of page) {
         if (seen.has(row.id)) continue;
@@ -606,6 +623,27 @@ export class ArcticShiftClient {
   }
 }
 
+// What an API request is for, from its path and parameters, for the scan's request
+// breakdown (format.js breakdownLines gives each label its words). A shape this doesn't
+// know is labelled with its path.
+export function requestLabel(path, params = {}) {
+  const has = (k) => params[k] !== undefined && params[k] !== null;
+  if (path === "/api/posts/ids") return "post";
+  if (path === "/api/comments/tree") return "thread tree";
+  if (path === "/api/users/interactions/subreddits") return "interactions";
+  const m = /^\/api\/(posts|comments)\/search(\/aggregate)?$/.exec(path);
+  if (!m) return path;
+  const [, kind, aggregate] = m;
+  if (aggregate) {
+    if (has("subreddit") && has("before")) return `before ${kind}, count`;
+    // Split up: per subreddit (a scan with `only`) or per year.
+    return has("subreddit") || has("before") ? `lifetime ${kind}, split` : `lifetime ${kind}`;
+  }
+  if (has("link_id")) return "thread pages";
+  if (has("author")) return `before ${kind}`;
+  return has("subreddit") ? `recent ${kind}` : path;
+}
+
 // One [after, before] pair per calendar year (UTC), from the start of the archive or
 // from `after`, up to `before`, to send to the API as they are: both bounds are exclusive
 // there, so each year's `after` is a second before it starts. With no `before`, the last
@@ -680,7 +718,8 @@ const TAIL_FIELDS = { posts: "id,author,created_utc", comments: "id,author,creat
 // rate-limiting server, or no connection, fails the scan, since asking per user would only
 // send it more requests; another API error, such as a query timing out, leaves the tail
 // where it got to. `now` gives epoch seconds: a tail that reaches the end is complete up to
-// when it started.
+// when it started. Returns what each fetch did, for the request breakdown: [{subreddit,
+// kind, pages, budget, reachedEnd, through, error}], empty when nothing needed fetching.
 export async function fetchTails(client, dumps, post, { only = null, budget = tailBudget(post.numComments), now = () => Date.now() / 1000 } = {}) {
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
   let subs = [];
@@ -690,14 +729,18 @@ export async function fetchTails(client, dumps, post, { only = null, budget = ta
     const c = dumps.covers(post.subreddit);
     if (c && post.createdUtc - 1 > Math.min(c.postsThrough, c.commentsThrough)) subs = [post.subreddit];
   }
+  const report = [];
   for (const sub of subs) {
-    await settleAll(KINDS.map((kind) => fetchTail(client, dumps, sub, kind, budget, Math.trunc(now()))));
+    report.push(...await settleAll(KINDS.map((kind) => fetchTail(client, dumps, sub, kind, budget, Math.trunc(now())))));
   }
+  return report.filter(Boolean);
 }
 
 async function fetchTail(client, dumps, sub, kind, budget, started) {
   const name = dumps.covers(sub)?.name;
-  if (!name) return;
+  if (!name) return null;
+  const report = { subreddit: name, kind, pages: 0, budget, reachedEnd: false, through: null, error: null };
+  const coveredTo = () => dumps.covers(sub)?.[kind === "posts" ? "postsThrough" : "commentsThrough"] ?? null;
   let newest = -Infinity;
   const pages = client.iterAscending(
     `/api/${kind}/search`,
@@ -708,16 +751,21 @@ async function fetchTail(client, dumps, sub, kind, budget, started) {
   try {
     let next;
     while (!(next = await pages.next()).done) {
+      report.pages++;
       dumps.addTail(kind, sub, next.value, { now: started });
       for (const row of next.value) newest = Math.max(newest, Math.trunc(Number(row?.created_utc)) || -Infinity);
     }
     // A tail cut short covers up to the last whole second it reached, but never past now.
     const partial = { through: Math.min(newest - 1, started), current: false };
     dumps.endTail(kind, sub, next.value ? { through: started, current: true } : partial);
+    report.reachedEnd = Boolean(next.value);
   } catch (err) {
     dumps.endTail(kind, sub, { through: Math.min(newest - 1, started), current: false });
     if (!(err instanceof ArcticShiftError) || refusesMore(err)) throw err;
+    report.error = err.message;
   }
+  report.through = coveredTo();
+  return report;
 }
 
 // Usernames as typed into "Skip users": "u/name", "/u/name" and profile links become "name";

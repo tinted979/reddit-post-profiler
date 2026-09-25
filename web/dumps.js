@@ -39,7 +39,7 @@ async function urlFile(url, byteLength, signal, timeoutMs = 20000, { fetchFn = (
   const fetchWithTimeout = (input, init) => {
     const timeout = AbortSignal.timeout(timeoutMs);
     const merged = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
-    onRequest?.();
+    onRequest?.(input);
     return fetchFn(input, { ...init, signal: merged });
   };
   return cachedAsyncBuffer(await asyncBufferFromUrl({
@@ -138,6 +138,7 @@ export class DumpSource {
   // `onRequest` is called once per request sent to the archive server, the manifest's
   // included (even when it leads to null), so the page can count them.
   // `tails` is the tab's TailStore, so a scan picks up where the last one's tail ended.
+  // `onRequest` gets each request's URL.
   static async open({
     baseUrl = DUMPS_URL, fetchFn = (...a) => globalThis.fetch(...a), openFile = urlFile,
     signal = null, timeoutMs = 5000, readTimeoutMs = 20000, onRequest = null, tails = new TailStore(),
@@ -145,7 +146,7 @@ export class DumpSource {
     if (signal?.aborted) throw new Aborted("stopped");
     try {
       const timeout = AbortSignal.timeout(timeoutMs);
-      onRequest?.();
+      onRequest?.(`${baseUrl}/manifest.json`);
       const resp = await fetchFn(`${baseUrl}/manifest.json`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
       if (!resp.ok) return null;
       const subs = parseManifest(await resp.json());

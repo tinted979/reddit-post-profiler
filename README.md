@@ -250,7 +250,10 @@ successes.
 Archive file reads are byte-range requests to the R2 bucket, served through Cloudflare's
 cache, so they aren't paced like Arctic Shift's. The status line counts both kinds while a
 scan runs and when it ends ("… 120 Arctic Shift requests and 15 archive requests"), and
-saved scans keep both counts.
+saved scans keep both counts. When a scan ends, *Request breakdown* under the status line
+lists the Arctic Shift requests by what they were for (adding up to the total), any retries,
+how far each fetch of a subreddit's recent activity got, and the archive requests by file, so a
+scan's cost can be checked against what it should have asked.
 
 ## Development
 
