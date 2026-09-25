@@ -146,3 +146,10 @@ test("breakdownLines says when there was no recent-activity fetch, and how a tai
   assert.ok(ended.includes("r/Python posts since the archive files: 1 of 2 pages, reached the present"));
   assert.ok(ended.includes("r/Python comments since the archive files: 0 of 2 pages, stopped: Query timed out; complete up to 2023-11-14 18:26 UTC"));
 });
+
+test("archiveFileName names the file an archive request is for", async () => {
+  const { archiveFileName } = await import("../dumps.js");
+  assert.equal(archiveFileName("https://rpp-db.tinted979.dev/manifest.json"), "manifest");
+  assert.equal(archiveFileName("https://rpp-db.tinted979.dev/r/python/2026-09-24/comments_by_link.parquet"), "comments_by_link");
+  assert.equal(archiveFileName(new URL("https://x.test/r/a/v1/posts_by_author.parquet")), "posts_by_author");
+});

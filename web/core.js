@@ -499,7 +499,9 @@ export class ArcticShiftClient {
   // start the next page one second before the last one ended (rows can share a second) and
   // dedupe by id. With pageSize "auto" the server picks the page size, so only an empty
   // page, or two in a row with nothing new, marks the end; with a number, so does a short
-  // page. After `maxPages` pages it stops early. Returns true if it reached the end.
+  // page. An empty last page is yielded too (as []), so a caller counting pages counts every
+  // answer, as the budget does. After `maxPages` pages it stops early. Returns true if it
+  // reached the end.
   async *iterAscending(path, { after = null, ...params }, pageSize = "auto", { maxPages = Infinity } = {}) {
     const seen = new Set();
     let cursor = after;
@@ -508,7 +510,6 @@ export class ArcticShiftClient {
       const query = { ...params, limit: pageSize, sort: "asc" };
       if (cursor !== null) query.after = cursor;
       const page = await this._get(path, query);
-      // An empty page is yielded too, so a caller counting pages counts every answer.
       if (!Array.isArray(page) || !page.length) {
         yield [];
         return true;

@@ -28,6 +28,12 @@ const KINDS = ["posts", "comments"];
 // Accounts the archive leaves out, as tools/build_dumps.py does.
 const SKIPPED = new Set(["[deleted]", "[removed]", "automoderator"]);
 
+// The file an archive request (`onRequest`'s URL) is for, for the request breakdown:
+// "manifest", or a Parquet file's name without its extension.
+export function archiveFileName(url) {
+  return String(url).split("/").pop().replace(/\.(parquet|json)$/, "");
+}
+
 // The archive files can't answer (a network error, a bad file). Callers use the API.
 export class DumpUnavailable extends Error {}
 

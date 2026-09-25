@@ -40,7 +40,7 @@ import {
 import { openCache, openScans } from "./cache.js";
 import { breakdownLines, describeRule, explain, formatDuration, formatEta, plural, requestsText, timelineText, tookText } from "./format.js";
 import { FIELD_IDS, mergeOptions, optionsSummary, parseMinCount, parseOptions, readShareParams, scanOptionNotes, shareParams } from "./options.js";
-import { DumpSource, TailStore } from "./dumps.js";
+import { DumpSource, TailStore, archiveFileName } from "./dumps.js";
 import { LinkQueue, MAX_WAITING, QUEUE_CONCURRENCY, QUEUE_KEY } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
@@ -603,7 +603,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
   const archiveByFile = new Map();
   const countArchive = (url) => {
     archiveRequests++;
-    const file = String(url).split("/").pop().replace(/\.(parquet|json)$/, "");
+    const file = archiveFileName(url);
     archiveByFile.set(file, (archiveByFile.get(file) ?? 0) + 1);
   };
   // What each recent-activity fetch did (fetchTails), for the request breakdown.
