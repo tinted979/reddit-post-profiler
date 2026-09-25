@@ -21,7 +21,9 @@ Arctic Shift's per-subreddit dumps are served as static Parquet on Cloudflare R2
 
 - `tools/build_dumps.py` (Python, DuckDB via `uv`) turns a subreddit's posts and comments JSONL into `posts_by_author`, `comments_by_author` (lowercase author, `created_utc`; sorted by author) and `comments_by_link` (`link_id` without `t3_`, author as written, `created_utc`), plus `manifest.json` (format version, and per subreddit the build directory and `posts_to_utc`/`comments_to_utc`, the times the data runs to). It keeps no text, drops deleted accounts and AutoModerator, and de-duplicates by id. Builds go in `r/<sub>/<version>/` and are never overwritten; only the manifest changes.
 - `tools/fetch_subreddit.mjs` (Node 22+) fetches one subreddit's posts or comments after a time, for the scheduled sync (docs/adr/0005).
-  - **How it asks:** through the page's `ArcticShiftClient` (its pacing and backoff), with `delay` 1 s, one request in flight, `appTag` `reddit-post-profiler-archive`, a User-Agent, and a budget in pages.
+  - **How it asks:** the same search as Arctic Shift's download tool, `/api/{kind}/search?subreddit&after&before&sort=asc&limit=auto`, but with only the `fields` the build reads.
+    - `limit=auto` is 100–1000 rows a page by the server's capacity (API README), so a page under 100 rows ends it (`iterAscending`'s `shortBelow`).
+    - It goes through the page's `ArcticShiftClient` (its pacing and backoff): `delay` 1 s, one request in flight, `appTag` `reddit-post-profiler-archive`, a User-Agent, and a budget in pages.
   - **What it writes:** as JSON lines in the shape `build_dumps.py` reads, exactly the rows from `--after` to `complete_through`, with a result file beside them. `complete_through` is the second before `--before` once it reached the end; otherwise it's the second before its newest row, since that second may be incomplete. `--before` defaults to a minute ago (`SETTLE`) and may not be later.
   - **Untrusted rows:** only checked fields are copied.
   - **Errors:** an API error stops it with what it had (exit 3), with `busy` set for a busy or rate-limiting server or no connection. It never escalates.

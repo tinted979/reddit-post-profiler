@@ -95,6 +95,7 @@ This merges two proposals:
   - The API: start from an empty base and page ascending, one budget per run. Each run publishes a correct partial build (complete from the start up to its cutoff).
   - An import: build locally from download-tool JSONL, then `upload_dumps.sh --only`.
 - **The fetcher,** `tools/fetch_subreddit.mjs` (#78), runs the page's `ArcticShiftClient` in Node:
+  - the download tool's search, `/api/{kind}/search?subreddit&after&before&sort=asc&limit=auto`, but with only the `fields` the build reads. `auto` gives 100–1000 rows a page by the server's capacity (API README), so a page under 100 rows is the end;
   - `delay: 1`, one request in flight;
   - `appTag: "reddit-post-profiler-archive"`, and a User-Agent naming the repository;
   - a budget in pages.

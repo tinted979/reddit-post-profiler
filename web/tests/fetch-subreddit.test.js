@@ -26,9 +26,11 @@ const COMMENTS = Array.from({ length: 250 }, (_, i) => ({
 const POSTS = COMMENTS.slice(0, 40).map((c, i) => ({ id: `p${i.toString(36)}`, author: c.author, created_utc: c.created_utc, subreddit: "Python" }));
 
 // A search endpoint over `rows`: subreddit (any case), after and before (both exclusive),
-// oldest first, `limit` rows, only the `fields` asked for. `fail(n, url)` can answer request n
-// (from 1) instead. Records each request's URL, User-Agent, clock time and requests in flight.
-function fakeApi({ posts = POSTS, comments = COMMENTS, clock = null, fail = () => null } = {}) {
+// oldest first, `limit` rows, only the `fields` asked for. For `limit=auto` the real server
+// answers 100-1000 rows by its capacity (API README): here `autoSize`, a number or a function of
+// the request number (from 1). `fail(n, url)` can answer request n instead. Records each
+// request's URL, User-Agent, clock time and requests in flight.
+function fakeApi({ posts = POSTS, comments = COMMENTS, clock = null, autoSize = 100, fail = () => null } = {}) {
   const requests = [];
   let inFlight = 0;
   const fetchFn = async (url, init = {}) => {
@@ -44,7 +46,7 @@ function fakeApi({ posts = POSTS, comments = COMMENTS, clock = null, fail = () =
       const q = u.searchParams;
       const after = q.has("after") ? Number(q.get("after")) : -Infinity;
       const before = q.has("before") ? Number(q.get("before")) : Infinity;
-      const limit = q.get("limit") === "auto" ? 100 : Number(q.get("limit"));
+      const limit = q.get("limit") === "auto" ? (typeof autoSize === "function" ? autoSize(requests.length) : autoSize) : Number(q.get("limit"));
       const fields = q.get("fields")?.split(",");
       const data = (kind === "posts" ? posts : comments)
         .filter((r) => r.subreddit.toLowerCase() === q.get("subreddit").toLowerCase() && r.created_utc > after && r.created_utc < before)
@@ -94,7 +96,7 @@ test("the sync's client sends one request at a time, a second apart, tagged as t
     assert.equal(r.url.searchParams.get("fields"), kind === "comments" ? "id,author,created_utc,link_id" : "id,author,created_utc");
     assert.deepEqual(
       ["subreddit", "before", "sort", "limit"].map((k) => r.url.searchParams.get(k)),
-      ["Python", "2000", "asc", "100"],
+      ["Python", "2000", "asc", "auto"],
     );
     assert.equal(r.inFlight, 1);
     if (i) assert.ok(r.at - requests[i - 1].at >= 1, `request ${i} came ${r.at - requests[i - 1].at} s after the last`);
@@ -115,6 +117,37 @@ test("a fetch that reaches the end has every row between after and before, and i
   assert.deepEqual(rows[0], { id: "c0", author: "user0", created_utc: 1000, subreddit: "Python", link_id: "t3_abc" });
   // Each page starts a second before the last one ended, so a second split across pages is whole.
   assert.deepEqual(requests.map((r) => r.url.searchParams.get("after")), ["999", "1032", "1065"]);
+});
+
+test("pages are as large as the server gives: 100-1000 rows, as the download tool asks for", async () => {
+  const many = Array.from({ length: 2500 }, (_, i) => ({ ...COMMENTS[0], id: `m${i.toString(36)}`, created_utc: 1000 + Math.floor(i / 2) }));
+  const { fetchFn, requests } = fakeApi({ comments: many, autoSize: 1000 });
+  const { rows, result } = await fetchSubreddit(archiveClient({ fetchFn, ...fakeClock() }), { ...WINDOW, before: 3000 });
+  assert.deepEqual(rows.map((r) => r.id), many.map((r) => r.id));
+  // Pages of 1000, 1000 and 504 rows, then one under 100: 4 requests, where 100-row pages take 26.
+  assert.deepEqual([result.pages, result.requests, result.reached_end, result.complete_through], [4, 4, true, 2999]);
+  assert.ok(requests.every((r) => r.url.searchParams.get("limit") === "auto"));
+});
+
+test("a page the server sized at its capacity isn't taken for the end; one under 100 rows is", async () => {
+  // Pages of 100, 350 and 1000 rows while more remain, then what's left.
+  const sizes = [100, 350, 1000, 1000];
+  const many = Array.from({ length: 1500 }, (_, i) => ({ ...COMMENTS[0], id: `v${i.toString(36)}`, created_utc: 1000 + Math.floor(i / 2) }));
+  const { fetchFn, requests } = fakeApi({ comments: many, autoSize: (n) => sizes[n - 1] });
+  const { rows, result } = await fetchSubreddit(archiveClient({ fetchFn, ...fakeClock() }), { ...WINDOW, before: 3000 });
+  assert.deepEqual(rows.map((r) => r.id), many.map((r) => r.id));
+  assert.equal(result.reached_end, true);
+  assert.deepEqual(requests.map((r) => r.url.searchParams.get("after")), ["999", "1048", "1222", "1721"]);
+});
+
+test("the page's own paging with limit=auto still ends only on an empty page", async () => {
+  // shortBelow is the fetcher's opt-in; the page's thread paging keeps its old end rule.
+  const { fetchFn, requests } = fakeApi({ autoSize: 1000 });
+  const client = new ArcticShiftClient({ fetchFn, delay: 0 });
+  const rows = [];
+  for await (const page of client.iterAscending("/api/comments/search", { subreddit: "Python", after: 999, before: 2000 })) rows.push(...page);
+  assert.equal(rows.length, 250);
+  assert.equal(requests.length, 3); // 250 rows, the last second again (nothing new), then an empty page
 });
 
 test("an empty window ends on its first page, complete to the second before `before`", async () => {

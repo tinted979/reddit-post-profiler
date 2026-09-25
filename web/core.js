@@ -504,10 +504,11 @@ export class ArcticShiftClient {
   // start the next page one second before the last one ended (rows can share a second) and
   // dedupe by id. With pageSize "auto" the server picks the page size, so only an empty
   // page, or two in a row with nothing new, marks the end; with a number, so does a short
-  // page. An empty last page is yielded too (as []), so a caller counting pages counts every
-  // answer, as the budget does. After `maxPages` pages it stops early. Returns true if it
-  // reached the end.
-  async *iterAscending(path, { after = null, ...params }, pageSize = "auto", { maxPages = Infinity } = {}) {
+  // page. `shortBelow` makes a page of fewer rows the end with "auto" too: the API's README
+  // says "auto" answers 100-1000 rows (the archive sync's fetcher passes 100). An empty last
+  // page is yielded too (as []), so a caller counting pages counts every answer, as the
+  // budget does. After `maxPages` pages it stops early. Returns true if it reached the end.
+  async *iterAscending(path, { after = null, ...params }, pageSize = "auto", { maxPages = Infinity, shortBelow = typeof pageSize === "number" ? pageSize : 0 } = {}) {
     const seen = new Set();
     let cursor = after;
     let stale = 0;
@@ -526,7 +527,7 @@ export class ArcticShiftClient {
         fresh.push(row);
       }
       yield fresh;
-      if (typeof pageSize === "number" && page.length < pageSize) return true;
+      if (page.length < shortBelow) return true;
       stale = fresh.length ? 0 : stale + 1;
       if (stale >= 2) return true;
       if (pages >= maxPages) return false;

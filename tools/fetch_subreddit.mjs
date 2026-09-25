@@ -12,7 +12,7 @@
 //   --after   epoch seconds, exclusive; leave it out to start from the subreddit's first row
 //   --before  epoch seconds, exclusive; default a minute ago (SETTLE), and never later, so
 //             what the search returns has had time to be archived
-//   --budget  the most pages (requests, not counting retries) to fetch; 100 rows a page
+//   --budget  the most pages (requests, not counting retries) to fetch; 100-1000 rows a page
 //
 // --out gets the rows as JSON lines, {id, author, created_utc, subreddit[, link_id]}, the shape
 // build_dumps.py reads: exactly the rows after `after` up to `complete_through`, oldest first.
@@ -46,8 +46,11 @@ export const SETTLE = 60;
 // Seconds between request starts, one request in flight: slower than the page, since nobody
 // is waiting.
 const DELAY = 1;
-// Rows per page: the search endpoint's largest `limit`, so a short page marks the end.
-const PAGE = 100;
+// Rows per page: "auto", as Arctic Shift's download tool asks, is 100-1000 rows by the server's
+// capacity (API README), where a number can't be over 100. So a page of fewer than AUTO_MIN rows
+// marks the end, without asking again for an empty one.
+const PAGE = "auto";
+const AUTO_MIN = 100;
 const MAX_BUDGET = 10_000;
 const FIELDS = { posts: "id,author,created_utc", comments: "id,author,created_utc,link_id" };
 const SUBREDDIT_NAME = /^\w{2,21}$/;
@@ -123,7 +126,7 @@ export async function fetchSubreddit(client, { subreddit, kind, after = null, be
   let reachedEnd = false;
   let error = null;
   let busy = false;
-  const iter = client.iterAscending(`/api/${kind}/search`, { subreddit, after, before, fields: FIELDS[kind] }, PAGE, { maxPages: budget });
+  const iter = client.iterAscending(`/api/${kind}/search`, { subreddit, after, before, fields: FIELDS[kind] }, PAGE, { maxPages: budget, shortBelow: AUTO_MIN });
   try {
     let next;
     while (!(next = await iter.next()).done) {
