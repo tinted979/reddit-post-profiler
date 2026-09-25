@@ -24,7 +24,6 @@ const filesThrough = (s, kind) => (kind === "posts" ? s.postsThrough : s.comment
 const SUBREDDIT = /^\w{2,21}$/;
 // How far past the page's clock a manifest's cutoffs may be (clock skew), in seconds.
 const CLOCK_SLACK = 86400;
-const KINDS = ["posts", "comments"];
 // Accounts the archive leaves out, as tools/build_dumps.py does.
 const SKIPPED = new Set(["[deleted]", "[removed]", "automoderator"]);
 
@@ -92,11 +91,11 @@ export function parseManifest(data, now = Date.now() / 1000) {
 // Activity in covered subreddits after their files end, fetched by core.js's fetchTails once
 // per scan rather than once per commenter, and kept for the tab so the next scan asks only
 // for what's new. Per subreddit and kind: the files' cutoff it follows (`base`; a new build
-// starts afresh), how far it's complete (`through`), the ids seen (to drop repeats), each
-// author's times, and for comments, each thread's ({author, created_utc}).
+// starts afresh), how far it's complete (`through`), the ids seen (to drop repeats), and each
+// author's times.
 export class TailStore {
   constructor() {
-    this._tails = new Map(); // "kind|sub" -> {base, through, ids, times, links}
+    this._tails = new Map(); // "kind|sub" -> {base, through, ids, times}
   }
 
   // The tail following files trusted to `base`, or null.
@@ -110,7 +109,7 @@ export class TailStore {
   open(kind, key, base) {
     let t = this.find(kind, key, base);
     if (!t) {
-      t = { base, through: base, ids: new Set(), times: new Map(), links: new Map() };
+      t = { base, through: base, ids: new Set(), times: new Map() };
       this._tails.set(`${kind}|${key}`, t);
     }
     return t;
@@ -136,7 +135,6 @@ export class DumpSource {
     this._files = new Map(); // path -> Promise<{file, metadata}>
     this._lookups = new Map(); // "kind|sub|author" -> Promise<number[]>, for this scan
     this._tails = tails;
-    this._current = new Set(); // "kind|sub" tails that reached the present during this scan
   }
 
   // The archive, or null if there's no usable manifest (missing, unreachable, slow,
@@ -189,13 +187,6 @@ export class DumpSource {
     return { name: s.name, postsThrough: through("posts"), commentsThrough: through("comments") };
   }
 
-  // True when both kinds' tails reached the present during this scan: the files and tail
-  // then hold everything in the subreddit, so nothing about it needs asking per user.
-  isCurrent(subreddit) {
-    const key = String(subreddit).toLowerCase();
-    return !this.broken && this._subs.has(key) && KINDS.every((kind) => this._current.has(`${kind}|${key}`));
-  }
-
   // Where a covered subreddit's next tail fetch starts (`after`, exclusive): where the files
   // end, or an hour before the tab's tail was complete to, in case its newest rows were
   // archived late (the rows fetched again are dropped by id).
@@ -206,7 +197,7 @@ export class DumpSource {
     return t && t.through > base ? Math.max(base, t.through - INGEST_LAG) : base;
   }
 
-  // Adds a page of fetched rows ({id, author, created_utc, link_id}) to a subreddit's tail.
+  // Adds a page of fetched rows ({id, author, created_utc}) to a subreddit's tail.
   // The API's rows are untrusted: ones without an id, author or time, by the accounts the
   // archive leaves out, from before the files end, dated more than a day past `now` (epoch
   // seconds, as a manifest's cutoffs are checked), or already seen are dropped.
@@ -223,22 +214,15 @@ export class DumpSource {
       const times = t.times.get(author.toLowerCase());
       if (times) times.push(time);
       else t.times.set(author.toLowerCase(), [time]);
-      if (kind === "comments" && typeof row.link_id === "string") {
-        const link = row.link_id.replace(/^t3_/, "");
-        const thread = t.links.get(link);
-        if (thread) thread.push({ author, created_utc: time });
-        else t.links.set(link, [{ author, created_utc: time }]);
-      }
     }
   }
 
   // Records how far a subreddit's tail is complete (`through`, epoch seconds; it never moves
-  // back), and whether it reached the present during this scan (`current`).
-  endTail(kind, subreddit, { through, current }) {
+  // back).
+  endTail(kind, subreddit, { through }) {
     const key = String(subreddit).toLowerCase();
     const t = this._tails.open(kind, key, filesThrough(this._subs.get(key), kind));
     if (through > t.through) t.through = through;
-    if (current) this._current.add(`${kind}|${key}`);
   }
 
   // Creation times (epoch seconds, oldest first) of every post or comment `author` has in
@@ -283,17 +267,16 @@ export class DumpSource {
     }
   }
 
-  // The comments under post `linkId` ({author, created_utc}, author as written): the thread's
-  // rows in the subreddit's comments_by_link file, and in its tail (once there's a tail, the
-  // file counts only up to where it's trusted, as in `timestamps`). Throws Aborted once
-  // stopped, else DumpUnavailable: when there's no such file, or when it can't be read, which
-  // switches the source off like any failed read.
+  // The comments under post `linkId` ({author, created_utc}, author as written) in the
+  // subreddit's comments_by_link file, up to where the files are trusted (`covers(…,
+  // {withTail: false}).commentsThrough`); the caller asks the API for the rest. Throws
+  // Aborted once stopped, else DumpUnavailable: when there's no such file, or when it can't
+  // be read, which switches the source off like any failed read.
   async threadRows(subreddit, linkId) {
     const key = String(subreddit).toLowerCase();
     const s = this._subs.get(key);
     const f = s?.files.link;
     if (!f || this.broken) throw new DumpUnavailable(`no usable thread file for r/${subreddit}`);
-    const tail = this._tails.find("comments", key, s.commentsThrough);
     try {
       const { file, metadata } = await this._race(this._open(f));
       const rows = await this._race(parquetQuery({
@@ -302,8 +285,8 @@ export class DumpSource {
       this.threadReads++;
       const saved = rows
         .map((r) => ({ author: r.author, created_utc: Number(r.created_utc) }))
-        .filter((r) => typeof r.author === "string" && r.author && isTime(r.created_utc) && (!tail || r.created_utc <= tail.base));
-      return [...saved, ...(tail?.links.get(String(linkId)) ?? [])];
+        .filter((r) => typeof r.author === "string" && r.author && isTime(r.created_utc) && r.created_utc <= s.commentsThrough);
+      return saved;
     } catch (err) {
       if (this.signal?.aborted) throw new Aborted("stopped");
       this.broken = true;

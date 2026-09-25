@@ -28,6 +28,8 @@ const COMMENTS_THROUGH = 1699990000 - INGEST_LAG;
 const ALICE_FILE_COMMENTS = [1698000000, 1699000000, 1699500000];
 const NOW = 1_700_100_000;
 const POST = { id: "abc123", author: "op_user", subreddit: "Python", createdUtc: 1_700_000_000, title: "t", numComments: 40 };
+// Counts stop at the post (docs/adr/0006): a tail that gets there is complete to just before it.
+const TO_POST = POST.createdUtc - 1;
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -57,10 +59,12 @@ const isTail = (u) => u.pathname.endsWith("/search") && u.searchParams.has("subr
   !u.searchParams.has("author") && !u.searchParams.has("link_id");
 
 // Arctic Shift's answer to a subreddit-wide search over `recent[kind]`: rows after `after`
-// (exclusive), oldest first, `limit` at a time.
+// and before `before` (both exclusive), oldest first, `limit` at a time.
 function tailRows(u, recent) {
   const after = Number(u.searchParams.get("after") ?? -Infinity);
-  const rows = (recent[kindOf(u)] ?? []).filter((r) => r.created_utc > after).sort((a, b) => a.created_utc - b.created_utc);
+  const before = Number(u.searchParams.get("before") ?? Infinity);
+  const rows = (recent[kindOf(u)] ?? []).filter((r) => r.created_utc > after && r.created_utc < before)
+    .sort((a, b) => a.created_utc - b.created_utc);
   return json({ data: rows.slice(0, Number(u.searchParams.get("limit"))) });
 }
 
@@ -86,7 +90,7 @@ test("iterAscending pages from params.after, yielding each page's new rows", asy
   assert.equal(calls.length, 2, "a short page ends it");
 });
 
-test("the tail is one subreddit-wide search per kind after the files end, and extends the archive to now", async () => {
+test("the tail is one subreddit-wide search per kind after the files end, and extends the archive to the post", async () => {
   const recent = {
     comments: [
       { id: "c5", author: "Alice", created_utc: COMMENTS_THROUGH + 10, link_id: "t3_p9" },
@@ -107,9 +111,9 @@ test("the tail is one subreddit-wide search per kind after the files end, and ex
   assert.equal(byKind.comments.get("limit"), "100");
   assert.equal(byKind.comments.get("fields"), "id,author,created_utc,link_id");
   assert.equal(byKind.posts.get("fields"), "id,author,created_utc");
+  assert.equal(byKind.comments.get("before"), String(POST.createdUtc));
 
-  assert.equal(dumps.isCurrent("python"), true);
-  assert.deepEqual(dumps.covers("PYTHON"), { name: "Python", postsThrough: NOW, commentsThrough: NOW });
+  assert.deepEqual(dumps.covers("PYTHON"), { name: "Python", postsThrough: TO_POST, commentsThrough: TO_POST });
   assert.deepEqual(await dumps.timestamps("comments", "Python", "alice"), [...ALICE_FILE_COMMENTS, COMMENTS_THROUGH + 10]);
   assert.deepEqual(await dumps.timestamps("comments", "Python", "DAVE"), [POST.createdUtc - 100]);
 });
@@ -153,7 +157,6 @@ test("a budget stops the tail early: it covers up to the last whole second it sa
   const dumps = await openFixtures();
   await fetchTails(client, dumps, POST, { now: () => NOW, budget: 2 });
   assert.equal(calls.filter((u) => kindOf(u) === "comments").length, 2);
-  assert.equal(dumps.isCurrent("python"), false);
   const seen = rows[198].created_utc; // the second page repeats row 99, so it ends at row 198
   assert.equal(dumps.covers("python").commentsThrough, seen - 1);
   assert.equal((await dumps.timestamps("comments", "Python", "dave")).length, 199);
@@ -169,19 +172,18 @@ test("a query that times out leaves the files' cutoff for the per-user path", as
   const { client } = makeClient(() => json({ error: "Query timed out" }, 422));
   const dumps = await openFixtures();
   await fetchTails(client, dumps, POST, { now: () => NOW });
-  assert.equal(dumps.isCurrent("python"), false);
   assert.deepEqual(dumps.covers("python"), { name: "Python", postsThrough: POSTS_THROUGH, commentsThrough: COMMENTS_THROUGH });
 });
 
-test("no tail when the post is older than the files and the scan isn't limited to covered subreddits", async () => {
+test("no tail for a post older than the files, even in a scan limited to covered subreddits", async () => {
   const { client, calls } = makeClient((u) => tailRows(u, {}));
   const dumps = await openFixtures();
   const old = { ...POST, createdUtc: POSTS_THROUGH - 86400 };
   await fetchTails(client, dumps, old, { now: () => NOW });
   await fetchTails(client, dumps, old, { only: ["Python", "rust"], now: () => NOW }); // rust isn't covered
+  // Counts stop at the post, and the files already go past it.
+  await fetchTails(client, dumps, old, { only: ["Python"], now: () => NOW });
   assert.equal(calls.length, 0);
-  await fetchTails(client, dumps, old, { only: ["Python"], now: () => NOW }); // lifetime counts need it
-  assert.equal(calls.length, 2);
 });
 
 test("a later scan in the tab fetches only what's new, from an hour before the last one ended", async () => {
@@ -196,9 +198,10 @@ test("a later scan in the tab fetches only what's new, from an hour before the l
   const second = makeClient((u) => tailRows(u, recent));
   const dumps = await openFixtures({ tails });
   await fetchTails(second.client, dumps, next, { now: () => NOW + 600 });
-  assert.equal(second.calls.find((u) => kindOf(u) === "comments").searchParams.get("after"), String(NOW - INGEST_LAG));
+  // The first tail got to just before the first post.
+  assert.equal(second.calls.find((u) => kindOf(u) === "comments").searchParams.get("after"), String(TO_POST - INGEST_LAG));
   assert.deepEqual(await dumps.timestamps("comments", "Python", "alice"), [...ALICE_FILE_COMMENTS, COMMENTS_THROUGH + 10, NOW + 30]);
-  assert.equal(dumps.covers("python").commentsThrough, NOW + 600);
+  assert.equal(dumps.covers("python").commentsThrough, next.createdUtc - 1);
 });
 
 test("a later scan of a post the tab's tail already covers fetches nothing for it", async () => {
@@ -209,7 +212,7 @@ test("a later scan of a post the tab's tail already covers fetches nothing for i
   const dumps = await openFixtures({ tails });
   await fetchTails(second.client, dumps, POST, { now: () => NOW + 600 });
   assert.equal(second.calls.length, 0);
-  assert.equal(dumps.covers("python").commentsThrough, NOW); // before facts need nothing past it
+  assert.equal(dumps.covers("python").commentsThrough, TO_POST); // nothing past the post is needed
 });
 
 test("a new build drops the tab's tail for that subreddit", async () => {
@@ -243,7 +246,7 @@ function api({ recent = {}, lifetime = { posts: 0, comments: 0 }, userTimes = {}
   };
 }
 
-test("with a current tail, a scan limited to covered subreddits needs no requests per user", async () => {
+test("with a tail that reaches the post, a scan limited to covered subreddits needs no requests per user", async () => {
   const recent = {
     comments: [
       { id: "c5", author: "Alice", created_utc: COMMENTS_THROUGH + 10, link_id: "t3_p9" },
@@ -256,12 +259,13 @@ test("with a current tail, a scan limited to covered subreddits needs no request
   const before = calls.length;
   const p = await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps });
   assert.equal(calls.length, before, "no per-user requests");
-  assert.deepEqual([...p.subreddits], [["Python", { posts: 1, comments: 5 }]]);
+  // Counts stop at the post: the comment in the thread isn't among them.
+  assert.deepEqual([...p.subreddits], [["Python", { posts: 1, comments: 4 }]]);
   assert.deepEqual([p.targetPostsBefore, p.targetCommentsBefore], [1, 4]);
   assert.equal(p.targetTimelineComplete, true);
 });
 
-test("with a current tail, a full scan asks only for lifetime totals, with no before searches", async () => {
+test("with a tail that reaches the post, a full scan asks only for lifetime totals, with no before searches", async () => {
   const recent = { comments: [{ id: "c5", author: "alice", created_utc: COMMENTS_THROUGH + 10, link_id: "t3_p9" }] };
   const { client, calls } = makeClient(api({ recent, lifetime: { posts: 2, comments: 6 } }));
   const dumps = await openFixtures();

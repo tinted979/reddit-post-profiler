@@ -39,8 +39,6 @@ const W = 1_000_000;
 // about the gap.
 export const POST = { id: "bench1", author: "op_user", subreddit: "Python", createdUtc: 1_700_000_000, title: "bench", numComments: 10 };
 
-// When a scan fetches a covered subreddit's tail (see fetchTails): a day after the post.
-const TAIL_NOW = POST.createdUtc + DAY;
 
 // n timestamps, one a day, the newest a day before `end`.
 const daily = (n, end = POST.createdUtc) => Array.from({ length: n }, (_, i) => end - (i + 1) * DAY);
@@ -93,9 +91,9 @@ const within = (t, u) => {
 // `timeouts` makes the unfiltered lifetime aggregates time out; `tail` ({posts, comments}
 // as [{id, author, created_utc, link_id}, …]) is everyone's activity in the post's
 // subreddit, for subreddit-wide searches; `tree` ([[author, created_utc], …]) is the post's
-// comment tree. Anything else is unexpected: it's recorded in `unexpected` and answered
-// with a 400.
-export function apiModel({ user, lifetime = {}, before = {}, recent = [], timeouts = false, tail = null, tree = null }, unexpected) {
+// comment tree, and `thread` (rows like `tail`'s) its comments for a search by `link_id`.
+// Anything else is unexpected: it's recorded in `unexpected` and answered with a 400.
+export function apiModel({ user, lifetime = {}, before = {}, recent = [], timeouts = false, tail = null, tree = null, thread = null }, unexpected) {
   const refuse = (u) => {
     unexpected.push(u.toString());
     return json({ error: "unexpected request in the bench" }, 400);
@@ -103,8 +101,12 @@ export function apiModel({ user, lifetime = {}, before = {}, recent = [], timeou
   return (u) => {
     if (u.origin !== new URL(BASE_URL).origin || u.searchParams.get("meta-app") !== APP_TAG) return refuse(u);
     if (tree && u.pathname === "/api/comments/tree") {
-      if (u.searchParams.get("link_id") !== POST.id) return refuse(u);
       return json({ data: tree.map(([author, t], i) => ({ kind: "t1", data: { id: `k${i}`, author, created_utc: t, replies: "" } })) });
+    }
+    if (thread && u.pathname === "/api/comments/search" && u.searchParams.has("link_id")) {
+      const rows = thread.filter((r) => r.link_id === `t3_${u.searchParams.get("link_id")}` && within(r.created_utc, u))
+        .sort((a, b) => a.created_utc - b.created_utc);
+      return json({ data: rows.slice(0, Number(u.searchParams.get("limit"))) });
     }
     const whole = /^\/api\/(posts|comments)\/search$/.exec(u.pathname);
     if (tail && whole && !u.searchParams.has("author")) {
@@ -199,11 +201,12 @@ const TIMEOUTS = {
 };
 // alice is in the archive fixtures (1 post, 3 comments in r/Python); the API answers for
 // what came after the files end.
+// Every count stops at the post (docs/adr/0006): her comment in the thread isn't among them.
 const ARCHIVED = {
   user: "alice",
-  lifetime: { posts: [["Python", 1]], comments: [["Python", 5], ["rust", 7]] },
+  lifetime: { posts: [["Python", 1]], comments: [["Python", 4], ["rust", 7]] },
   before: { posts: [], comments: [1_699_998_000] },
-  recent: [["Python", 0, 2], ["rust", 0, 1]],
+  recent: [["Python", 0, 1], ["rust", 0, 1]],
 };
 
 // The same user once everyone's activity after the files end is fetched per scan: alice's
@@ -220,15 +223,19 @@ const ARCHIVED_TAIL = {
     ],
   },
 };
-// The same, when the files are a week behind: a busy subreddit's week of comments since they
-// end (~200 a day).
+// The same, for a post a week after the files end: a busy subreddit's week of comments
+// between them (~200 a day).
 const STALE_TAIL = {
   ...ARCHIVED_TAIL,
   tail: { posts: [], comments: [...others(1_500, 1_699_990_000, 400), ...ARCHIVED_TAIL.tail.comments.slice(-2)] },
 };
 
 // The thread as the comment tree gives it: alice's comment, the one in ARCHIVED_TAIL's tail.
-const TREE = [["alice", POST.createdUtc + 600]];
+const TREE = [["Alice", 1_699_000_000], ["carol", 1_699_990_000]];
+// Post p1 in the fixtures, older than where the files end: its thread is Alice's comment in
+// the files and carol's, in their last hour, which the thread search gets again.
+const P1 = { id: "p1", author: "Alice", createdUtc: 1_699_800_000, numComments: 2 };
+const P1_THREAD = [{ id: "c4", author: "carol", created_utc: 1_699_990_000, link_id: "t3_p1" }];
 
 // Seconds since the epoch the cache thinks it is: a month after the post, so saved
 // answers count as fetched well after the thread.
@@ -243,9 +250,9 @@ export const SCENARIOS = Object.freeze([
   { name: "archive-only", about: "a scan limited to the covered subreddit: lifetime from the files + one interactions query", world: ARCHIVED, archive: true, only: ["Python"] },
   { name: "archive-tail-only", about: "the same scan after one fetch of the subreddit's activity since the files (per scan, not per user): nothing per user", world: ARCHIVED_TAIL, archive: true, tail: true, only: ["Python"] },
   { name: "archive-tail-full", about: "a full scan of a covered post after that fetch: only the two lifetime aggregates per user", world: ARCHIVED_TAIL, archive: true, tail: true },
-  { name: "thread-tree", about: "collecting the thread's commenters without the archive: one comment tree request per scan", world: { ...ARCHIVED, tree: TREE }, thread: true },
-  { name: "archive-tail-thread", about: "the same after the tail fetch of a covered subreddit: the commenters come from the archive, with no tree request", world: { ...ARCHIVED_TAIL, tree: TREE }, archive: true, tail: true, only: ["Python"], thread: true },
-  { name: "archive-tail-stale", about: "a build a week old (1,500 comments since): the tail's pages grow with its age, but are still one set per scan", world: STALE_TAIL, archive: true, tail: true, only: ["Python"], post: { numComments: 1000 } },
+  { name: "thread-tree", about: "collecting an older post's commenters without the archive: one comment tree request per scan", world: { ...ARCHIVED, tree: TREE }, thread: true, post: P1 },
+  { name: "archive-thread", about: "the same with the archive: the thread's files plus one request for its comments after them, and nothing per user for a scan limited to it", world: { ...ARCHIVED, thread: P1_THREAD, tail: { posts: [], comments: [] } }, archive: true, tail: true, only: ["Python"], thread: true, post: P1 },
+  { name: "archive-tail-stale", about: "a post a week after the files end (1,500 comments between): the tail's pages grow with the gap, but are still one set per scan", world: STALE_TAIL, archive: true, tail: true, only: ["Python"], post: { createdUtc: 1_699_990_000 + 7 * DAY, numComments: 1000 } },
 ]);
 
 // One buildProfile on a fresh client. Returns the counts and the profile.
@@ -275,7 +282,8 @@ async function profileOnce(scenario, { cache = null, unexpected }) {
   if (scenario.archive && !dumps) throw new Error(`${scenario.name}: the fixture manifest gave no archive`);
   const post = { ...POST, ...scenario.post };
   const start = clock.now();
-  if (scenario.tail) await core.fetchTails(client, dumps, post, { only: scenario.only ?? null, now: () => TAIL_NOW });
+  // A scan's tail fetch (see fetchTails) runs a day after the post.
+  if (scenario.tail) await core.fetchTails(client, dumps, post, { only: scenario.only ?? null, now: () => post.createdUtc + DAY });
   const commenters = scenario.thread ? await core.collectCommenters(client, post, { dumps }) : null;
   const threadComments = 1;
   const profile = await buildProfile(client, scenario.world.user, threadComments, post, {

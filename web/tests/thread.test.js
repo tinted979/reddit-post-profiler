@@ -1,6 +1,6 @@
-// A covered post's commenters from the archive: the thread's rows in comments_by_link up to
-// where the files end, plus the subreddit's tail after that (fetchTails), instead of the
-// comment tree request.
+// A covered post's commenters from the archive: for a post older than where the files end,
+// the thread's rows in comments_by_link up to there, plus one request for the thread's
+// comments after it; a newer post's thread comes from the comment tree.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -51,21 +51,27 @@ function makeClient(handler) {
 const kindOf = (u) => (u.pathname.includes("/posts/") ? "posts" : "comments");
 const isTree = (u) => u.pathname === "/api/comments/tree";
 
-// Subreddit-wide searches from `recent`, and the comment tree from `tree` ([author, time], …).
+// Searches over `recent` (subreddit-wide, or one thread with `link_id`) honouring after,
+// before and limit, and the comment tree from `tree` ([author, time], …).
 function api({ recent = {}, tree = [] }) {
   return (u) => {
     if (isTree(u)) {
       return json({ data: tree.map(([author, t], i) => ({ kind: "t1", data: { id: `k${i}`, author, created_utc: t, replies: "" } })) });
     }
     const after = Number(u.searchParams.get("after") ?? -Infinity);
-    const rows = (recent[kindOf(u)] ?? []).filter((r) => r.created_utc > after).sort((a, b) => a.created_utc - b.created_utc);
+    const before = Number(u.searchParams.get("before") ?? Infinity);
+    const link = u.searchParams.get("link_id");
+    const rows = (recent[kindOf(u)] ?? [])
+      .filter((r) => r.created_utc > after && r.created_utc < before && (link === null || r.link_id === `t3_${link}`))
+      .sort((a, b) => a.created_utc - b.created_utc);
     return json({ data: rows.slice(0, Number(u.searchParams.get("limit"))) });
   };
 }
+const isThreadSearch = (u) => u.pathname === "/api/comments/search" && u.searchParams.has("link_id");
 
 const asObject = (commenters) => Object.fromEntries(commenters);
 
-test("with a tail that reached the present, the commenters come from comments_by_link and the tail, with no tree request", async () => {
+test("a post older than the files: commenters from comments_by_link plus one request for the rest, with no tree request", async () => {
   const recent = {
     comments: [
       { id: "c4", author: "carol", created_utc: 1699990000, link_id: "t3_p1" }, // in the files' last hour
@@ -75,10 +81,10 @@ test("with a tail that reached the present, the commenters come from comments_by
   };
   const { client, calls } = makeClient(api({ recent, tree: [["someone", 1]] }));
   const dumps = await openFixtures();
-  await fetchTails(client, dumps, P1, { only: ["Python"], now: () => NOW });
-  const before = calls.length;
   const commenters = await collectCommenters(client, P1, { dumps });
-  assert.equal(calls.length, before, "no requests");
+  assert.equal(calls.length, 1, "only the thread's comments after the files");
+  assert.ok(isThreadSearch(calls[0]));
+  assert.equal(calls[0].searchParams.get("after"), String(COMMENTS_THROUGH));
   assert.deepEqual(asObject(commenters), {
     Alice: { count: 1, last: 1699000000 },
     carol: { count: 1, last: 1699990000 },
@@ -86,19 +92,15 @@ test("with a tail that reached the present, the commenters come from comments_by
   });
 });
 
-test("a post newer than the files takes its commenters from the tail alone", async () => {
-  const recent = {
-    comments: [
-      { id: "n1", author: "alice", created_utc: NEW_POST.createdUtc + 60, link_id: "t3_abc123" },
-      { id: "n2", author: "bob", created_utc: NEW_POST.createdUtc + 120, link_id: "t3_abc123" },
-      { id: "n3", author: "alice", created_utc: NEW_POST.createdUtc + 180, link_id: "t3_abc123" },
-    ],
-  };
-  const { client, calls } = makeClient(api({ recent }));
+test("a post newer than the files takes its commenters from the comment tree, tail or not", async () => {
+  const tree = [["alice", NEW_POST.createdUtc + 60], ["bob", NEW_POST.createdUtc + 120], ["alice", NEW_POST.createdUtc + 180]];
+  const { client, calls } = makeClient(api({ tree }));
   const dumps = await openFixtures();
+  // The tail stops at the post, so it never has the thread's comments.
   await fetchTails(client, dumps, NEW_POST, { now: () => NOW });
   const commenters = await collectCommenters(client, NEW_POST, { dumps });
-  assert.equal(calls.filter(isTree).length, 0);
+  assert.equal(calls.filter(isTree).length, 1);
+  assert.equal(calls.filter(isThreadSearch).length, 0);
   assert.deepEqual(asObject(commenters), {
     alice: { count: 2, last: NEW_POST.createdUtc + 180 },
     bob: { count: 1, last: NEW_POST.createdUtc + 120 },
@@ -108,30 +110,28 @@ test("a post newer than the files takes its commenters from the tail alone", asy
 test("skipped users and the OP apply to the archive's commenters as to the tree's", async () => {
   const recent = {
     comments: [
-      { id: "n1", author: "alice", created_utc: NEW_POST.createdUtc + 60, link_id: "t3_abc123" },
-      { id: "n2", author: "Bob", created_utc: NEW_POST.createdUtc + 120, link_id: "t3_abc123" },
+      { id: "n1", author: "dave", created_utc: NOW - 60, link_id: "t3_p1" },
+      { id: "n2", author: "Bob", created_utc: NOW - 30, link_id: "t3_p1" },
     ],
   };
   const { client } = makeClient(api({ recent }));
-  const dumps = await openFixtures();
-  await fetchTails(client, dumps, NEW_POST, { now: () => NOW });
-  const commenters = await collectCommenters(client, NEW_POST, { dumps, exclude: ["u/bob"], includeOp: true });
+  const post = { ...P1, author: "op_user" }; // p1's thread, from the files, with an OP who didn't comment
+  const commenters = await collectCommenters(client, post, { dumps: await openFixtures(), exclude: ["u/bob"], includeOp: true });
   assert.deepEqual(asObject(commenters), {
-    alice: { count: 1, last: NEW_POST.createdUtc + 60 },
+    Alice: { count: 1, last: 1699000000 },
+    dave: { count: 1, last: NOW - 60 },
     op_user: { count: 0, last: null },
   });
 });
 
-test("without a tail that reached the present, the tree answers", async () => {
+test("without the archive's files for the thread, the tree answers", async () => {
   const tree = [["alice", NEW_POST.createdUtc + 60]];
-  // An old post in a full scan: no tail at all.
+  // A subreddit the archive doesn't cover.
   const first = makeClient(api({ tree }));
-  const old = await openFixtures();
-  await fetchTails(first.client, old, P1, { now: () => NOW });
-  await collectCommenters(first.client, P1, { dumps: old });
+  await collectCommenters(first.client, { ...NEW_POST, subreddit: "rust" }, { dumps: await openFixtures() });
   assert.equal(first.calls.filter(isTree).length, 1);
 
-  // A tail cut short by its budget.
+  // A post newer than the files, whatever the tail did: the files have none of the thread.
   const many = Array.from({ length: 150 }, (_, i) => ({ id: `m${i}`, author: "dave", created_utc: COMMENTS_THROUGH + 60 * (i + 1), link_id: "t3_other" }));
   const second = makeClient(api({ recent: { comments: many }, tree }));
   const partial = await openFixtures();
@@ -142,16 +142,17 @@ test("without a tail that reached the present, the tree answers", async () => {
 });
 
 test("if comments_by_link can't be read, or isn't in the manifest, the tree answers", async () => {
-  const tree = [["alice", NEW_POST.createdUtc + 60]];
+  // An old post, whose thread the files would otherwise give.
+  const tree = [["alice", P1.createdUtc + 60]];
   const failing = async (url) => {
     if (url.endsWith("comments_by_link.parquet")) throw new TypeError("Failed to fetch");
     return localFile(url);
   };
   const first = makeClient(api({ tree }));
   const dumps = await openFixtures({ openFile: failing });
-  await fetchTails(first.client, dumps, NEW_POST, { now: () => NOW });
-  assert.deepEqual(asObject(await collectCommenters(first.client, NEW_POST, { dumps })), { alice: { count: 1, last: NEW_POST.createdUtc + 60 } });
+  assert.deepEqual(asObject(await collectCommenters(first.client, P1, { dumps })), { alice: { count: 1, last: P1.createdUtc + 60 } });
   assert.equal(first.calls.filter(isTree).length, 1);
+  assert.equal(first.calls.filter(isThreadSearch).length, 0);
 
   const sub = MANIFEST.subreddits.python;
   const { comments_by_link: _, ...files } = sub.files;
@@ -159,8 +160,7 @@ test("if comments_by_link can't be read, or isn't in the manifest, the tree answ
   const second = makeClient(api({ tree }));
   const without = await openFixtures({ manifest: noLinkFile });
   assert.ok(without.covers("python"), "the other files still cover the subreddit");
-  await fetchTails(second.client, without, NEW_POST, { now: () => NOW });
-  await collectCommenters(second.client, NEW_POST, { dumps: without });
+  await collectCommenters(second.client, P1, { dumps: without });
   assert.equal(second.calls.filter(isTree).length, 1);
 });
 

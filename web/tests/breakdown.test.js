@@ -71,7 +71,7 @@ test("the client counts every request it sends by label, retries included, and t
   assert.deepEqual(Object.fromEntries(client.retries), { "server busy": 1 });
 });
 
-test("fetchTails reports each kind's pages, budget, whether it reached the present and how far it got", async () => {
+test("fetchTails reports each kind's pages, budget, whether it reached the post and how far it got", async () => {
   const rows = Array.from({ length: 150 }, (_, i) => ({ id: `m${i}`, author: "dave", created_utc: COMMENTS_THROUGH + 60 * (i + 1), link_id: "t3_x" }));
   const client = makeClient((u) => {
     const after = Number(u.searchParams.get("after"));
@@ -81,7 +81,7 @@ test("fetchTails reports each kind's pages, budget, whether it reached the prese
   const dumps = await DumpSource.open({ baseUrl: BASE, fetchFn: async () => new Response(JSON.stringify(MANIFEST)), openFile: localFile });
   const report = await fetchTails(client, dumps, POST, { now: () => NOW, budget: 1 });
   assert.deepEqual(report, [
-    { subreddit: "Python", kind: "posts", pages: 1, budget: 1, reachedEnd: true, through: NOW, error: null },
+    { subreddit: "Python", kind: "posts", pages: 1, budget: 1, reachedEnd: true, through: POST.createdUtc - 1, error: null }, // counts stop at the post
     { subreddit: "Python", kind: "comments", pages: 1, budget: 1, reachedEnd: false, through: rows[99].created_utc - 1, error: null },
   ]);
   assert.deepEqual(await fetchTails(client, dumps, { ...POST, createdUtc: 1_600_000_000 }, { now: () => NOW }), []);
@@ -143,7 +143,7 @@ test("breakdownLines says when there was no recent-activity fetch, and how a tai
       { subreddit: "Python", kind: "comments", pages: 0, budget: 2, reachedEnd: false, through: 1699986400, error: "Query timed out" },
     ],
   });
-  assert.ok(ended.includes("r/Python posts since the archive files: 1 of 2 pages, reached the present"));
+  assert.ok(ended.includes("r/Python posts since the archive files: 1 of 2 pages, reached the post")); // counts stop at the post
   assert.ok(ended.includes("r/Python comments since the archive files: 0 of 2 pages, stopped: Query timed out; complete up to 2023-11-14 18:26 UTC"));
 });
 

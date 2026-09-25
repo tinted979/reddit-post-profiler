@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Reddit Post Profiler (RPP). Profiles everyone who commented on a Reddit post using the [Arctic Shift](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md) archive API. It reports:
 
 - each commenter's posts and comments in the post's subreddit *before* the post was created;
-- their per-subreddit activity everywhere.
+- their per-subreddit activity everywhere, also up to the post: every count stops at the post (docs/adr/0006).
 
 It's a web app in `web/`: plain ES modules with no build step and no runtime dependencies, deployed to GitHub Pages. (The tests have one dev dependency, fake-indexeddb.) Results download as a CSV (`toCsv`, one row per user and subreddit). There's no server and no other implementation.
 

@@ -1,6 +1,7 @@
 // How far a scan's recent-activity fetch goes (fetchTails): its first tailBudget pages
-// always, then on to the present only if the rate those pages show says finishing costs
-// fewer requests than asking per commenter would (tailWorth).
+// always, then on to the post only if the rate those pages show says finishing costs fewer
+// requests than asking per commenter would (tailWorth). Counts stop at the post
+// (docs/adr/0006), so that's as far as a fetch ever goes.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -21,16 +22,17 @@ const openFixtures = () =>
 
 const COMMENTS_THROUGH = 1699990000 - INGEST_LAG;
 const NOW = 1_700_100_000;
-const post = (numComments) => ({ id: "abc123", author: "op_user", subreddit: "Python", createdUtc: 1_700_000_000, title: "t", numComments });
+const POSTED = 1_700_000_000;
+const post = (numComments) => ({ id: "abc123", author: "op_user", subreddit: "Python", createdUtc: POSTED, title: "t", numComments });
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-// `n` comments spread evenly from where the files end to NOW, served to subreddit-wide
-// searches 100 at a time. Records the comment searches.
+// `n` comments spread evenly from where the files end to the post, served to subreddit-wide
+// searches 100 at a time (honouring `before`). Records the comment searches.
 function subreddit(n) {
-  const step = (NOW - COMMENTS_THROUGH) / n;
+  const step = (POSTED - COMMENTS_THROUGH) / (n + 1);
   const rows = Array.from({ length: n }, (_, i) => ({ id: `c${i}`, author: `u${i % 50}`, created_utc: Math.floor(COMMENTS_THROUGH + step * (i + 1)), link_id: "t3_x" }));
   const searches = [];
   const clock = { t: NOW };
@@ -40,8 +42,9 @@ function subreddit(n) {
       const u = new URL(url);
       if (u.pathname.includes("/comments/")) searches.push(u);
       const after = Number(u.searchParams.get("after"));
+      const before = Number(u.searchParams.get("before") ?? Infinity);
       const mine = u.pathname.includes("/comments/") ? rows : [];
-      return json({ data: mine.filter((r) => r.created_utc > after).slice(0, Number(u.searchParams.get("limit"))) });
+      return json({ data: mine.filter((r) => r.created_utc > after && r.created_utc < before).slice(0, Number(u.searchParams.get("limit"))) });
     },
     sleep: async (s) => { clock.t += s; },
     now: () => clock.t,
@@ -60,13 +63,12 @@ test("tailWorth: about a request per thread comment for an only scan, half that 
   assert.equal(tailWorth(10_000, { only: true }), 100);
 });
 
-test("when finishing is projected to cost less than asking per user, the fetch goes on to the present", async () => {
+test("when finishing is projected to cost less than asking per user, the fetch goes on to the post", async () => {
   const { client, searches } = subreddit(450); // ~5 pages; tailBudget(40) is 2, tailWorth(40, only) 40
   const dumps = await openFixtures();
   const report = await fetchTails(client, dumps, post(40), { only: ["Python"], now: () => NOW });
   assert.equal(searches.length, 5);
-  assert.deepEqual(comments(report), { subreddit: "Python", kind: "comments", pages: 5, budget: 40, reachedEnd: true, through: NOW, error: null });
-  assert.equal(dumps.isCurrent("python"), true);
+  assert.deepEqual(comments(report), { subreddit: "Python", kind: "comments", pages: 5, budget: 40, reachedEnd: true, through: POSTED - 1, error: null });
 });
 
 test("when finishing would cost more than asking per user, it stops after the pages always fetched", async () => {
@@ -77,7 +79,7 @@ test("when finishing would cost more than asking per user, it stops after the pa
   const c = comments(report);
   assert.equal(c.reachedEnd, false);
   assert.ok(c.projected > 4, `projected ${c.projected}`);
-  assert.equal(dumps.isCurrent("python"), false);
+  assert.ok(dumps.covers("python").commentsThrough < POSTED - 1);
 });
 
 test("a full scan is worth half as much per comment as an only scan", async () => {
@@ -88,7 +90,7 @@ test("a full scan is worth half as much per comment as an only scan", async () =
   const dumps = await openFixtures();
   await fetchTails(only.client, dumps, post(12), { only: ["Python"], now: () => NOW });
   assert.equal(only.searches.length, 11);
-  assert.equal(dumps.isCurrent("python"), true);
+  assert.equal(dumps.covers("python").commentsThrough, POSTED - 1);
 });
 
 test("an explicit budget is a fixed number of pages, with no projection", async () => {

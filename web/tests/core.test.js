@@ -359,23 +359,23 @@ test("buildProfile merges case-insensitively and fetches before counts", async (
 });
 
 test("buildProfile skips before queries the lifetime counts rule out", async () => {
+  // Counts stop at the post, so no activity in the post's subreddit means no "before" at all.
   const { client, calls } = makeClient((u) => {
-    assert.ok(!u.searchParams.has("before"), "unexpected before query");
-    return aggregates({ posts: [["rust", 4]], comments: [["python", 2], ["rust", 9]] })(u);
+    assert.ok(!u.searchParams.has("subreddit"), "unexpected before query");
+    return aggregates({ posts: [["rust", 4]], comments: [["rust", 9]] })(u);
   });
   const p = await buildProfile(client, "bob", 2, POST);
   assert.equal(calls.length, 2);
   assert.equal(p.targetPostsBefore, 0);
   assert.equal(p.targetCommentsBefore, 0);
-  assert.deepEqual(Object.fromEntries(p.subreddits), {
-    rust: { posts: 4, comments: 9 }, python: { posts: 0, comments: 2 },
-  });
+  assert.deepEqual(Object.fromEntries(p.subreddits), { rust: { posts: 4, comments: 9 } });
 });
 
 test("buildProfile skips the OP's posts-before query when their only post is this one", async () => {
   const { client, calls } = makeClient((u) => {
-    if (u.searchParams.has("before")) assert.ok(u.pathname.includes("/comments/"));
-    return aggregates({ posts: [["Python", 1]], comments: [["Python", 5]], before: { posts: 0, comments: 3 } })(u);
+    if (u.searchParams.has("subreddit")) assert.ok(u.pathname.includes("/comments/"));
+    // Counts stop at the post, and the OP's only post is this one: none before it.
+    return aggregates({ posts: [], comments: [["Python", 5]], before: { posts: 0, comments: 3 } })(u);
   });
   const p = await buildProfile(client, "OP_User", 2, POST);
   assert.equal(calls.length, 3);
@@ -404,8 +404,9 @@ test("when interactions can't answer either, only the timed-out kind is split in
   });
   clock.t = Date.UTC(2024, 5, 1) / 1000;
   const p = await buildProfile(client, "busy", 1, POST);
-  const years = yearlyRanges(null, clock.t).length;
-  assert.equal(years, 2024 - 2005 + 1);
+  // Counts stop at the post (Nov 2023), so the split's years end there too.
+  const years = yearlyRanges(POST.createdUtc, clock.t).length;
+  assert.equal(years, 2023 - 2005 + 1);
   assert.equal(calls.filter((u) => u.pathname.includes("/posts/")).length, 1);
   // The full comments query is sent twice, and not again once interactions has failed.
   assert.equal(calls.filter((u) => u.pathname.includes("/comments/") && !u.searchParams.has("after")).length, 2);
@@ -611,7 +612,9 @@ test("buildProfile with only keeps listed subreddits and adds empty ones", async
     comments: [["python", 2], ["AskReddit", 9]],
   }));
   const p = await buildProfile(client, "bob", 2, POST, { only: ["r/Rust", "golang"] });
-  assert.equal(calls.length, 2);
+  // Two totals, and a "before" search for bob's comments in the post's subreddit (counts stop
+  // at the post, so the thread's own comments aren't among them).
+  assert.equal(calls.length, 3);
   assert.deepEqual(Object.fromEntries(p.subreddits), {
     rust: { posts: 4, comments: 0 }, python: { posts: 0, comments: 2 }, golang: { posts: 0, comments: 0 },
   });
@@ -764,32 +767,28 @@ test("cached results expire", async () => {
   assert.equal(p.cached, false);
 });
 
-test("saved lifetime totals older than the user's last comment here don't justify skipping", async () => {
-  const handler = aggregates({ comments: [["Python", 2]], before: { posts: 0, comments: 1 } });
-  // Day 3: alice has 1 comment in the thread and 2 in r/Python, so "before" is asked for.
-  const { cache, clock } = makeCache(POST.createdUtc + 3 * 86400);
-  const first = await buildProfile(makeClient(handler).client, "alice", 1, POST, {
-    cache, lastCommentUtc: POST.createdUtc + 2 * 86400,
-  });
-  assert.equal(first.targetCommentsBefore, 1);
+test("saved counts fetched within an hour of the post don't justify skipping", async () => {
+  // Saved 10 minutes after the post, when something made just before it might not be
+  // archived yet: alice had nothing in r/Python then.
+  const { cache, clock } = makeCache(POST.createdUtc + 600);
+  const first = await buildProfile(makeClient(aggregates({ posts: [], comments: [] })).client, "alice", 1, POST, { cache });
+  assert.equal(first.targetCommentsBefore, 0);
 
-  // Day 5: she has 4 comments here now, so the saved total of 2 no longer covers them.
-  // The saved "before" answer is reused rather than skipping to 0.
+  // Days later the saved counts are reused, but they can't rule out "before" activity, so
+  // both "before" queries are made.
   clock.t = POST.createdUtc + 5 * 86400;
-  const opts = { cache, lastCommentUtc: POST.createdUtc + 4.5 * 86400 };
-  const rescan = makeClient(handler);
-  const p = await buildProfile(rescan.client, "alice", 4, POST, opts);
-  assert.equal(rescan.calls.length, 0);
+  const later = makeClient(aggregates({ comments: [["Python", 2]], before: { posts: 0, comments: 1 } }));
+  const p = await buildProfile(later.client, "alice", 1, POST, { cache });
+  assert.equal(later.calls.length, 2);
+  assert.ok(later.calls.every((u) => u.searchParams.has("subreddit")));
   assert.equal(p.targetCommentsBefore, 1);
-  assert.equal(p.cached, true);
 
-  // Without a saved answer, both "before" queries are made.
-  cache.backend.map.delete(`v2|before|alice|python|${POST.createdUtc}|all`);
-  const fresh = makeClient(handler);
-  const p2 = await buildProfile(fresh.client, "alice", 4, POST, opts);
-  assert.equal(fresh.calls.length, 2);
-  assert.ok(fresh.calls.every((u) => u.searchParams.has("before")));
-  assert.equal(p2.targetCommentsBefore, 1);
+  // Saved an hour or more after the post, they're trusted: no "before" queries for none.
+  const { cache: late } = makeCache(POST.createdUtc + 2 * 3600);
+  await buildProfile(makeClient(aggregates({ posts: [], comments: [] })).client, "bob", 1, POST, { cache: late });
+  const again = makeClient(aggregates({ posts: [], comments: [] }));
+  await buildProfile(again.client, "bob", 1, POST, { cache: late });
+  assert.equal(again.calls.length, 0);
 });
 
 test("before counts saved within an hour of the post are fetched again", async () => {
@@ -1260,7 +1259,7 @@ test("before facts come from one timestamp search per kind", async () => {
     beforeTimes: { comments: [...daily(3), POST.createdUtc - 40 * 86400 + 60], posts: [POST.createdUtc - 3600] },
   }));
   const p = await buildProfile(client, "alice", 1, POST);
-  const before = calls.filter((u) => u.searchParams.has("before"));
+  const before = calls.filter((u) => u.searchParams.has("subreddit"));
   assert.equal(before.length, 2);
   for (const u of before) {
     assert.ok(u.pathname.endsWith("/search"));
@@ -1281,7 +1280,7 @@ test("past 100 items the count and first date take a query each", async () => {
   assert.equal(p.targetFirstBefore, Math.min(...many));
   assert.equal(p.targetDaysBefore, 100); // the newest 100: a lower bound
   assert.equal(p.targetTimelineComplete, false);
-  assert.equal(calls.filter((u) => u.searchParams.has("before")).length, 3);
+  assert.equal(calls.filter((u) => u.searchParams.has("subreddit")).length, 3);
 });
 
 test("if the timestamp search fails, the count still comes from the aggregate", async () => {
@@ -1312,7 +1311,7 @@ test("a bug in the before search fails the user instead of passing for a failed 
     throw new TypeError("oops");
   };
   await assert.rejects(buildProfile(client, "alice", 1, POST), TypeError);
-  assert.ok(!calls.some((u) => u.searchParams.has("before")), "fell back to the aggregate");
+  assert.ok(!calls.some((u) => u.searchParams.has("subreddit")), "fell back to the aggregate");
 });
 
 test("saved before facts are reused, old count-only records are not", async () => {
@@ -1339,10 +1338,11 @@ test("estimateScan counts saved users and prices the rest", async () => {
   const { cache } = makeCache();
   const handler = aggregates({ posts: [["Python", 1]], comments: [["rust", 2]] });
   await buildProfile(makeClient(handler).client, "alice", 1, POST, { cache });
-  const est = await estimateScan(cache, ["Alice", "bob", "carol"], { delay: 0.5, concurrency: 3 });
+  // Counts are saved per post, so the estimate is for this one.
+  const est = await estimateScan(cache, ["Alice", "bob", "carol"], { before: POST.createdUtc, delay: 0.5, concurrency: 3 });
   assert.deepEqual(est, { users: 3, saved: 1, requests: 1 + 2 * 4, seconds: 9 * 1.3 });
   // The window is part of the key: nothing saved for the last year.
-  const windowed = await estimateScan(cache, ["alice"], { after: POST.createdUtc - 365 * 86400, delay: 2 });
+  const windowed = await estimateScan(cache, ["alice"], { after: POST.createdUtc - 365 * 86400, before: POST.createdUtc, delay: 2 });
   assert.deepEqual(windowed, { users: 1, saved: 0, requests: 4, seconds: 8 });
   assert.equal((await estimateScan(null, ["a"], { concurrency: 1 })).seconds, 4 * 1.8);
   assert.ok(LARGE_SCAN > 0);
@@ -1444,11 +1444,11 @@ test("a busy or rate-limiting server during the before search fails the user wit
   const slow = () => json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422);
   const busy = makeClient((u) => (u.pathname === "/api/comments/search" ? slow() : handler(u)));
   await assert.rejects(buildProfile(busy.client, "alice", 1, POST), ServerBusy);
-  assert.ok(!busy.calls.some((u) => u.pathname.endsWith("/aggregate") && u.searchParams.has("before")));
+  assert.ok(!busy.calls.some((u) => u.pathname.endsWith("/aggregate") && u.searchParams.has("subreddit")));
   const limited = makeClient((u) => (u.pathname === "/api/comments/search" ? json({}, 429) : handler(u)));
   const err = await buildProfile(limited.client, "alice", 1, POST).catch((e) => e);
   assert.equal(err.status, 429);
-  assert.ok(!limited.calls.some((u) => u.pathname.endsWith("/aggregate") && u.searchParams.has("before")));
+  assert.ok(!limited.calls.some((u) => u.pathname.endsWith("/aggregate") && u.searchParams.has("subreddit")));
 });
 
 test("CSV cells that a spreadsheet would run as a formula are marked as text", () => {
@@ -1633,7 +1633,7 @@ test("with archive files past the post, before facts come from them with no sear
     },
   });
   const p = await buildProfile(client, "Alice", 1, POST, { dumps });
-  assert.equal(calls.filter((u) => u.searchParams.has("before")).length, 0);
+  assert.equal(calls.filter((u) => u.searchParams.has("subreddit")).length, 0);
   assert.deepEqual([p.targetPostsBefore, p.targetCommentsBefore], [1, 3]);
   assert.equal(p.targetFirstBefore, T - 30 * 86400);
   assert.equal(p.targetDaysBefore, 3);
@@ -1658,7 +1658,7 @@ test("a post newer than the files adds the API's gap after them, counting the ed
   const { client, calls } = makeClient(apiWithBefore({ comments: 9, before: { comments: [...fileTimes, ...apiTimes] } }));
   const dumps = fakeDumps({ postsThrough: T, commentsThrough: through, times: { comments: { alice: fileTimes } } });
   const p = await buildProfile(client, "alice", 1, POST, { dumps });
-  const gap = calls.filter((u) => u.searchParams.has("before"));
+  const gap = calls.filter((u) => u.searchParams.has("subreddit"));
   assert.equal(gap.length, 1);
   assert.equal(gap[0].searchParams.get("after"), String(through));
   assert.equal(p.targetCommentsBefore, 4); // 2 from the files + (through + 1) and (T − 1 day)
@@ -1695,7 +1695,7 @@ test("a window start after the files' trust cutoff skips the files and asks the 
   const { client, calls } = makeClient(apiWithBefore({ comments: 5, before: { comments: apiTimes } }));
   const dumps = fakeDumps({ postsThrough: T, commentsThrough: through, times: { comments: { alice: [T - 40 * 86400, through] } } });
   const p = await buildProfile(client, "alice", 1, POST, { dumps, after });
-  const gap = calls.filter((u) => u.searchParams.has("before"));
+  const gap = calls.filter((u) => u.searchParams.has("subreddit"));
   assert.ok(gap.length > 0);
   assert.equal(gap[0].searchParams.get("after"), String(after)); // not `through`
   assert.equal(p.targetCommentsBefore, apiTimes.length); // no file rows counted
@@ -1725,7 +1725,7 @@ test("Stop while reading the archive stops the profile", async () => {
   const { client, calls } = makeClient(apiWithBefore({ comments: 4 }));
   const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, fail: new Aborted("stopped") });
   await assert.rejects(buildProfile(client, "alice", 1, POST, { dumps }), Aborted);
-  assert.equal(calls.filter((u) => u.searchParams.has("before")).length, 0);
+  assert.equal(calls.filter((u) => u.searchParams.has("subreddit")).length, 0);
 });
 
 test("a subreddit the archive doesn't cover uses the API", async () => {
@@ -1807,7 +1807,8 @@ test("without only, lifetime counts come from the aggregates as before", async (
 
 test("if interactions can't answer, the aggregates do", async () => {
   const { client, calls } = makeClient(apiForLifetime({ lifetime: { posts: [], comments: [["Python", 7]] }, interactionsFail: notSupported }));
-  const dumps = fakeDumps({ postsThrough: T, commentsThrough: T, times: { comments: { alice: daily(3) } } });
+  // Files that stop a day short of the post, so interactions is needed for the rest.
+  const dumps = fakeDumps({ postsThrough: T - 86400, commentsThrough: T - 86400, times: { comments: { alice: daily(3) } } });
   const p = await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps });
   assert.equal(lifetimeAggregates(calls).length, 2);
   assert.equal(p.subreddits.get("Python").comments, 7);
@@ -1852,9 +1853,9 @@ test("archive lifetime counts aren't saved under the full lifetime key", async (
   const cache = new ProfileCache({ backend, ttlDays: 7 });
   const dumps = fakeDumps({ postsThrough: T - 86400, commentsThrough: T - 86400, times: { comments: { alice: [T - 2 * 86400] } } });
   await buildProfile(client, "alice", 1, POST, { only: ["Python"], dumps, cache });
-  assert.equal((await backend.getPrefix("v1|life|")).length, 0);
+  assert.equal((await backend.getPrefix("v2|life|")).length, 0);
   // Cached separately, under its own key, so a re-scan with the same `only` costs nothing.
-  assert.equal((await backend.getPrefix("v1|lifeonly|")).length, 1);
+  assert.equal((await backend.getPrefix("v2|lifeonly|")).length, 1);
 });
 
 test("a re-scan with the same only and cache reuses the archive lifetime counts with no requests", async () => {
@@ -1885,7 +1886,7 @@ test("a scan without only doesn't read a saved lifeonly record", async () => {
   const dumps = fakeDumps({ postsThrough: through, commentsThrough: through, times: {} });
   await buildProfile(makeClient(apiForLifetime({ recent: [["Python", 0, 1]], recentAfter: through })).client,
     "alice", 1, POST, { only: ["Python"], dumps, cache });
-  assert.equal((await cache.backend.getPrefix("v1|lifeonly|")).length, 1);
+  assert.equal((await cache.backend.getPrefix("v2|lifeonly|")).length, 1);
 
   const second = makeClient(apiForLifetime({ lifetime: { posts: [], comments: [["Python", 5], ["rust", 3]] } }));
   const p = await buildProfile(second.client, "alice", 1, POST, { dumps, cache });
@@ -1896,7 +1897,8 @@ test("a scan without only doesn't read a saved lifeonly record", async () => {
 
 test("the lifeonly key ignores case and order in only", async () => {
   const { cache } = makeCache();
-  await cache.set("v1|lifeonly|alice|all|python,rust", [["Python", 0, 1], ["rust", 2, 3]]);
+  // v2 keys are per post; nothing in r/Python before it, so no "before" lookups either.
+  await cache.set(`v2|lifeonly|alice|${POST.createdUtc}|all|python,rust`, [["Python", 0, 0], ["rust", 2, 3]]);
   const { client, calls } = makeClient(() => {
     throw new Error("unexpected request");
   });
@@ -1905,7 +1907,7 @@ test("the lifeonly key ignores case and order in only", async () => {
   });
   assert.equal(calls.length, 0);
   assert.deepEqual(p.subreddits.get("rust"), { posts: 2, comments: 3 });
-  assert.deepEqual(p.subreddits.get("Python"), { posts: 0, comments: 1 });
+  assert.deepEqual(p.subreddits.get("Python"), { posts: 0, comments: 0 });
 });
 
 test("an aggregate timeout after archive interactions failed doesn't retry interactions", async () => {
