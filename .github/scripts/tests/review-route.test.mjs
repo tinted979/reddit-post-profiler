@@ -45,6 +45,7 @@ test("CI, agent config, shell scripts, CORS and the page shell add the security 
 test("grounding docs, a new web module or a storage schema change add the architecture reviewer", () => {
   assert.deepEqual(route({ files: ["CLAUDE.md"] }), ["pr-reviewer", "architecture-reviewer"]);
   assert.deepEqual(route({ files: ["docs/adr/0005-x.md"] }), ["pr-reviewer", "architecture-reviewer"]);
+  assert.deepEqual(route({ files: [".claude/rules/web-core.md"] }), ["pr-reviewer", "security-reviewer", "architecture-reviewer"]);
   assert.deepEqual(route({ files: ["web/stats.js"], added: ["web/stats.js"] }), ["pr-reviewer", "architecture-reviewer"]);
   assert.deepEqual(route({ files: ["web/tests/x.test.js"], added: ["web/tests/x.test.js"] }), ["pr-reviewer"]);
   const diff = "--- a/web/cache.js\n+++ b/web/cache.js\n-const DB_VERSION = 3;\n+const DB_VERSION = 4;\n";
