@@ -35,6 +35,8 @@ There is no linter or formatter configured.
 
 The default branch is `main`, and only `main` deploys. Work on a feature branch and open a pull request into `main`; CI runs the tests on the PR, and merging it deploys. After a merge, check that the live `https://tinted979.github.io/reddit-post-profiler/*.js` serves the new code.
 
+Merging is the owner's alone. Two rulesets protect `main`. **main: integrity** requires a pull request, blocks force pushes and deletion, and nobody can bypass it. **main: human approval** requires one approval from a code owner (`.github/CODEOWNERS`: `* @tinted979`) after the last push, so no bot or token can merge. Only a repository admin can bypass it, and only on a pull request: that's how the owner merges their own PRs, since GitHub doesn't let an author approve their own. Auto-merge is off, and Actions can't create or approve pull requests. Every action is pinned to a full commit SHA with its version in a comment; Dependabot (`.github/dependabot.yml`) bumps them weekly in one grouped PR, a week after release. The repository variable `AGENTS_ENABLED` switches the agent workflows off when it's anything but `true`. The plan for AI-driven development (roles, checks, rollout) is `WORKFLOW.md`.
+
 ## Web app architecture
 
 - **`core.js`** contains all API and profiling logic. It has no DOM access and is tested in Node.

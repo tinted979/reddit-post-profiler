@@ -1,29 +1,29 @@
 {
   "enabledPlugins": {
-    "frontend-design@claude-plugins-official": true,
     "superpowers@claude-plugins-official": true,
-    "code-review@claude-plugins-official": true,
     "context7@claude-plugins-official": true,
-    "code-simplifier@claude-plugins-official": true,
     "playwright@claude-plugins-official": true,
-    "github@claude-plugins-official": true,
     "claude-md-management@claude-plugins-official": true,
-    "feature-dev@claude-plugins-official": true,
-    "skill-creator@claude-plugins-official": true,
     "security-guidance@claude-plugins-official": true
   },
   "permissions": {
     "allow": [
-      "PowerShell(Select-String *)",
-      "PowerShell(Select-Object *)",
-      "PowerShell(Get-ChildItem *)",
-      "PowerShell(Get-Content *)",
-      "Bash(odin check *)",
-      "PowerShell(odin check *)",
-      "Bash(odin version)",
-      "PowerShell(odin version)",
-      "PowerShell(Out-String)",
-      "PowerShell(Out-String *)"
+      "Bash(npm test)",
+      "Bash(node --test *)",
+      "Bash(uv run *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh issue view *)"
+    ],
+    "deny": [
+      "Bash(gh pr merge *)",
+      "Bash(git push origin main *)",
+      "Bash(git push origin HEAD:main *)",
+      "Bash(git push --force *)",
+      "PowerShell(gh pr merge *)",
+      "PowerShell(git push origin main *)",
+      "PowerShell(git push origin HEAD:main *)",
+      "PowerShell(git push --force *)"
     ]
   }
 }

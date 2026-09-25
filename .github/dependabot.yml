@@ -1,0 +1,14 @@
+# Weekly, grouped bumps of the SHA-pinned actions. The cooldown waits a week before adopting
+# a release, which is when most compromised releases are caught; the cost is that security
+# fixes also arrive a week late, so bump claude-code-action's pin by hand when an advisory lands.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
