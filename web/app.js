@@ -60,6 +60,9 @@ const state = {
   beforeKnown: true, // false when the post is older than the history window
   after: null, // start of the history window (epoch seconds), null = all time
   savedId: null, // post id of the saved scan on show, if one was opened
+  // Post id the address bar links to while its results are on show: set by a manual run,
+  // null for a saved or queued scan, whose link would start a fresh scan on reload.
+  urlPost: null,
 };
 
 function el(tag, attrs = {}, ...children) {
@@ -602,7 +605,8 @@ function renderUsers() {
   });
   $("users").replaceChildren(...cards);
   applyFilter();
-  if (queueCurrent === null) history.replaceState(null, "", shareUrl(currentPostRef()));
+  // Re-rating (badges, min count) keeps a manual run's link up to date.
+  if (state.urlPost) history.replaceState(null, "", shareUrl(state.urlPost));
 }
 
 // ---- A run ----
@@ -638,7 +642,10 @@ async function run({ fromQueue = false } = {}) {
   const after = opts.years ? Math.floor(Date.now() / 1000 - opts.years * 365.25 * 86400) : null;
   const runId = ++state.runId;
   const controller = new AbortController();
-  Object.assign(state, { controller, post: null, slots: [], shown: 0, beforeKnown: true, after, savedId: null });
+  Object.assign(state, {
+    controller, post: null, slots: [], shown: 0, beforeKnown: true, after, savedId: null,
+    urlPost: fromQueue ? null : postId,
+  });
   markCurrentScan();
   $("post-card").hidden = true;
   $("results").hidden = true;
@@ -699,10 +706,16 @@ async function run({ fromQueue = false } = {}) {
       stats: scanStats(profiles, state.post, state.beforeKnown, badges),
       facts: badgeFacts(profiles, state.post), // tier counts under whatever badge rules apply later
     };
-    if (await openScans().save(summary, profiles.map(serializeProfile))) {
+    // A scan where every lookup failed, or a stopped one when a complete scan of the post
+    // is saved, is "kept": the saved scan stays as it was.
+    const result = await openScans().save(summary, profiles.map(serializeProfile));
+    if (runId !== state.runId) return;
+    if (result === "saved") {
       savedOk = true;
       state.savedId = state.post.id;
       renderSaved();
+    } else if (result === "kept" && !complete) {
+      setStatus(`${status.text} The complete scan of this post saved earlier was kept.`);
     }
   };
   // Real time taken, shown when the run ends so it can be compared with the estimate
@@ -1230,7 +1243,7 @@ async function importSaved() {
   const notes = [
     `Imported ${plural(r.added + r.replaced, "scan")}`,
     r.replaced && `${r.replaced} replacing older copies`,
-    r.kept && `${r.kept} skipped (the copy here is as new or newer)`,
+    r.kept && `${r.kept} skipped (the copy here is as new or complete, or the scan has no results)`,
     parsed.invalid && `${parsed.invalid} unreadable`,
     r.failed && `${r.failed} not saved (browser storage is full or blocked)`,
   ].filter(Boolean);
@@ -1350,8 +1363,11 @@ async function openSaved(id) {
   });
   Object.assign(state, {
     post: summary.post, slots, shown: 0, after: summary.after ?? null,
-    beforeKnown: summary.beforeKnown ?? true, savedId: id,
+    beforeKnown: summary.beforeKnown ?? true, savedId: id, urlPost: null,
   });
+  // A saved scan opens with no requests; a ?post= link left over from an earlier run would
+  // start a fresh one on reload.
+  history.replaceState(null, "", location.pathname);
   showError("");
   fillFromScan(summary);
   renderPost(summary.post, summary.thread);

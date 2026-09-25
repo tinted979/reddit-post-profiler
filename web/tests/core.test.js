@@ -156,7 +156,19 @@ test("stuck page terminates", async () => {
   );
   assert.equal((await collect(client.iterThreadComments("abc123", 2))).length, 2);
   // Two pages in a row with nothing new end the scan.
-  assert.deepEqual(calls.map((u) => u.searchParams.get("after")), [null, "499", "501"]);
+  assert.deepEqual(calls.map((u) => u.searchParams.get("after")), [null, "499", "500"]);
+});
+
+test("a stuck page steps past its second without skipping the next one", async () => {
+  // `after` is exclusive: after=500 still returns the comment made at 501.
+  const stuck = [0, 1].map((i) => ({ id: `c${i}`, author: "a", created_utc: 500 }));
+  const { client } = makeClient((u) => {
+    const after = u.searchParams.get("after");
+    if (after === null || Number(after) < 500) return json({ data: stuck });
+    return json({ data: Number(after) < 501 ? [{ id: "c2", author: "b", created_utc: 501 }] : [] });
+  });
+  const ids = (await collect(client.iterThreadComments("abc123", 2))).map((c) => c.id);
+  assert.deepEqual(ids, ["c0", "c1", "c2"]);
 });
 
 test("subredditCounts parses string counts and passes filters", async () => {
@@ -206,11 +218,36 @@ test("query timeout falls back to yearly chunks", async () => {
   assert.equal(calls.length, 3);
 });
 
+// yearlyRanges gives [after, before] pairs to send as they are: both exclusive, null for
+// no upper bound.
+const inRange = (t, [after, before]) => t > after && (before === null || t < before);
+
 test("yearlyRanges", () => {
   const r = yearlyRanges(1_700_000_000, 0);
-  assert.equal(r[0][0], 1_104_537_600);
+  assert.equal(r[0][0], Date.UTC(2005, 0, 1) / 1000 - 1);
   assert.equal(r.at(-1)[1], 1_700_000_000);
   assert.equal(r.length, 2023 - 2005 + 1);
+});
+
+test("yearlyRanges puts every second in exactly one range, New Year's midnight included", () => {
+  const before = Date.UTC(2010, 5, 1) / 1000;
+  const ranges = yearlyRanges(before, 0);
+  for (let year = 2005; year <= 2010; year++) {
+    const midnight = Date.UTC(year, 0, 1) / 1000;
+    for (const t of [midnight - 1, midnight, midnight + 1]) {
+      if (t < Date.UTC(2005, 0, 1) / 1000) continue;
+      assert.equal(ranges.filter((r) => inRange(t, r)).length, 1, `t=${t}`);
+    }
+  }
+  assert.equal(ranges.filter((r) => inRange(before, r)).length, 0); // before is exclusive
+});
+
+test("yearlyRanges without an end leaves the last year open, so a lagging clock misses nothing", () => {
+  const ranges = yearlyRanges(null, Date.UTC(2024, 5, 1) / 1000);
+  assert.deepEqual(ranges.at(-1), [Date.UTC(2024, 0, 1) / 1000 - 1, null]);
+  assert.ok(inRange(Date.UTC(2025, 2, 1) / 1000, ranges.at(-1)));
+  // A clock from before the archive still gives one range covering everything.
+  assert.deepEqual(yearlyRanges(null, 1_000), [[Date.UTC(2005, 0, 1) / 1000 - 1, null]]);
 });
 
 test("collectCommenters counts and filters", async () => {
@@ -460,7 +497,7 @@ test("buildProfile skips before queries for a post older than the window", async
 test("yearlyRanges starts at the window", () => {
   const after = Date.UTC(2020, 5, 1) / 1000;
   const ranges = yearlyRanges(Date.UTC(2022, 0, 1) / 1000, 0, after);
-  assert.deepEqual(ranges, [[after, Date.UTC(2021, 0, 1) / 1000], [Date.UTC(2021, 0, 1) / 1000, Date.UTC(2022, 0, 1) / 1000]]);
+  assert.deepEqual(ranges, [[after, Date.UTC(2021, 0, 1) / 1000], [Date.UTC(2021, 0, 1) / 1000 - 1, Date.UTC(2022, 0, 1) / 1000]]);
 });
 
 const t1 = (id, author, replies = []) => ({
@@ -498,6 +535,20 @@ test("an incomplete or failed comment tree falls back to paging", async () => {
     assert.deepEqual([...(await collectCommenters(client, POST))], [["dave", { count: 1, last: 5 }]]);
     assert.equal(calls[1].searchParams.get("limit"), "auto");
     assert.equal(calls.length, 3); // tree, one page, one empty page
+  }
+});
+
+test("a busy, rate-limiting or unreachable server doesn't make the tree fall back to paging", async () => {
+  for (const [name, treeResponse, ErrorClass] of [
+    ["slow down", () => json({ data: null, error: "Timeout. Maybe slow down a bit" }, 422), ServerBusy],
+    ["429", () => json({ error: "Too many requests" }, 429), ArcticShiftError],
+    ["network", () => { throw new TypeError("Failed to fetch"); }, ArcticShiftError],
+  ]) {
+    const { client, calls } = makeClient((u) =>
+      u.pathname === "/api/comments/tree" ? treeResponse() : json({ data: [] }),
+    );
+    await assert.rejects(collectCommenters(client, POST), ErrorClass, name);
+    assert.ok(calls.every((u) => u.pathname === "/api/comments/tree"), `${name}: paged the thread anyway`);
   }
 });
 
@@ -942,7 +993,7 @@ test("ScanStore saves, lists newest first, loads, replaces and deletes scans", a
   const store = new ScanStore();
   const rows = sampleProfiles().map(serializeProfile);
   assert.deepEqual(await store.list(), []);
-  assert.equal(await store.save({ id: "p1", scannedAt: 100, title: "old" }, rows), true);
+  assert.equal(await store.save({ id: "p1", scannedAt: 100, title: "old" }, rows), "saved");
   await store.save({ id: "p2", scannedAt: 200 }, rows.slice(0, 1));
   assert.deepEqual((await store.list()).map((s) => s.id), ["p2", "p1"]);
   await store.save({ id: "p1", scannedAt: 300, title: "new" }, rows); // a rescan replaces
@@ -956,11 +1007,63 @@ test("ScanStore saves, lists newest first, loads, replaces and deletes scans", a
   assert.deepEqual(await store.list(), []);
 });
 
+test("a stopped rescan doesn't replace a complete saved scan", async () => {
+  const store = new ScanStore();
+  const rows = sampleProfiles().map(serializeProfile);
+  const stats = { profiled: 3, failed: 0 };
+  assert.equal(await store.save({ id: "p1", scannedAt: 100, complete: true, stats }, rows), "saved");
+  assert.equal(await store.save({ id: "p1", scannedAt: 200, complete: false, stats }, rows.slice(0, 1)), "kept");
+  const rec = await store.load("p1");
+  assert.equal(rec.summary.scannedAt, 100);
+  assert.equal(rec.profiles.length, 3);
+  // A stopped scan can replace a stopped one, and a complete scan replaces anything.
+  assert.equal(await store.save({ id: "p2", scannedAt: 100, complete: false, stats }, rows), "saved");
+  assert.equal(await store.save({ id: "p2", scannedAt: 200, complete: false, stats }, rows), "saved");
+  assert.equal(await store.save({ id: "p1", scannedAt: 300, complete: true, stats }, rows.slice(0, 1)), "saved");
+  assert.equal((await store.load("p1")).summary.scannedAt, 300);
+});
+
+test("a scan where every lookup failed isn't saved, over a saved scan or at all", async () => {
+  const store = new ScanStore();
+  const rows = sampleProfiles().map(serializeProfile);
+  assert.equal(await store.save({ id: "p1", scannedAt: 100, complete: true, stats: { profiled: 3, failed: 0 } }, rows), "saved");
+  const allFailed = { profiled: 3, failed: 3 };
+  assert.equal(await store.save({ id: "p1", scannedAt: 200, complete: true, stats: allFailed }, rows), "kept");
+  assert.equal(await store.save({ id: "p2", scannedAt: 200, complete: true, stats: allFailed }, rows), "kept");
+  assert.deepEqual((await store.list()).map((s) => [s.id, s.scannedAt]), [["p1", 100]]);
+});
+
+test("importing a newer but stopped copy of a complete saved scan keeps the complete one", async () => {
+  const store = new ScanStore();
+  const scan = importScan(savedScan());
+  assert.equal(scan.summary.complete, true);
+  await store.save(scan.summary, scan.profiles);
+  const stopped = { ...scan, summary: { ...scan.summary, complete: false, scannedAt: scan.summary.scannedAt + 1 } };
+  assert.deepEqual(await store.importAll([stopped]), { added: 0, replaced: 0, kept: 1, failed: 0 });
+  assert.equal((await store.load(POST.id)).summary.complete, true);
+});
+
 test("ScanStore gives up on a store that hangs", async () => {
   const hang = () => new Promise(() => {});
   const store = new ScanStore({ backend: { getPrefix: hang, set: hang, setMany: hang, get: hang, delete: hang, clear: hang }, timeoutMs: 10 });
   assert.deepEqual(await store.list(), []);
-  assert.equal(await store.save({ id: "x", scannedAt: 1 }, []), false);
+  assert.equal(await store.save({ id: "x", scannedAt: 1 }, []), "failed");
+});
+
+test("a hung store stays off for new ScanStore and ProfileCache objects on the same backend", async () => {
+  // app.js makes a new store object for each action, so the flag must outlive the object.
+  let calls = 0;
+  const hang = () => {
+    calls++;
+    return new Promise(() => {});
+  };
+  const backend = { getPrefix: hang, set: hang, setMany: hang, get: hang, delete: hang, clear: hang, prune: hang };
+  assert.deepEqual(await new ScanStore({ backend, timeoutMs: 10 }).list(), []);
+  assert.equal(calls, 1);
+  assert.deepEqual(await new ScanStore({ backend, timeoutMs: 10 }).list(), []);
+  assert.equal(await new ProfileCache({ backend, timeoutMs: 10 }).get("k"), null);
+  assert.equal(new ProfileCache({ backend }).enabled, false);
+  assert.equal(calls, 1, "a later store waited on the hung backend again");
 });
 
 test("before facts come from one timestamp search per kind", async () => {
@@ -1000,6 +1103,28 @@ test("if the timestamp search fails, the count still comes from the aggregate", 
   assert.equal(p.targetCommentsBefore, 6);
   assert.equal(p.targetDaysBefore, null);
   assert.equal(p.targetFirstBefore, null);
+});
+
+test("a before answer the aggregate had to fill in isn't saved, so the next scan asks again", async () => {
+  const { cache } = makeCache();
+  const handler = aggregates({ comments: [["Python", 9]], before: { comments: 6 } });
+  const failing = makeClient((u) => (u.pathname === "/api/comments/search" ? json({ error: "Internal error" }, 500) : handler(u)));
+  const first = await buildProfile(failing.client, "alice", 1, POST, { cache });
+  assert.equal(first.targetDaysBefore, null);
+  const working = makeClient(handler);
+  const again = await buildProfile(working.client, "alice", 1, POST, { cache });
+  assert.equal(again.targetCommentsBefore, 6);
+  assert.equal(again.targetDaysBefore, 6);
+  assert.ok(working.calls.some((u) => u.pathname === "/api/comments/search"));
+});
+
+test("a bug in the before search fails the user instead of passing for a failed search", async () => {
+  const { client, calls } = makeClient(aggregates({ comments: [["Python", 9]], before: { comments: 6 } }));
+  client.timestamps = async () => {
+    throw new TypeError("oops");
+  };
+  await assert.rejects(buildProfile(client, "alice", 1, POST), TypeError);
+  assert.ok(!calls.some((u) => u.searchParams.has("before")), "fell back to the aggregate");
 });
 
 test("saved before facts are reused, old count-only records are not", async () => {
@@ -1149,7 +1274,7 @@ test("ScanStore saves a scan's two records together, and export counts scans it 
   };
   const store = new ScanStore({ backend });
   const scan = importScan(savedScan());
-  assert.equal(await store.save(scan.summary, scan.profiles), true);
+  assert.equal(await store.save(scan.summary, scan.profiles), "saved");
   assert.deepEqual(writes, [[`data|${POST.id}`, `sum|${POST.id}`]]);
   backend.map.delete(`data|${POST.id}`); // summary listed, profiles gone
   assert.deepEqual(await store.exportAll(), { scans: [], failed: 1 });
@@ -1312,12 +1437,15 @@ test("if the gap's timestamp search fails, the aggregate answers the count with 
     return json({ error: "internal error" }, 500); // the gap's timestamp search fails
   };
   const { client } = makeClient(handler);
+  const { cache } = makeCache();
   const dumps = fakeDumps({ postsThrough: T, commentsThrough: through, times: { comments: { alice: fileTimes } } });
-  const p = await buildProfile(client, "alice", 1, POST, { dumps });
+  const p = await buildProfile(client, "alice", 1, POST, { dumps, cache });
   assert.equal(p.targetCommentsBefore, fileTimes.length + gapCount); // files + the aggregate's gap count
   assert.equal(p.targetFirstBefore, Math.min(...fileTimes)); // the files' earliest
   assert.equal(p.targetDaysBefore, 2); // the files' days only
   assert.equal(p.targetTimelineComplete, false);
+  // A retry could fill in the gap's timeline, so the answer isn't saved.
+  assert.deepEqual(await cache.backend.getPrefix("v2|before|"), []);
 });
 
 test("a window start after the files' trust cutoff skips the files and asks the API from `after`", async () => {

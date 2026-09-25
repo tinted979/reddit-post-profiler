@@ -53,6 +53,10 @@ export class Unsupported extends ArcticShiftError {}
 // The run was stopped.
 export class Aborted extends Error {}
 
+// An overloaded or rate-limiting server, or no connection: it won't answer a fallback
+// either, so callers give up rather than send more (or heavier) queries.
+const refusesMore = (err) => err instanceof ServerBusy || err.status === 429 || err.status === null;
+
 const ID = "[0-9a-z]{1,13}";
 const URL_PATTERNS = [
   new RegExp(`/comments/(${ID})(?:[/?#]|$)`, "i"),
@@ -337,13 +341,14 @@ export class ArcticShiftClient {
   // Every archived comment under a post, in one request, from the comment tree. Returns
   // null when the tree can't be trusted to be complete (collapsed "more" stubs, an
   // unexpected shape, the size limit reached, nothing returned, or an API error), so the
-  // caller pages instead.
+  // caller pages instead. A busy or rate-limiting server, or no connection, throws: paging
+  // would only send it more requests.
   async threadCommentsTree(postId, limit = TREE_LIMIT) {
     let data;
     try {
       data = await this._get("/api/comments/tree", { link_id: postId, limit });
     } catch (err) {
-      if (err instanceof ArcticShiftError) return null;
+      if (err instanceof ArcticShiftError && !refusesMore(err)) return null;
       throw err;
     }
     const seen = new Set();
@@ -392,8 +397,9 @@ export class ArcticShiftClient {
       stale = fresh ? 0 : stale + 1;
       if (stale >= 2) return;
       const lastTs = Math.trunc(Number(page[page.length - 1].created_utc));
-      // A page with nothing new is stuck on one second: step past it.
-      let next = fresh ? lastTs - 1 : lastTs + 1;
+      // A page with nothing new is stuck on one second: step past it (`after` is
+      // exclusive, so after=lastTs starts at the next second).
+      let next = fresh ? lastTs - 1 : lastTs;
       if (cursor !== null && next <= cursor) next = cursor + 1;
       cursor = next;
     }
@@ -483,16 +489,18 @@ export class ArcticShiftClient {
   }
 }
 
-// [start, end) epoch-second ranges covering each calendar year (UTC) from the start of
-// the archive, or from `after`, up to `before` (default: now).
+// One [after, before] pair per calendar year (UTC), from the start of the archive or
+// from `after`, up to `before`, to send to the API as they are: both bounds are exclusive
+// there, so each year's `after` is a second before it starts. With no `before`, the last
+// year's is null (no end), so `nowSeconds` only decides how many years there are and a
+// clock running behind can't leave anything out.
 export function yearlyRanges(before, nowSeconds, after = null) {
-  const endTs = before ?? Math.trunc(nowSeconds) + 1;
-  const endYear = new Date(endTs * 1000).getUTCFullYear();
+  const endYear = Math.max(ARCHIVE_START_YEAR, new Date((before ?? Math.trunc(nowSeconds)) * 1000).getUTCFullYear());
   const ranges = [];
   for (let year = ARCHIVE_START_YEAR; year <= endYear; year++) {
-    const start = Math.max(Date.UTC(year, 0, 1) / 1000, after ?? 0);
-    const stop = Math.min(Date.UTC(year + 1, 0, 1) / 1000, endTs);
-    if (start < stop) ranges.push([start, stop]);
+    const start = Math.max(Date.UTC(year, 0, 1) / 1000 - 1, after ?? -Infinity);
+    const stop = year === endYear ? before : Math.min(Date.UTC(year + 1, 0, 1) / 1000, before ?? Infinity);
+    if (stop === null || start < stop - 1) ranges.push([start, stop]);
   }
   return ranges;
 }
@@ -675,7 +683,7 @@ function mergeKinds(parts) {
 // From the API, one timestamp search per kind usually answers everything; past
 // TIMELINE_LIMIT items the exact count and the first date take a query each, and `days`
 // is a lower bound (complete: false). If the search fails, the counts come from the
-// aggregate and the timeline is unknown.
+// aggregate and the timeline is unknown, and `degraded` says not to save the answer.
 async function beforeFacts(client, username, post, { after, needPosts, needComments, dumps = null }) {
   const fromApi = async (k, since) => {
     const opts = { subreddit: post.subreddit, after: since, before: post.createdUtc };
@@ -683,10 +691,11 @@ async function beforeFacts(client, username, post, { after, needPosts, needComme
     try {
       times = await client.timestamps(k, username, opts);
     } catch (err) {
-      // An overloaded or rate-limiting server, or no connection, won't answer the heavier
-      // aggregate either: fail this user rather than pile on more queries.
-      if (err instanceof Aborted || err instanceof ServerBusy || err.status === 429 || err.status === null) throw err;
-      return { count: sum(await client.subredditCounts(k, username, opts)), times: null, first: null, complete: false };
+      // Only an API error falls back (a bug should fail loudly), and not onto a server
+      // that won't answer the heavier aggregate either.
+      if (!(err instanceof ArcticShiftError) || refusesMore(err)) throw err;
+      const count = sum(await client.subredditCounts(k, username, opts));
+      return { count, times: null, first: null, complete: false, degraded: true };
     }
     if (times.length < TIMELINE_LIMIT) {
       return { count: times.length, times, first: minOf(times), complete: true };
@@ -718,6 +727,7 @@ async function beforeFacts(client, username, post, { after, needPosts, needComme
       times: gap.times ? [...times, ...gap.times] : times.length ? times : null,
       first: fromFiles.first ?? gap.first,
       complete: gap.complete,
+      degraded: gap.degraded,
     };
   };
   const [posts, comments] = await settleAll([
@@ -734,6 +744,9 @@ async function beforeFacts(client, username, post, { after, needPosts, needComme
     first: known ? minOf(firsts) : null,
     days: known ? days.size : null,
     complete: known && parts.every((p) => p.complete),
+    // A timeline search failed and the aggregate stood in: a retry could do better, so the
+    // answer isn't saved.
+    degraded: parts.some((p) => p.degraded),
   };
 }
 
@@ -920,8 +933,9 @@ export async function buildProfile(client, username, threadComments, post, { onl
       before = saved.value;
     } else {
       fromCache = false;
-      before = await beforeFacts(client, username, post, { after, needPosts, needComments, dumps });
-      await cacheSet(cache, beforeKey, before);
+      const { degraded, ...facts } = await beforeFacts(client, username, post, { after, needPosts, needComments, dumps });
+      before = facts;
+      if (!degraded) await cacheSet(cache, beforeKey, before);
     }
     Object.assign(profile, {
       targetPostsBefore: before.posts,
