@@ -15,6 +15,15 @@ paths:
 - `interactions` has no `subreddit` parameter. It returns 400 "not supported" for huge accounts such as AutoModerator.
 - `/api/users/interactions/subreddits`'s `after` is exclusive, like search's (an item at exactly `after` isn't counted).
 - The search website (`/search?fun=posts_search|comments_search&author=&subreddit=&after=`) is a front end over the same API, so scraping it saves nothing.
+- Subreddit-wide search (no `author` or `link_id`) works for a whole subreddit's recent activity (checked 2026-09-25: 10 requests, 3 s apart, no 422 or 429).
+  - **Request shape:** `/api/{posts,comments}/search?subreddit=&after=&sort=asc&limit=auto&fields=…`.
+  - **Speed:** it answers in 0.3–1.4 s, even for r/AskReddit (~200k comments/day) and for a window starting 7 days back.
+  - **Names:** the subreddit name is case-insensitive.
+  - **Fields:** `fields=id,author,created_utc,link_id` (comments) and `fields=id,author,created_utc` (posts) return just those keys.
+  - **Order:** rows are ascending by `created_utc`, and `after` is exclusive.
+  - **Paging:** `after=<last created_utc> − 1` repeats the boundary second without skipping anything.
+- `limit=auto` returned 100 rows, the same as `limit=100` (checked 2026-09-25). So paging costs about one request per 100 items; r/Hasan_Piker's ~1,900 comments a day are ~20 pages.
+- Outside a browser, responses carry `x-ratelimit-reset` (seconds left in the current 60 s window) and `x-ratelimit-reset-at` (epoch ms, on a minute boundary), but no `x-ratelimit-remaining` (checked 2026-09-25).
 
 Add a fact here only after checking it live, with the date. Agents may only use endpoints and
 parameters listed here; anything else needs a live check by a human first (docs/adr/0002).
