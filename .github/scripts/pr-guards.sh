@@ -5,7 +5,7 @@
 # (tests-guard.sh, which counts the tests).
 #
 # Agent work is any PR opened by, or with a commit written by, someone other than the owner
-# (the Claude App's writers, Copilot); Dependabot's action bumps are treated as the owner's.
+# (the writer app's agents, Copilot); Dependabot's action bumps are treated as the owner's.
 # It's judged by authorship, not branch name, because an agent can choose any branch name.
 # Agent work may never change agent rules, CI or deploy config (nothing waives that; the owner
 # applies any Grounding text by hand), and changes to existing tests need ack:tests. The path
@@ -25,7 +25,7 @@ fail=0
 # so is a PR with more commits than gh lists (100). Forged authorship can't make agent commits
 # pass as the owner's or Dependabot's, because agents can't push to those branches at all: the
 # "branches: owner only" ruleset lets only the owner (and Dependabot, on its own branches)
-# update any branch but main and claude/<number>-…, the agents' own, whose PRs the Claude App
+# update any branch but main and claude/<number>-…, the agents' own, whose PRs the writer app
 # opens, and a PR's author can't be forged.
 authors=$(gh pr view "$PR" --json author,commits --jq '
   (.author.login, (.commits[].authors[0].login), (if (.commits | length) >= 100 then "(too many commits to check)" else empty end))

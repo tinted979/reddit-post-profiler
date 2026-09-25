@@ -819,7 +819,12 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 >   - `owner-ack.sh` is shared by both.
 >   - The test count is only as trustworthy as the PR's code, since that code could fake it. The protected-path verdict is unaffected.
 > - **`from-issue` refuses an issue edited by anyone but the owner** (or the audit bot), in its body (`userContentEdits`) or title (`RenamedTitleEvent`), because the agents' App token can edit issues.
-> - **`follow-up` only revises PRs whose author is `app/claude`.** That login hasn't been checked yet, because no App-opened PR exists; if it's wrong the job refuses, which fails closed.
+> - **The writers don't use the Claude GitHub App.** This corrects §4.4 and §9.4 item 4. The app's public record (`gh api apps/claude`) shows it asks for `workflows: write`, `actions: write` and `repository_hooks: write`. With those, code a writer runs could replace `checks.yml` on its branch, or add a workflow that reads the Claude token secret. Push rulesets could block those paths for every token, but they're only for organization-owned repositories.
+>   - The writers use the owner's own **writer app**, with contents, pull-requests and issues write only. `actions/create-github-app-token` mints its token per job and also asks for just those three.
+>   - GitHub refuses a workflow-file push from a token without `workflows` permission.
+>   - The writer jobs have no `id-token`, and check `github.triggering_actor` too, so a re-run by anyone else doesn't count.
+>   - `follow-up` only revises PRs opened by `app/<WRITER_APP_SLUG>`.
+>   - The Claude App can be uninstalled.
 > - **Every `setup-uv` step sets `enable-cache: false`, and every `setup-node` step sets `package-manager-cache: false`.** Both actions cache by default: setup-uv always on GitHub's runners, setup-node as soon as `package.json` names a package manager, which a PR could add. A writer job's cache, saved after agent code ran, would be restored by CI on `main`.
 > - **In agent work, `ack:tests` also covers changes to what decides which tests run:** `web/package.json`, `web/.nvmrc`, and any `conftest.py`, `pytest.ini`, `pyproject.toml`, `setup.cfg` or `tox.ini`, new ones included. Writers may only create and push `claude/<issue>-*` and must open PRs with `--draft`.
 > - **`pr-guards.sh` fails closed** when a PR has more commits than `gh` lists (100). It uses `--no-renames`, so moving a file out of a protected folder still counts as changing it.
