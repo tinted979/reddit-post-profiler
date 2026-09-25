@@ -9,6 +9,8 @@
 
 const DAY = 86400;
 
+// Stores copies (structuredClone), as IndexedDB does, so a record it couldn't store fails
+// here too and callers can't change a stored record by changing their own object.
 export class MemoryBackend {
   constructor() {
     this.map = new Map();
@@ -16,15 +18,22 @@ export class MemoryBackend {
   async get(key) {
     return this.map.get(key) ?? null;
   }
+  async getMany(keys) {
+    return keys.map((key) => this.map.get(key) ?? null);
+  }
   async set(key, record) {
-    this.map.set(key, record);
+    this.map.set(key, structuredClone(record));
   }
   // Several [key, record] pairs, all or none.
   async setMany(entries) {
-    for (const [key, record] of entries) this.map.set(key, record);
+    const copies = entries.map(([key, record]) => [key, structuredClone(record)]);
+    for (const [key, record] of copies) this.map.set(key, record);
   }
   async delete(key) {
     this.map.delete(key);
+  }
+  async deleteMany(keys) {
+    for (const key of keys) this.map.delete(key);
   }
   // Values of the keys starting with `prefix`.
   async getPrefix(prefix) {
@@ -90,19 +99,32 @@ export class IndexedDbBackend {
     this._idb = idb;
   }
 
-  // Run `fn(store)` in a transaction; resolves with the result of the request it returns.
+  // Run `fn(store)` in one transaction; resolves when it commits, with the result of the
+  // request `fn` returns (or of each, for an array). If `fn` throws (a record that can't
+  // be stored, say), the transaction is aborted so nothing it had queued is written.
   async _run(mode, fn) {
     const db = await openDb(this._idb);
     return new Promise((resolve, reject) => {
       const tx = db.transaction(this._store, mode);
-      const req = fn(tx.objectStore(this._store));
-      tx.oncomplete = () => resolve(req?.result);
+      let req;
+      try {
+        req = fn(tx.objectStore(this._store));
+      } catch (err) {
+        tx.onabort = () => reject(err);
+        tx.abort();
+        return;
+      }
+      tx.oncomplete = () => resolve(Array.isArray(req) ? req.map((r) => r.result) : req?.result);
       tx.onerror = tx.onabort = () => reject(tx.error);
     });
   }
 
   async get(key) {
     return (await this._run("readonly", (s) => s.get(key))) ?? null;
+  }
+
+  async getMany(keys) {
+    return (await this._run("readonly", (s) => keys.map((key) => s.get(key)))).map((v) => v ?? null);
   }
 
   async set(key, record) {
@@ -119,6 +141,13 @@ export class IndexedDbBackend {
 
   async delete(key) {
     await this._run("readwrite", (s) => s.delete(key));
+  }
+
+  async deleteMany(keys) {
+    await this._run("readwrite", (s) => {
+      for (const key of keys) s.delete(key);
+      return null;
+    });
   }
 
   async getPrefix(prefix) {
@@ -237,15 +266,19 @@ export class ProfileCache {
 // ({profiles}, as serializeProfile rows). A new scan of a post replaces the old one.
 // Scans are kept until deleted, or cleared with the rest of the saved results.
 export class ScanStore {
-  constructor({ backend = new MemoryBackend(), timeoutMs = 3000 } = {}) {
+  // A big scan's save (thousands of profiles to copy) can take seconds on a slow device,
+  // so writes get longer than reads before the store counts as hung: giving up early would
+  // report a save as failed that then goes through.
+  constructor({ backend = new MemoryBackend(), timeoutMs = 3000, writeTimeoutMs = 30000 } = {}) {
     this.backend = backend;
     this._timeoutMs = timeoutMs;
+    this._writeTimeoutMs = writeTimeoutMs;
   }
 
-  async _call(fn, fallback) {
+  async _call(fn, fallback, timeoutMs = this._timeoutMs) {
     if (hungBackends.has(this.backend)) return fallback;
     try {
-      return await withTimeout(fn, this._timeoutMs, () => hungBackends.add(this.backend));
+      return await withTimeout(fn, timeoutMs, () => hungBackends.add(this.backend));
     } catch {
       return fallback;
     }
@@ -265,7 +298,7 @@ export class ScanStore {
       }
       await this.backend.setMany([[`data|${summary.id}`, { profiles }], [`sum|${summary.id}`, summary]]);
       return "saved";
-    }, "failed");
+    }, "failed", this._writeTimeoutMs);
   }
 
   // Summaries, newest scan first.
@@ -275,19 +308,21 @@ export class ScanStore {
       .sort((a, b) => b.scannedAt - a.scannedAt);
   }
 
-  // {summary, profiles} or null.
+  // {summary, profiles} or null. Both records are read in one transaction, so a save from
+  // another tab can't land between them.
   async load(id) {
     return this._call(async () => {
-      const [summary, data] = await Promise.all([this.backend.get(`sum|${id}`), this.backend.get(`data|${id}`)]);
+      const [summary, data] = await this.backend.getMany([`sum|${id}`, `data|${id}`]);
       return summary && Array.isArray(data?.profiles) ? { summary, profiles: data.profiles } : null;
     }, null);
   }
 
+  // Both records in one transaction; returns whether it worked.
   delete(id) {
     return this._call(async () => {
-      await this.backend.delete(`sum|${id}`);
-      await this.backend.delete(`data|${id}`);
-    });
+      await this.backend.deleteMany([`sum|${id}`, `data|${id}`]);
+      return true;
+    }, false, this._writeTimeoutMs);
   }
 
   // Every scan as {summary, profiles}, newest first, for exporting; `failed` counts the
@@ -309,16 +344,22 @@ export class ScanStore {
   async importAll(scans) {
     const have = new Map((await this.list()).map((s) => [s.id, s.scannedAt]));
     const result = { added: 0, replaced: 0, kept: 0, failed: 0 };
-    for (const [i, { summary, profiles }] of scans.entries()) {
+    let stopped = false; // a save failed: storage is full or blocked, so try no more
+    for (const { summary, profiles } of scans) {
       const when = have.get(summary.id);
       if (when !== undefined && when >= summary.scannedAt) {
         result.kept++;
         continue;
       }
+      if (stopped) {
+        result.failed++;
+        continue;
+      }
       const saved = await this.save(summary, profiles);
       if (saved === "failed") {
-        result.failed = scans.length - i; // storage full or blocked: stop here
-        break;
+        result.failed++;
+        stopped = true;
+        continue;
       }
       if (saved === "kept" || saved === "empty") {
         result.kept++;

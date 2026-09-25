@@ -1315,7 +1315,11 @@ function scanAgain(id) {
 
 async function deleteSaved(id) {
   if (state.controller) return;
-  await openScans().delete(id);
+  if (!(await openScans().delete(id))) {
+    savedNote("That saved scan couldn't be deleted: browser storage isn't responding. Try again, or reload the page.");
+    announce($("saved-note").textContent);
+    return; // the scan and its Delete button stay, so focus does too
+  }
   if (state.savedId === id) state.savedId = null;
   announce("Saved scan deleted.");
   await renderSaved();
