@@ -1,4 +1,4 @@
-> **Status.** Current plan, being built in phases. The decisions are recorded in docs/adr/0005. P0 (the live checks, the ADR and this file) is the first PR. Update this note as phases land.
+> **Status.** Current plan, being built in phases; the decisions are in docs/adr/0005. Landed: P0 (#72), P1, the shared tail (#73), and P2, the thread from the archive (#74). Next: P3, the fetcher for the scheduled sync. Update this note as phases land.
 
 # Fewer Arctic Shift requests: shared subreddit tails, and a scheduled archive sync
 
