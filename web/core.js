@@ -29,11 +29,27 @@ const TIMELINE_LIMIT = 100;
 // Pacing a scan starts with, and the range the page accepts. The server tops out at about
 // 0.8 requests/s whatever the settings, so going faster only brings more "slow down"
 // replies (see SECONDS_PER_REQUEST).
-export const SCAN_DEFAULTS = Object.freeze({ delay: 0.75, concurrency: 2 });
+export const SCAN_DEFAULTS = Object.freeze({ delay: 0.75, concurrency: 2, cacheDays: 7 });
 export const SCAN_LIMITS = Object.freeze({
   delay: Object.freeze({ min: 0.25, max: 30 }),
   concurrency: Object.freeze({ min: 1, max: 5 }),
+  maxUsers: Object.freeze({ min: 1, max: 1_000_000 }),
+  cacheDays: Object.freeze({ min: 0, max: 365 }),
 });
+
+// The numeric scan options from the form or a share link, clamped to SCAN_LIMITS.
+// Anything that isn't a finite number (a typo, "Infinity") takes its default; maxUsers
+// below 1 means no cap (null), and an infinite one the largest cap.
+export function clampScanNumbers({ maxUsers, delay, concurrency, cacheDays }) {
+  const clamp = (n, { min, max }) => Math.min(max, Math.max(min, n));
+  const finite = (n, fallback, limits) => (Number.isFinite(n) ? clamp(n, limits) : fallback);
+  return {
+    maxUsers: maxUsers >= 1 ? Math.floor(Math.min(maxUsers, SCAN_LIMITS.maxUsers.max)) : null,
+    delay: finite(delay, SCAN_DEFAULTS.delay, SCAN_LIMITS.delay),
+    concurrency: finite(Math.round(concurrency), SCAN_DEFAULTS.concurrency, SCAN_LIMITS.concurrency),
+    cacheDays: cacheDays >= 0 ? finite(cacheDays, SCAN_DEFAULTS.cacheDays, SCAN_LIMITS.cacheDays) : SCAN_DEFAULTS.cacheDays,
+  };
+}
 
 export class ArcticShiftError extends Error {
   // `status` is the HTTP status, or null when the request never got a response.
@@ -305,7 +321,7 @@ export class ArcticShiftClient {
         await this._sleep(2 * 2 ** (slowdowns - 1), "server busy");
         continue;
       }
-      if (resp.status >= 500 || (resp.ok && (payload === null || typeof payload !== "object"))) {
+      if (resp.status >= 500 || (resp.ok && (payload === null || typeof payload !== "object" || !("data" in payload)))) {
         if (++failures > this.maxRetries) {
           throw new ArcticShiftError(`HTTP ${resp.status} on ${path}: ${error ?? "bad response"}`, resp.status);
         }
@@ -327,11 +343,17 @@ export class ArcticShiftClient {
     });
     const p = Array.isArray(data) ? data[0] : null;
     if (!p?.subreddit) return null;
+    // Every later query is built from these, so a reply that doesn't fit fails here rather
+    // than sending before=NaN or links to the wrong place.
+    const createdUtc = Math.trunc(Number(p.created_utc));
+    if (p.id !== postId || !/^\w{2,21}$/.test(p.subreddit) || !(createdUtc > 0)) {
+      throw new ArcticShiftError(`unexpected post record for ${postId}`);
+    }
     return {
       id: p.id,
       author: p.author || "[deleted]",
       subreddit: p.subreddit,
-      createdUtc: Math.trunc(Number(p.created_utc)),
+      createdUtc,
       title: p.title || "",
       // Reddit's count when archived, deleted comments included.
       numComments: Number(p.num_comments) || 0,
@@ -1195,6 +1217,12 @@ export function scanStats(profiles, post, beforeKnown = true, rules = DEFAULT_BA
   return stats;
 }
 
+// Links to a post and a subreddit on Reddit. The names come from the API (untrusted), so
+// each is encoded: a "/" or "?" in one can't change the path.
+export const redditSubredditUrl = (name) => `https://www.reddit.com/r/${encodeURIComponent(name)}/`;
+export const redditPostUrl = (post) =>
+  `https://www.reddit.com/r/${encodeURIComponent(post.subreddit)}/comments/${encodeURIComponent(post.id)}/`;
+
 // Link to the Arctic Shift search page listing an author's posts or comments in a
 // subreddit, newest first. kind: "posts" | "comments"; after: epoch seconds or null.
 export function arcticSearchUrl(kind, author, subreddit, after = null) {
@@ -1220,6 +1248,8 @@ export const CSV_COLUMNS = [
   "target_active_days_before",
   "target_first_before_utc",
   "target_badge",
+  // true, or false when target_active_days_before is only a lower bound; empty if unknown.
+  "target_days_exact",
 ];
 
 function csvCell(value) {
@@ -1234,22 +1264,27 @@ function csvCell(value) {
 export function toCsv(profiles, post, minCount = 0, { rules = DEFAULT_BADGES, beforeKnown = true } = {}) {
   const lines = [CSV_COLUMNS.join(",")];
   for (const p of profiles) {
+    // With the post older than the history window, nothing before it was looked up: leave
+    // those cells empty rather than write zeros that read as "no activity".
+    const before = beforeKnown && !p.error;
     const base = {
       username: p.username,
       thread_comments: p.threadComments,
       target_subreddit: post.subreddit,
-      target_posts_before: p.error ? "" : p.targetPostsBefore,
-      target_comments_before: p.error ? "" : p.targetCommentsBefore,
+      target_posts_before: before ? p.targetPostsBefore : "",
+      target_comments_before: before ? p.targetCommentsBefore : "",
       error: p.error || "",
     };
-    if (!p.error) {
+    if (before) {
       const f = profileFacts(p, post);
       const first = Number.isFinite(p.targetFirstBefore) ? new Date(p.targetFirstBefore * 1000).toISOString() : "";
       Object.assign(base, {
-        // A lower bound for users with 100+ posts or comments there (see beforeFacts).
+        // A lower bound when the API had 100+ posts or comments there to list (see
+        // beforeFacts); target_days_exact says which.
         target_active_days_before: f.days === null ? "" : f.days,
         target_first_before_utc: first,
-        target_badge: beforeKnown ? activityTier(f, rules) : "",
+        target_badge: activityTier(f, rules),
+        target_days_exact: f.days === null ? "" : f.n === 0 || f.exact,
       });
     }
     const subs = sortedSubreddits(p, post, minCount);
@@ -1317,12 +1352,21 @@ export function importScan(rec) {
   const p = s?.post;
   if (!s || typeof s !== "object" || !p || typeof p !== "object" || !Array.isArray(rec.profiles)) return null;
   if (typeof p.id !== "string" || !/^[0-9a-z]{1,13}$/.test(p.id) || s.id !== p.id) return null;
-  if (!isName(p.subreddit, 30) || typeof p.author !== "string" || !isEpoch(p.createdUtc) || !isEpoch(s.scannedAt)) return null;
+  if (!isName(p.subreddit, 30) || !(p.author === "[deleted]" || isName(p.author, 40))) return null;
+  if (!isEpoch(p.createdUtc) || !isEpoch(s.scannedAt)) return null;
   const profiles = rec.profiles.map(importProfile);
   if (profiles.includes(null)) return null;
+  if (new Set(profiles.map((d) => d.username.toLowerCase())).size !== profiles.length) return null;
+  // Ranks index the page's card slots, so renumber them 0..n-1 in their order: a huge rank
+  // would make a sparse array every render walks, and a repeated one would hide a card.
+  profiles
+    .map((d, i) => [d, i])
+    .sort(([a, i], [b, j]) => a.rank - b.rank || i - j)
+    .forEach(([d], rank) => (d.rank = rank));
+  profiles.sort((a, b) => a.rank - b.rank);
   const post = {
     id: p.id,
-    author: p.author.slice(0, 40),
+    author: p.author,
     subreddit: p.subreddit,
     createdUtc: Math.trunc(p.createdUtc),
     title: typeof p.title === "string" ? p.title.slice(0, 500) : "",

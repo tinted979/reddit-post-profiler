@@ -18,6 +18,8 @@ import {
   sameBadges,
   tierCounts,
   arcticSearchUrl,
+  redditPostUrl,
+  redditSubredditUrl,
   collectCommenters,
   deserializeProfile,
   emptyProfile,
@@ -32,6 +34,7 @@ import {
   parseUsernames,
   SCAN_DEFAULTS,
   SCAN_LIMITS,
+  clampScanNumbers,
   scanStats,
   serializeProfile,
   sortedSubreddits,
@@ -130,6 +133,13 @@ test("parsePostRef accepts urls, fullnames and ids", () => {
   }
 });
 
+test("reddit links encode names from the API, so they can't change the path", () => {
+  assert.equal(redditPostUrl({ subreddit: "Python", id: "abc123" }), "https://www.reddit.com/r/Python/comments/abc123/");
+  assert.equal(redditSubredditUrl("rust"), "https://www.reddit.com/r/rust/");
+  assert.equal(redditSubredditUrl("../user/x?y"), "https://www.reddit.com/r/..%2Fuser%2Fx%3Fy/");
+  assert.equal(redditPostUrl({ subreddit: "a/b", id: "c?d" }), "https://www.reddit.com/r/a%2Fb/comments/c%3Fd/");
+});
+
 test("getPost", async () => {
   const { client } = makeClient(() =>
     json({ data: [{ id: "abc123", author: "op", subreddit: "Python", created_utc: 1700000000, title: "Hi" }] }),
@@ -137,6 +147,20 @@ test("getPost", async () => {
   assert.deepEqual(await client.getPost("abc123"), {
     id: "abc123", author: "op", subreddit: "Python", createdUtc: 1700000000, title: "Hi", numComments: 0,
   });
+});
+
+test("getPost rejects a post it can't use rather than scanning with NaN times", async () => {
+  const good = { id: "abc123", author: "op", subreddit: "Python", created_utc: 1700000000, title: "Hi" };
+  for (const bad of [{ created_utc: "soon" }, { created_utc: undefined }, { created_utc: -5 }, { id: "zzz999" }, { subreddit: "a/b" }]) {
+    const { client } = makeClient(() => json({ data: [{ ...good, ...bad }] }));
+    await assert.rejects(client.getPost("abc123"), ArcticShiftError, JSON.stringify(bad));
+  }
+});
+
+test("a reply with no data field is a bad response, not an empty answer", async () => {
+  const { client, calls } = makeClient(() => json({}));
+  await assert.rejects(client.getPost("abc123"), /bad response/);
+  assert.equal(calls.length, client.maxRetries + 1);
 });
 
 test("thread comments paginate and dedupe", async () => {
@@ -680,11 +704,11 @@ test("toCsv writes one row per user and subreddit, with the badge columns at the
     toCsv(profiles, POST, 2),
     [
       "username,thread_comments,target_subreddit,target_posts_before,target_comments_before,subreddit,posts,comments,total,error," +
-        "target_active_days_before,target_first_before_utc,target_badge",
-      "alice,3,Python,1,4,Python,2,10,12,,,,occasional", // no timeline saved: judged by count
-      "alice,3,Python,1,4,big,0,5,5,,,,occasional",
-      "ghost,1,Python,0,0,,,,,,0,,new",
-      'busy,2,Python,,,,,,,"Query timed out, sorry",,,',
+        "target_active_days_before,target_first_before_utc,target_badge,target_days_exact",
+      "alice,3,Python,1,4,Python,2,10,12,,,,occasional,", // no timeline saved: judged by count
+      "alice,3,Python,1,4,big,0,5,5,,,,occasional,",
+      "ghost,1,Python,0,0,,,,,,0,,new,true",
+      'busy,2,Python,,,,,,,"Query timed out, sorry",,,,',
       "",
     ].join("\r\n"),
   );
@@ -1213,6 +1237,8 @@ test("imported scans are checked", () => {
     (s) => (s.profiles[0].subreddits[0][1] = "3"),
     (s) => (s.profiles[1].targetFirstBefore = "yesterday"),
     (s) => (s.profiles = "x"),
+    (s) => (s.profiles[1].username = s.profiles[0].username.toUpperCase()), // the same user twice
+    (s) => (s.summary.post.author = "<b>op</b>"),
   ];
   for (const spoil of bad) {
     const scan = savedScan();
@@ -1230,6 +1256,21 @@ test("imported scans are checked", () => {
   const older = savedScan();
   delete older.summary.archiveRequests;
   assert.equal(importScan(older).summary.archiveRequests, null);
+});
+
+test("imported ranks are renumbered 0..n-1 in their order, so a huge or repeated rank can't hang or hide a card", () => {
+  const scan = savedScan();
+  scan.profiles[0].rank = 4_000_000_000;
+  scan.profiles[1].rank = 7;
+  scan.profiles[2].rank = 7;
+  const { profiles } = importScan(scan);
+  assert.deepEqual(profiles.map((p) => [p.username, p.rank]), [
+    [scan.profiles[1].username, 0], [scan.profiles[2].username, 1], [scan.profiles[0].username, 2],
+  ]);
+  // A deleted post author is kept as the API gives it.
+  const deleted = savedScan();
+  deleted.summary.post.author = "[deleted]";
+  assert.equal(importScan(deleted).summary.post.author, "[deleted]");
 });
 
 test("ScanStore exports every scan and imports only newer copies", async () => {
@@ -1261,7 +1302,24 @@ test("CSV cells that a spreadsheet would run as a formula are marked as text", (
   const profiles = [{ username: "-Nerf-", threadComments: 1, targetPostsBefore: 0, targetCommentsBefore: 0,
     subreddits: new Map(), error: '=HYPERLINK("http://x","y")' }];
   const [, row] = toCsv(profiles, POST).trim().split("\n");
-  assert.equal(row, `'-Nerf-,1,Python,,,,,,,"'=HYPERLINK(""http://x"",""y"")",,,`);
+  assert.equal(row, `'-Nerf-,1,Python,,,,,,,"'=HYPERLINK(""http://x"",""y"")",,,,`);
+});
+
+test("the CSV leaves 'before' cells empty when they weren't checked, and says when days is a lower bound", () => {
+  const base = { username: "alice", threadComments: 1, error: null, subreddits: new Map([["Python", { posts: 0, comments: 1 }]]) };
+  const cells = (p, opts) => {
+    const [header, row] = toCsv([p], POST, 0, opts).trim().split("\r\n");
+    return Object.fromEntries(header.split(",").map((k, i) => [k, row.split(",")[i]]));
+  };
+  // A post older than the history window: nothing before it was looked up.
+  const unknown = cells({ ...base, targetPostsBefore: 0, targetCommentsBefore: 0 }, { beforeKnown: false });
+  for (const k of ["target_posts_before", "target_comments_before", "target_active_days_before", "target_first_before_utc", "target_badge", "target_days_exact"]) {
+    assert.equal(unknown[k], "", k);
+  }
+  const bound = cells({ ...base, targetPostsBefore: 0, targetCommentsBefore: 150, targetDaysBefore: 5, targetFirstBefore: POST.createdUtc - 86400 * 700, targetTimelineComplete: false });
+  assert.deepEqual([bound.target_active_days_before, bound.target_days_exact], ["5", "false"]);
+  const exact = cells({ ...base, targetPostsBefore: 0, targetCommentsBefore: 3, targetDaysBefore: 3, targetFirstBefore: POST.createdUtc - 86400 * 10 });
+  assert.deepEqual([exact.target_active_days_before, exact.target_days_exact], ["3", "true"]);
 });
 
 test("imported dates a Date can't hold are rejected", () => {
@@ -1328,6 +1386,24 @@ test("the client paces with the scan defaults, which sit inside the limits", () 
     const { min, max } = SCAN_LIMITS[key];
     assert.ok(min <= SCAN_DEFAULTS[key] && SCAN_DEFAULTS[key] <= max, key);
   }
+});
+
+test("scan numbers are clamped to the limits; anything else takes its default", () => {
+  assert.deepEqual(
+    clampScanNumbers({ maxUsers: 2.7, delay: 0.01, concurrency: 4.6, cacheDays: 400 }),
+    { maxUsers: 2, delay: SCAN_LIMITS.delay.min, concurrency: SCAN_LIMITS.concurrency.max, cacheDays: SCAN_LIMITS.cacheDays.max },
+  );
+  // A share link's cache=Infinity or max=1e400 must not mean "keep forever" or "no cap".
+  assert.deepEqual(
+    clampScanNumbers({ maxUsers: Infinity, delay: Infinity, concurrency: NaN, cacheDays: Infinity }),
+    { maxUsers: SCAN_LIMITS.maxUsers.max, delay: SCAN_DEFAULTS.delay, concurrency: SCAN_DEFAULTS.concurrency, cacheDays: SCAN_DEFAULTS.cacheDays },
+  );
+  assert.deepEqual(
+    clampScanNumbers({ maxUsers: 0, delay: 1, concurrency: 1, cacheDays: -1 }),
+    { maxUsers: null, delay: 1, concurrency: 1, cacheDays: SCAN_DEFAULTS.cacheDays },
+  );
+  assert.equal(clampScanNumbers({ maxUsers: NaN, delay: 1, concurrency: 1, cacheDays: 0 }).maxUsers, null);
+  assert.equal(clampScanNumbers({ maxUsers: NaN, delay: 1, concurrency: 1, cacheDays: 0 }).cacheDays, 0); // 0 = don't save
 });
 
 test("wait runs on the timer it's given, and abort cancels that timer", async () => {
