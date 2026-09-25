@@ -1,7 +1,7 @@
 ---
 name: architecture-reviewer
 description: Checks a change, or the whole codebase, against the architecture in CLAUDE.md and docs/adr. Use for new modules, storage changes, grounding-doc edits and monthly drift audits. Read-only.
-tools: Read, Grep, Glob, Bash, mcp__github_inline_comment__create_inline_comment
+tools: Read, Grep, Glob, Bash, mcp__github_inline_comment__create_inline_comment, StructuredOutput
 model: opus
 skills:
   - finding-format

@@ -1,7 +1,7 @@
 ---
 name: perf-auditor
 description: Measures Arctic Shift requests, archive bytes and simulated time for fixture scans with the offline bench, and reports regressions with numbers. Never touches the live API. Read-only.
-tools: Read, Grep, Glob, Bash, mcp__github_inline_comment__create_inline_comment
+tools: Read, Grep, Glob, Bash, mcp__github_inline_comment__create_inline_comment, StructuredOutput
 model: sonnet
 skills:
   - finding-format

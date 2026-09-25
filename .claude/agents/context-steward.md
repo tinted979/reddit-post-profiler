@@ -1,7 +1,7 @@
 ---
 name: context-steward
 description: Checks that CLAUDE.md, WORKFLOW.md's corrections, .claude/agents, .claude/skills and .claude/rules still match the code, and proposes exact corrections. Read-only.
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, StructuredOutput
 model: sonnet
 skills:
   - finding-format
