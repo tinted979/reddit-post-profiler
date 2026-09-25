@@ -1,0 +1,175 @@
+name: Agent audits
+
+# Scheduled, read-only roles. The agent job can't write to GitHub at all: its GITHUB_TOKEN can
+# only read code and issues. It returns findings as JSON (validated against the finding-format
+# schema), and a separate small job with no agent in it files at most three issues from them
+# (the "safe outputs" pattern). Nothing unattended ever changes code: the owner reads a
+# finding and turns it into work by labelling it agent:implement or agent:refactor.
+on:
+  schedule:
+    - cron: "47 6 * * 1" # Mondays, 06:47 UTC: bug hunter (archive-check runs at 06:17)
+    - cron: "43 6 1 * *" # The 1st of the month: performance, architecture drift, context steward
+  workflow_dispatch:
+    inputs:
+      role:
+        description: Which audit
+        type: choice
+        options: [bug-hunter, perf-auditor, architecture-reviewer, context-steward]
+        default: bug-hunter
+      focus:
+        description: Optional file or area to focus on, e.g. web/queue.js
+        type: string
+        required: false
+
+permissions: {}
+
+jobs:
+  plan:
+    if: >-
+      vars.AGENTS_ENABLED == 'true' &&
+      (github.event_name == 'schedule' ||
+       (github.actor == github.repository_owner && github.triggering_actor == github.repository_owner))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      roles: ${{ steps.pick.outputs.roles }}
+    steps:
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          CRON: ${{ github.event.schedule }}
+          ROLE: ${{ inputs.role }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then roles="[\"$ROLE\"]"
+          elif [ "$CRON" = "47 6 * * 1" ]; then roles='["bug-hunter"]'
+          else roles='["perf-auditor","architecture-reviewer","context-steward"]'
+          fi
+          echo "roles=$roles" >> "$GITHUB_OUTPUT"
+
+  audit:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # one at a time: gentler on the plan's usage limits
+      matrix:
+        role: ${{ fromJSON(needs.plan.outputs.roles) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read # to check for existing findings; no write scope at all
+    env:
+      AGENT_ROLE: ${{ matrix.role }}
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 200 # recent history, for "what changed lately" and a month-old baseline
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: web/.nvmrc
+          package-manager-cache: false
+      - name: Install the web tests' dev dependency
+        working-directory: web
+        run: npm ci
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false # no cache to poison: nothing restored, nothing saved
+      - name: Python for the dump tool tests (python -m pytest)
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/py"
+          uv pip install --python "$RUNNER_TEMP/py" "duckdb>=1.1,<2" pytest
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+      - name: Install bubblewrap and socat (the env scrub's subprocess sandbox needs both)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap socat
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor, and bwrap needs
+          # them. This runner is thrown away after the job.
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          command -v socat
+          bwrap --ro-bind / / --unshare-pid true && echo "bubblewrap works"
+      - name: The findings schema
+        id: schema
+        run: |
+          schema=$(jq -c . .claude/skills/finding-format/findings.schema.json)
+          # It goes inside single quotes in claude_args below.
+          if [[ "$schema" == *"'"* ]]; then echo "::error::The schema can't contain a single quote."; exit 1; fi
+          echo "json=$schema" >> "$GITHUB_OUTPUT"
+      - id: claude
+        uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            Run your audit as the ${{ matrix.role }} agent (.claude/agents/${{ matrix.role }}.md).
+            Focus: ${{ inputs.focus || 'your choice, per your role file' }}
+            Report per .claude/skills/finding-format/SKILL.md (read it if it isn't already in
+            your context). Your edits stay on this runner and are thrown away; nothing is pushed.
+
+            Your tools: Read, Grep, Glob, Edit and Write; and only these shell commands, so don't
+            try others (ls, cat, find...), which are refused and waste turns: `npm --prefix web
+            test`, `node --test <files>`, `node web/bench/scan-bench.mjs [--base <ref>]`,
+            `python -m pytest <files>`, `git log`, `git show`, `git diff`, and
+            `gh issue list`. You have a limited number of turns: keep to one area, and always
+            finish with your structured output, even if it's empty. Zero findings is a good result.
+          claude_args: >-
+            --agent ${{ matrix.role }}
+            --max-turns 50
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(node web/bench/scan-bench.mjs:*),Bash(python -m pytest:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(gh issue list:*)"
+            --json-schema '${{ steps.schema.outputs.json }}'
+      - name: Save findings
+        if: ${{ !cancelled() }}
+        env:
+          # Agent-written JSON: read from the environment, never pasted into the script.
+          FINDINGS: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          if ! jq -e '.findings | type == "array"' <<<"${FINDINGS:-null}" >/dev/null 2>&1; then
+            echo "::warning::No usable findings from $AGENT_ROLE; filing none."
+            FINDINGS='{"findings":[]}'
+          fi
+          printf '%s' "$FINDINGS" > "findings-$AGENT_ROLE.json"
+          jq -r '.findings[] | "\(.severity): \(.title) (\(.location))"' "findings-$AGENT_ROLE.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: findings-${{ matrix.role }}
+          path: findings-${{ matrix.role }}.json
+          retention-days: 14
+
+  file-issues:
+    needs: [plan, audit]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .github/scripts
+            web/.nvmrc
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: web/.nvmrc
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: findings-*
+          merge-multiple: true
+      - name: File up to three issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_ISSUES: "3"
+        run: |
+          shopt -s nullglob
+          files=(findings-*.json)
+          if [ ${#files[@]} -eq 0 ]; then echo "No findings files."; exit 0; fi
+          node .github/scripts/file-findings.mjs "${files[@]}"
