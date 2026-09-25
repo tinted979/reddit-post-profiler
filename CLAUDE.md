@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Reddit Post Profiler (RPP). Profiles everyone who commented on a Reddit post using the [Arctic Shift](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md) archive API. It reports:
 
 - each commenter's posts and comments in the post's subreddit *before* the post was created;
-- their per-subreddit activity everywhere.
+- their per-subreddit activity everywhere, also up to the post: every count stops at the post (docs/adr/0006).
 
 It's a web app in `web/`: plain ES modules with no build step and no runtime dependencies, deployed to GitHub Pages. (The tests have one dev dependency, fake-indexeddb.) Results download as a CSV (`toCsv`, one row per user and subreddit). There's no server and no other implementation.
 
@@ -62,5 +62,5 @@ The AI pull request reviewers (`.github/workflows/agent-review.yml`, roles in `.
 ## Backlog and decisions
 
 - Known debt is GitHub issues labelled `debt`; agent findings are labelled `agent:finding`. Before refactoring or cleanup, check whether an issue covers it, and close it from the PR (`Closes #N`). File newly found debt as a `debt` issue.
-- Lasting decisions are in `docs/adr/` (no build step or dependencies, Arctic Shift etiquette, frozen storage names, the static archive and its scheduled sync); the `adr` skill says how to add one.
+- Lasting decisions are in `docs/adr/` (no build step or dependencies, Arctic Shift etiquette, frozen storage names, the static archive and its scheduled sync, every count stopping at the post); the `adr` skill says how to add one.
 - Live browser checks: the `live-browser-test` skill.

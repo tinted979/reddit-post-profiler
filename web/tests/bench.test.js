@@ -103,12 +103,15 @@ test("the tail scenarios ask about the whole subreddit once, then little or noth
   assert.equal(by["archive-tail-stale"].api.total, tail("archive-tail-stale"));
 });
 
-test("with a current tail, a covered post's commenters come from the archive with no tree request", async () => {
+test("a covered post older than the files takes its commenters from the archive plus one request, with no tree request", async () => {
   const { scenarios } = await runScenarios();
   const by = Object.fromEntries(scenarios.map((s) => [s.name, s]));
   const hits = (name, path) => by[name].api.byEndpoint[path] ?? 0;
   assert.equal(hits("thread-tree", "/api/comments/tree"), 1);
-  assert.equal(hits("archive-tail-thread", "/api/comments/tree"), 0);
-  assert.equal(by["archive-tail-thread"].api.total, by["archive-tail-only"].api.total);
-  assert.deepEqual(by["archive-tail-thread"].result.commenters, by["thread-tree"].result.commenters);
+  assert.equal(hits("archive-thread", "/api/comments/tree"), 0);
+  // The thread's comments after the files, and nothing else: counts stop at the post, which
+  // the files already cover.
+  assert.equal(by["archive-thread"].api.total, 1);
+  assert.equal(hits("archive-thread", "/api/comments/search"), 1);
+  assert.deepEqual(by["archive-thread"].result.commenters, by["thread-tree"].result.commenters);
 });

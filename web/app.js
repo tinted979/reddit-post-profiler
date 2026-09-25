@@ -56,6 +56,9 @@ const state = {
   beforeKnown: true, // false when the post is older than the history window
   after: null, // start of the history window (epoch seconds), null = all time
   savedId: null, // post id of the saved scan on show, if one was opened
+  // "post" when the counts on show stop at the post (docs/adr/0006); null for a scan saved
+  // before that.
+  countsTo: "post",
   // Post id the address bar links to while its results are on show: set by a manual run,
   // null for a saved or queued scan, whose link would start a fresh scan on reload.
   urlPost: null,
@@ -365,7 +368,7 @@ function renderWindowNote(after) {
     return;
   }
   const since = new Date(after * 1000).toLocaleDateString(undefined, { dateStyle: "medium" });
-  $("window-note").textContent = ` Only activity since ${since} is counted` +
+  $("window-note").textContent = ` Only activity from ${since} up to the post is counted` +
     (state.beforeKnown ? "." : `; this post is older than that, so there's no "before" to count.`);
 }
 
@@ -444,7 +447,9 @@ function subredditTable(subs, post, username) {
   // A count links to those posts or comments on Arctic Shift, over the same history window.
   const countCell = (kind, n, sub) => el("td", {}, !n ? "0" :
     el("a", {
-      href: arcticSearchUrl(kind, username, sub, state.after),
+      // Counts stop at the post (docs/adr/0006), and so does what they link to; a scan saved
+      // before that counted up to when it ran.
+      href: arcticSearchUrl(kind, username, sub, state.after, state.countsTo === "post" ? state.post.createdUtc : null),
       target: "_blank",
       rel: "noopener",
       "aria-label": `${n} ${n === 1 ? kind.slice(0, -1) : kind} in r/${sub} on Arctic Shift`,
@@ -562,12 +567,13 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
   // A queued scan leaves the address alone: reloading would start it again outside the queue.
   if (!fromQueue) history.replaceState(null, "", shareUrl(postId, opts));
 
-  // Start of the history window, in epoch seconds (null = all time).
-  const after = opts.years ? Math.floor(Date.now() / 1000 - opts.years * 365.25 * DAY) : null;
+  // Start of the history window, in epoch seconds (null = all time): the N years before the
+  // post, set once the post is known, since every count stops at the post (docs/adr/0006).
+  let after = null;
   const runId = ++state.runId;
   const controller = new AbortController();
   Object.assign(state, {
-    controller, post: null, slots: [], shown: 0, beforeKnown: true, after, savedId: null,
+    controller, post: null, slots: [], shown: 0, beforeKnown: true, after, savedId: null, countsTo: "post",
     urlPost: fromQueue ? null : postId,
   });
   markCurrentScan();
@@ -636,6 +642,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
       ...elapsed(),
       fromSaved: fromCache,
       after,
+      countsTo: "post",
       beforeKnown: state.beforeKnown,
       opts: {
         only: opts.only, years: opts.years, maxUsers: capped ? LARGE_SCAN : opts.maxUsers,
@@ -684,6 +691,8 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
       return outcome;
     }
     state.post = post;
+    after = opts.years ? Math.floor(post.createdUtc - opts.years * 365.25 * DAY) : null;
+    state.after = after;
     state.beforeKnown = after === null || post.createdUtc > after;
     renderPost(post, null);
     renderWindowNote(after);
@@ -714,7 +723,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
     // requests. A queued scan has nobody to ask, so it takes the top ones.
     else if (ranked.length > LARGE_SCAN) {
       setStatus("Checking saved results…");
-      const est = await estimateScan(cache, ranked.map(([u]) => u), { after, delay: opts.delay, concurrency });
+      const est = await estimateScan(cache, ranked.map(([u]) => u), { after, before: post.createdUtc, delay: opts.delay, concurrency });
       if (!fromQueue) setStatus(`Found ${plural(ranked.length, "commenter")}.`);
       const choice = fromQueue ? "top" : await askLargeScan(est, controller.signal);
       if (choice === "cancel") {
@@ -762,13 +771,13 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
     startEta(counts.total);
     profilingAt = performance.now();
     progress();
-    await mapPool(ranked, concurrency, async ([username, { count, last }], i) => {
+    await mapPool(ranked, concurrency, async ([username, { count }], i) => {
       inFlight++;
       progress();
       let profile;
       try {
         profile = await buildProfile(client, username, count, post, {
-          only: opts.only, after, lastCommentUtc: last, cache, dumps,
+          only: opts.only, after, cache, dumps,
         });
       } catch (err) {
         if (err instanceof Aborted) throw err;
@@ -802,16 +811,18 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
           text += ` Activity in r/${archive.name} before the post, up to ${upTo}, came from archive files.`;
           const tailed = dumps.covers(post.subreddit);
           if (tailRequests) {
-            text += ` Activity since then came from ${plural(tailRequests, "request")} for the whole subreddit rather than for each user.`;
+            text += ` Activity from then to the post came from ${plural(tailRequests, "request")} for the whole subreddit rather than for each user.`;
           } else if (tailed && Math.min(tailed.postsThrough, tailed.commentsThrough) > Math.min(archive.postsThrough, archive.commentsThrough)) {
-            text += " Activity since then came from what an earlier scan in this tab fetched for the whole subreddit.";
+            text += " Activity from then to the post came from what an earlier scan in this tab fetched for the whole subreddit.";
           }
         }
         if (dumps.lifetimeReads > 0) {
-          text += " Subreddit counts came from the archive files plus Arctic Shift for anything newer.";
+          text += dumps.lifetimeGaps
+            ? " Subreddit counts came from the archive files, plus Arctic Shift for anything between where they end and the post."
+            : " Subreddit counts came from the archive files.";
         }
         if (dumps.threadReads > 0) {
-          text += " The thread's comments came from the archive files and the subreddit's recent activity, with no request of their own.";
+          text += " The thread's comments came from the archive files, plus Arctic Shift for those made since.";
         }
       }
     }
@@ -1353,7 +1364,7 @@ async function openSaved(id) {
     slots[p.rank] = p;
   });
   Object.assign(state, {
-    post: summary.post, slots, shown: 0, after: summary.after ?? null,
+    post: summary.post, slots, shown: 0, after: summary.after ?? null, countsTo: summary.countsTo ?? null,
     beforeKnown: summary.beforeKnown ?? true, savedId: id, urlPost: null,
   });
   // A saved scan opens with no requests; a ?post= link left over from an earlier run would
@@ -1372,7 +1383,9 @@ async function openSaved(id) {
     ? `profiled ${plural(summary.stats.profiled, "user")}`
     : `stopped after ${summary.stats.profiled} of ${plural(summary.total, "user")}`;
   const text = `Saved scan from ${formatDate(summary.scannedAt)}: ${profiled} with ` +
-    `${requestsText(summary.requests, summary.archiveRequests)}. Took ${tookText(summary)}. Opened with no new requests.`;
+    `${requestsText(summary.requests, summary.archiveRequests)}. Took ${tookText(summary)}. Opened with no new requests.` +
+    // Scans saved before counts stopped at the post (docs/adr/0006) counted up to when they ran.
+    (summary.countsTo === "post" ? "" : " This scan is from before counts stopped at the post: its subreddit counts run to when it was made. Scan again for counts up to the post.");
   clearWaits();
   $("bar").hidden = true;
   setStatus(text);

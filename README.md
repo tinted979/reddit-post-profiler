@@ -5,7 +5,11 @@ Profile everyone who commented on a Reddit post, using the
 
 - how many posts/comments each commenter had made in the post's subreddit **before the
   post was created**. This shows whether they're a regular or a newcomer.
-- **every subreddit** they're active in, with their post and comment counts in each.
+- **every subreddit** they'd been active in before the post, with their post and comment
+  counts in each.
+
+Everything is counted up to the post: the point is who these people were when they showed
+up in the thread, not what they did afterwards.
 
 ## Use it in your browser
 
@@ -20,8 +24,8 @@ profiling, the part the estimate covers). *Stop* ends a run at once and keeps wh
 
 Everything runs in your browser and talks to Arctic Shift directly. The whole thread comes
 in one request, several users are profiled at once, and most commenters take 2 requests.
-Results are saved in your browser, so rescanning a thread, or scanning another one with
-some of the same people, reuses them instead of asking the API again.
+Results are saved in your browser, so rescanning a thread reuses them instead of asking the
+API again. (Counts stop at each post, so they're saved per post.)
 
 A thread with more than 300 commenters to profile asks first. It shows roughly how many
 requests and how long profiling them all would take, and offers *Profile the top 300* (the
@@ -121,7 +125,7 @@ https://tinted979.github.io/reddit-post-profiler/?post=https://redd.it/1l7d1e4&m
 | `op=1` | also profile the post's author |
 | `exclude` | comma-separated usernames to skip |
 | `subs` | comma-separated subreddits to limit results to; the post's subreddit is always included, and listed ones are shown even with no activity. For very active users it also means far fewer requests |
-| `years` | only count activity from the last 1, 5 or 10 years, counted back from today (default: all time) |
+| `years` | only count activity from the 1, 5 or 10 years before the post (default: all of it) |
 | `min` | hide subreddits with fewer than N posts + comments, on the page and in the CSV (the post's subreddit is always kept) |
 | `delay` | seconds between request starts (default 0.75, minimum 0.25) |
 | `par` | users profiled in parallel, 1–5 (default 2); also the most requests in flight at once |
@@ -167,8 +171,7 @@ page; once it's removed there, this tool can't see it either. The page repeats t
   missing. A post that isn't archived yet can't be analysed.
 - **Deleted accounts.** Comments whose author shows as `[deleted]` or `[removed]` can't be
   traced to anyone, so they're skipped, and so is AutoModerator.
-- **History window.** `years` counts back from today, not from the post, and applies
-  to every count. For a post older than the window there's no "before" to count.
+- **History window.** `years` counts back from the post and applies to every count.
 - **Very active users.** Their full history can time out; the fallbacks (see
   [How it works](#how-it-works)) take more requests, and if those fail the user shows
   *lookup failed*, with the reason in the CSV's `error` column.
@@ -195,7 +198,7 @@ barkmonster,2,learnpython,0,24,ADHD,0,53,53,,12,2024-03-05T18:22:10.000Z,occasio
 - `thread_comments`: the user's comment count in the analysed thread
 - `target_subreddit`: the post's subreddit
 - `target_posts_before` / `target_comments_before`: their activity there before the post was created (blank if the lookup failed, or for a post older than the `years` window, where it isn't looked up)
-- `posts` / `comments` / `total`: their counts in `subreddit`, as archived by Arctic Shift: all-time, or since the start of the `years` window
+- `posts` / `comments` / `total`: their counts in `subreddit` before the post, as archived by Arctic Shift: all of them, or those within the `years` window before the post
 - `error`: why the lookup failed, if it did
 - `target_active_days_before`: different days they posted or commented in the post's subreddit before it (see `target_days_exact`)
 - `target_first_before_utc`: when the first of those was
@@ -214,30 +217,31 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
 2. The commenters: the whole thread comes from
    `GET /api/comments/tree?link_id=…` in one request. `GET /api/comments/search?link_id=…`
    is paged by timestamp only if the tree is incomplete, fails, or the thread has 25,000+
-   comments. For a subreddit with archive files (below), once the scan has fetched the
-   subreddit's activity since the files end, the thread comes from the files and that
-   activity instead, with no request of its own.
-3. For each commenter, `GET /api/{posts,comments}/search/aggregate?aggregate=subreddit&author=…`
-   returns per-subreddit counts. For the "before" facts it asks
+   comments. For a post older than where a covered subreddit's archive files (below) end,
+   the thread comes from the files plus one
+   `GET /api/comments/search?link_id=…&after=<the files' end>` for the comments made since.
+3. For each commenter, `GET /api/{posts,comments}/search/aggregate?aggregate=subreddit&author=…&before=<post time>`
+   returns per-subreddit counts up to the post. For the "before" facts it asks
    `GET /api/{posts,comments}/search?author=…&subreddit=…&before=<post time>&fields=created_utc&limit=100`
    for the timestamps themselves, which gives the count, the days active and the first
    date in one small request (the `created_utc` aggregate would be cheaper, but it
    currently answers all zeros). Past 100 items it adds the aggregate for the exact count
    and one more search for the first date. These run in parallel, and it skips a
-   "before" query when the lifetime counts leave no room for one, e.g. when all of a
-   user's comments in the subreddit are in this thread. For a subreddit with archive files on
+   "before" query when the counts show no activity in the post's subreddit before the post. For a subreddit with archive files on
    the project's R2 bucket, listed in the bucket's manifest
    (`https://rpp-db.tinted979.dev/manifest.json`), those come from the files instead.
-   What's newer than the files is fetched once per scan for the whole subreddit rather than
-   once per commenter: `GET /api/{posts,comments}/search?subreddit=…&after=<the files' end>&sort=asc&limit=100`,
+   What's between the files' end and the post is fetched once per scan for the whole
+   subreddit rather than once per commenter:
+   `GET /api/{posts,comments}/search?subreddit=…&after=<the files' end>&before=<post time>&sort=asc&limit=100`,
    a page per 100 posts or comments. It always fetches one page per 50 comments in the
-   thread (2–20 pages), then goes on to the present only if the rate those pages show says
+   thread (2–20 pages), then goes on to the post only if the rate those pages show says
    finishing costs fewer requests than asking per commenter would (about one per thread
    comment for Only check subreddits, half that otherwise, at most 100 pages). The tab keeps
    what it fetched, so the next scan asks only for what's new since.
    If you limit a scan to subreddits the archive covers (Only check subreddits), each
    user's counts there also come from the files and those pages, with no requests per user.
-   If the pages run out before the present, Arctic Shift is asked per user about the rest.
+   If the pages run out before the post, Arctic Shift is asked per user about the rest. A
+   post older than the files needs none of this: everything before it is in the files.
 
 Aggregations can time out for very active users. The page then tries
 `GET /api/users/interactions/subreddits`, which answers for posts and comments in one query

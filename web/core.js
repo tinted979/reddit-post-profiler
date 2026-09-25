@@ -20,8 +20,9 @@ const TREE_LIMIT = 25_000;
 // for backlogs before trusting that counts fetched at some moment include everything
 // made before it.
 export const INGEST_LAG = 3600;
-// Prefix of every cache key; change it when the stored format changes.
-const CACHE_VERSION = "v1";
+// Prefix of every cache key; change it when the stored format changes. v2: lifetime counts
+// stop at the post (docs/adr/0006), so they're saved per post.
+const CACHE_VERSION = "v2";
 // "Before" records moved to v2 when they gained the timeline facts (first, days).
 const BEFORE_VERSION = "v2";
 // Timestamps fetched per kind for the "before" timeline (the search endpoint's maximum).
@@ -351,7 +352,7 @@ export class ArcticShiftClient {
   }
 
   async _request(path, params, group) {
-    const label = requestLabel(path, params);
+    const label = requestLabel(path, params, { split: Boolean(group) });
     const url = new URL(path, this.baseUrl);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
     url.searchParams.set("meta-app", APP_TAG);
@@ -627,9 +628,11 @@ export class ArcticShiftClient {
 }
 
 // What an API request is for, from its path and parameters, for the scan's request
-// breakdown (format.js breakdownLines gives each label its words). A shape this doesn't
+// breakdown (format.js breakdownLines gives each label its words). `split` says it's a part
+// of a split-up count (subredditCounts sends those as a group): every count carries
+// `before` now (docs/adr/0006), so the parameters alone can't say. A shape this doesn't
 // know is labelled with its path.
-export function requestLabel(path, params = {}) {
+export function requestLabel(path, params = {}, { split = false } = {}) {
   const has = (k) => params[k] !== undefined && params[k] !== null;
   if (path === "/api/posts/ids") return "post";
   if (path === "/api/comments/tree") return "thread tree";
@@ -638,9 +641,9 @@ export function requestLabel(path, params = {}) {
   if (!m) return path;
   const [, kind, aggregate] = m;
   if (aggregate) {
-    if (has("subreddit") && has("before")) return `before ${kind}, count`;
     // Split up: per subreddit (a scan with `only`) or per year.
-    return has("subreddit") || has("before") ? `lifetime ${kind}, split` : `lifetime ${kind}`;
+    if (split) return `lifetime ${kind}, split`;
+    return has("subreddit") ? `before ${kind}, count` : `lifetime ${kind}`;
   }
   if (has("link_id")) return "thread pages";
   if (has("author")) return `before ${kind}`;
@@ -666,18 +669,28 @@ export function yearlyRanges(before, nowSeconds, after = null) {
 // The thread's commenters: Map of author -> {count, last}, their comments in the thread
 // and when they made the newest one (epoch seconds). Deleted accounts, AutoModerator and
 // `exclude` are left out; with `includeOp` the post's author is added with no comments.
-// With `dumps` (a DumpSource) whose tail for the post's subreddit reached the present this
-// scan (fetchTails), the archive has the whole thread: its comments_by_link rows and the tail
-// answer, with no request. Otherwise, or if that file can't be read, the API does.
+// With `dumps` (a DumpSource) covering the post's subreddit and a post older than where its
+// files end, Arctic Shift is asked only for what the archive doesn't have: the thread's
+// comments_by_link rows up to that point, then the thread's comments after it (usually one
+// short page). A newer post, or a thread file that can't be read, takes the whole thread
+// from the API; a busy or rate-limiting server fails the scan, as below.
 export async function collectCommenters(client, post, { exclude = [], includeOp = false, dumps = null } = {}) {
   const excluded = new Set(DEFAULT_EXCLUDED);
   for (const name of exclude) excluded.add(name.toLowerCase().replace(/^\/?u\//, ""));
+  const files = dumps?.covers(post.subreddit, { withTail: false });
   let archived = null;
-  if (dumps?.isCurrent?.(post.subreddit)) {
+  if (files && post.createdUtc <= files.commentsThrough) {
     try {
-      archived = await dumps.threadRows(post.subreddit, post.id);
+      archived = [...await dumps.threadRows(post.subreddit, post.id)];
+      const rest = client.iterAscending(
+        "/api/comments/search",
+        { link_id: post.id, after: files.commentsThrough, fields: "id,author,created_utc" },
+        TAIL_PAGE,
+      );
+      for await (const page of rest) archived.push(...page);
     } catch (err) {
-      if (err instanceof Aborted) throw err;
+      if (err instanceof Aborted || (err instanceof ArcticShiftError && refusesMore(err))) throw err;
+      archived = null;
     }
   }
   // A thread too big for one tree response would be downloaded and then thrown away.
@@ -728,46 +741,46 @@ function projectedPages(pages, rows, from, newest, until) {
 
 const TAIL_FIELDS = { posts: "id,author,created_utc", comments: "id,author,created_utc,link_id" };
 
-// What covered subreddits' archive files don't have yet, fetched once for the whole scan
-// into `dumps`' tails: everyone's activity after the files end (a subreddit-wide search).
-// Every commenter's "before" facts and archive lifetime counts then come from the files
-// plus the tail, instead of each asking Arctic Shift about the same window.
+// What covered subreddits' archive files don't have yet, up to the post, fetched once for
+// the whole scan into `dumps`' tails: everyone's activity after the files end and before the
+// post (a subreddit-wide search; counts stop at the post, docs/adr/0006). Every commenter's
+// "before" facts and archive counts then come from the files plus the tail, instead of each
+// asking Arctic Shift about the same window.
 //
-// Which subreddits: all of `only` with the post's own, when the archive covers them all
-// (lifetime counts need them all); otherwise the post's own, if the post is newer than its
-// files. Per subreddit and kind it fetches tailBudget pages, then goes on (up to tailWorth
-// pages) only if the rate so far says it can reach the present within that; an explicit
-// `budget` is a fixed number of pages instead. A tail that stops short covers up to the last
-// whole second it reached, and the per-user path asks about the rest. A busy or
-// rate-limiting server, or no connection, fails the scan, since asking per user would only
-// send it more requests; another API error, such as a query timing out, leaves the tail
-// where it got to. `now` gives epoch seconds: a tail that reaches the end is complete up to
-// when it started. Returns what each fetch did, for the request breakdown: [{subreddit,
+// Which subreddits: those of `only` with the post's own, when the archive covers them all
+// (their counts need them all); otherwise the post's own. Only a subreddit whose files (and
+// the tab's tail) end before the post needs anything. Per subreddit and kind it fetches
+// tailBudget pages, then goes on (up to tailWorth pages) only if the rate so far says it can
+// reach the post within that; an explicit `budget` is a fixed number of pages instead. A tail
+// that stops short covers up to the last whole second it reached, and the per-user path asks
+// about the rest. A busy or rate-limiting server, or no connection, fails the scan, since
+// asking per user would only send it more requests; another API error, such as a query
+// timing out, leaves the tail where it got to. `now` gives epoch seconds: rows dated more
+// than a day past it are dropped. Returns what each fetch did, for the request breakdown: [{subreddit,
 // kind, pages, budget (the most pages it could have taken), reachedEnd, through, error}, and
 // `projected` (the pages finishing would have taken) when that's why it stopped], empty
 // when nothing needed fetching.
 export async function fetchTails(client, dumps, post, { only = null, budget = null, now = () => Date.now() / 1000 } = {}) {
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
-  let subs = [];
-  if (wanted?.every((sub) => dumps.covers(sub))) {
-    subs = wanted;
-  } else {
-    const c = dumps.covers(post.subreddit);
-    if (c && post.createdUtc - 1 > Math.min(c.postsThrough, c.commentsThrough)) subs = [post.subreddit];
-  }
+  const allCovered = Boolean(wanted?.every((sub) => dumps.covers(sub)));
+  const behind = (sub) => {
+    const c = dumps.covers(sub);
+    return c && post.createdUtc - 1 > Math.min(c.postsThrough, c.commentsThrough);
+  };
+  const subs = (allCovered ? wanted : [post.subreddit]).filter(behind);
   const limits = budget === null
-    ? { budget: tailBudget(post.numComments), worth: tailWorth(post.numComments, { only: subs === wanted }) }
+    ? { budget: tailBudget(post.numComments), worth: tailWorth(post.numComments, { only: allCovered }) }
     : { budget, worth: null };
   const report = [];
   for (const sub of subs) {
-    report.push(...await settleAll(KINDS.map((kind) => fetchTail(client, dumps, sub, kind, limits, Math.trunc(now())))));
+    report.push(...await settleAll(KINDS.map((kind) => fetchTail(client, dumps, sub, kind, limits, post.createdUtc, Math.trunc(now())))));
   }
   return report.filter(Boolean);
 }
 
-// One subreddit and kind's tail: `budget` pages, then up to `worth` if the projection says
-// that reaches the present (a null `worth` makes `budget` fixed).
-async function fetchTail(client, dumps, sub, kind, { budget, worth }, started) {
+// One subreddit and kind's tail up to `until` (the post, exclusive): `budget` pages, then up
+// to `worth` if the projection says that reaches it (a null `worth` makes `budget` fixed).
+async function fetchTail(client, dumps, sub, kind, { budget, worth }, until, started) {
   const name = dumps.covers(sub)?.name;
   if (!name) return null;
   const most = worth ?? budget;
@@ -778,10 +791,12 @@ async function fetchTail(client, dumps, sub, kind, { budget, worth }, started) {
   let rows = 0;
   const pages = client.iterAscending(
     `/api/${kind}/search`,
-    { subreddit: name, after: from, fields: TAIL_FIELDS[kind] },
+    { subreddit: name, after: from, before: until, fields: TAIL_FIELDS[kind] },
     TAIL_PAGE,
     { maxPages: most },
   );
+  // Complete up to the second before the post, never past now.
+  const end = Math.min(until - 1, started);
   try {
     let next;
     let reachedEnd = false;
@@ -791,7 +806,7 @@ async function fetchTail(client, dumps, sub, kind, { budget, worth }, started) {
       rows += next.value.length;
       for (const row of next.value) newest = Math.max(newest, Math.trunc(Number(row?.created_utc)) || -Infinity);
       if (report.pages === budget && most > budget) {
-        const projected = projectedPages(report.pages, rows, from, newest, started);
+        const projected = projectedPages(report.pages, rows, from, newest, end);
         if (projected > most) {
           report.projected = projected;
           await pages.return();
@@ -800,12 +815,11 @@ async function fetchTail(client, dumps, sub, kind, { budget, worth }, started) {
       }
     }
     if (next.done) reachedEnd = next.value === true;
-    // A tail cut short covers up to the last whole second it reached, but never past now.
-    const partial = { through: Math.min(newest - 1, started), current: false };
-    dumps.endTail(kind, sub, reachedEnd ? { through: started, current: true } : partial);
+    // A tail cut short covers up to the last whole second it reached.
+    dumps.endTail(kind, sub, { through: reachedEnd ? end : Math.min(newest - 1, end) });
     report.reachedEnd = reachedEnd;
   } catch (err) {
-    dumps.endTail(kind, sub, { through: Math.min(newest - 1, started), current: false });
+    dumps.endTail(kind, sub, { through: Math.min(newest - 1, end) });
     if (!(err instanceof ArcticShiftError) || refusesMore(err)) throw err;
     report.error = err.message;
   }
@@ -868,9 +882,9 @@ async function settleAll(promises) {
 // active user), a single interactions query usually still answers; failing that, only
 // the kind that timed out is split up (per subreddit in `wanted`, else per year).
 // `partial` marks a result limited to `wanted`, which mustn't be saved as a profile.
-async function lifetimeCounts(client, username, { wanted, after, skipInteractions = false }) {
+async function lifetimeCounts(client, username, { wanted, after, before, skipInteractions = false }) {
   const first = await Promise.allSettled(
-    KINDS.map((kind) => client.subredditCounts(kind, username, { after, split: false })),
+    KINDS.map((kind) => client.subredditCounts(kind, username, { after, before, split: false })),
   );
   for (const r of first) {
     if (r.status === "rejected" && !(r.reason instanceof QueryTimeout)) throw r.reason;
@@ -879,13 +893,13 @@ async function lifetimeCounts(client, username, { wanted, after, skipInteraction
   if (done(0) && done(1)) return { counts: mergeKinds(first.map((r) => r.value)), partial: false };
   if (!skipInteractions) {
     try {
-      return { counts: await client.interactionCounts(username, { after }), partial: false };
+      return { counts: await client.interactionCounts(username, { after, before }), partial: false };
     } catch (err) {
       if (!(err instanceof QueryTimeout || err instanceof Unsupported)) throw err;
     }
   }
   const parts = await settleAll(KINDS.map((kind, i) =>
-    done(i) ? first[i].value : client.subredditCounts(kind, username, { after, only: wanted, attempts: 0 })));
+    done(i) ? first[i].value : client.subredditCounts(kind, username, { after, before, only: wanted, attempts: 0 })));
   return { counts: mergeKinds(parts), partial: Boolean(wanted) };
 }
 
@@ -900,14 +914,15 @@ async function lifetimeCounts(client, username, { wanted, after, skipInteraction
 // or {status: "no-interactions"} when interactions can't answer: the aggregates answer
 // instead, but without retrying the interactions query they already found unusable.
 //
-// When every wanted subreddit's tail reached the present this scan (fetchTails), the files
-// and tails already hold everything, so there's no cutoff and no interactions query.
-async function archiveLifetime(client, dumps, username, wanted, after) {
+// Counts stop at `before` (the post, exclusive). When the files and tails of every wanted
+// subreddit reach it, they hold everything, so there's no interactions query at all.
+async function archiveLifetime(client, dumps, username, wanted, after, before) {
   const covered = wanted.map((sub) => dumps.covers(sub));
   if (covered.some((c) => !c)) return { status: "unavailable" };
-  const current = wanted.every((sub) => dumps.isCurrent?.(sub));
-  const cutoff = current ? Infinity : minOf(covered.flatMap((c) => [c.postsThrough, c.commentsThrough]));
-  if (!current && !Number.isFinite(cutoff)) return { status: "unavailable" };
+  const reached = minOf(covered.flatMap((c) => [c.postsThrough, c.commentsThrough]));
+  if (!Number.isFinite(reached)) return { status: "unavailable" };
+  const cutoff = Math.min(reached, before - 1);
+  const complete = cutoff >= before - 1;
   const counts = new Map();
   const byKey = new Map();
   const upToCutoff = (times) => times.filter((t) => t <= cutoff && (after === null || t > after)).length;
@@ -926,7 +941,7 @@ async function archiveLifetime(client, dumps, username, wanted, after) {
   }
   let recent = new Map();
   try {
-    if (!current) recent = await client.interactionCounts(username, { after: after === null ? cutoff : Math.max(after, cutoff) });
+    if (!complete) recent = await client.interactionCounts(username, { after: after === null ? cutoff : Math.max(after, cutoff), before });
   } catch (err) {
     if (err instanceof QueryTimeout || err instanceof Unsupported) return { status: "no-interactions" };
     throw err;
@@ -938,8 +953,10 @@ async function archiveLifetime(client, dumps, username, wanted, after) {
     mine.comments += c.comments;
   }
   // For the end-of-scan note: a scan limited to covered subreddits whose lifetime counts
-  // came from the archive files rather than Arctic Shift's aggregates.
+  // came from the archive files rather than Arctic Shift's aggregates, and how many times
+  // interactions filled a gap between where they end and the post.
   dumps.lifetimeReads = (dumps.lifetimeReads ?? 0) + 1;
+  if (!complete) dumps.lifetimeGaps = (dumps.lifetimeGaps ?? 0) + 1;
   return { status: "answered", counts };
 }
 
@@ -948,20 +965,20 @@ async function archiveLifetime(client, dumps, username, wanted, after) {
 // attempt, the aggregate fallback (skipping the interactions retry once the archive
 // already found it unusable), and the cache writes. Returns {rows, hit}: `hit` is the
 // cache entry the rows came from (for its `fetchedAt`), or null when they're fresh.
-async function lifetimeRows(client, dumps, cache, username, wanted, after, bucket) {
+async function lifetimeRows(client, dumps, cache, username, wanted, after, before, bucket) {
   const user = username.toLowerCase();
-  const lifeKey = lifetimeKey(user, bucket);
+  const lifeKey = lifetimeKey(user, before, bucket);
   const hit = await cacheGet(cache, lifeKey, isRows);
   if (hit) return { rows: hit.value, hit };
 
-  const onlyKey = wanted && dumps ? lifeOnlyKey(user, bucket, wanted) : null;
+  const onlyKey = wanted && dumps ? lifeOnlyKey(user, before, bucket, wanted) : null;
   const onlyHit = onlyKey ? await cacheGet(cache, onlyKey, isRows) : null;
   if (onlyHit) return { rows: onlyHit.value, hit: onlyHit };
 
-  const archived = wanted && dumps ? await archiveLifetime(client, dumps, username, wanted, after) : null;
+  const archived = wanted && dumps ? await archiveLifetime(client, dumps, username, wanted, after, before) : null;
   const life = archived?.status === "answered"
     ? { counts: archived.counts, partial: true, source: "archive" }
-    : await lifetimeCounts(client, username, { wanted, after, skipInteractions: archived?.status === "no-interactions" });
+    : await lifetimeCounts(client, username, { wanted, after, before, skipInteractions: archived?.status === "no-interactions" });
 
   const rows = [...life.counts].map(([sub, c]) => [sub, c.posts, c.comments]);
   if (!life.partial) {
@@ -1095,12 +1112,13 @@ async function cacheSet(cache, key, value) {
 
 // Round the window start to the day so cache keys stay stable between runs.
 const windowBucket = (after) => (after === null ? "all" : String(Math.floor(after / DAY)));
-const lifetimeKey = (user, bucket) => `${CACHE_VERSION}|life|${user.toLowerCase()}|${bucket}`;
+// Counts stop at the post, so they're saved per post (its time, `to`) as well as window.
+const lifetimeKey = (user, to, bucket) => `${CACHE_VERSION}|life|${user.toLowerCase()}|${to}|${bucket}`;
 // Archive-derived lifetime rows for one `only` set (see archiveLifetime): keyed separately
 // from the full lifetime totals, since they cover just the wanted subreddits. Case- and
 // order-insensitive in `wanted` so the same set hits the same key however it was typed.
-const lifeOnlyKey = (user, bucket, wanted) =>
-  `${CACHE_VERSION}|lifeonly|${user.toLowerCase()}|${bucket}|${wanted.map((s) => s.toLowerCase()).sort().join(",")}`;
+const lifeOnlyKey = (user, to, bucket, wanted) =>
+  `${CACHE_VERSION}|lifeonly|${user.toLowerCase()}|${to}|${bucket}|${wanted.map((s) => s.toLowerCase()).sort().join(",")}`;
 
 // Scans larger than this many users ask first (or, from the queue, profile only this many).
 export const LARGE_SCAN = 300;
@@ -1115,14 +1133,16 @@ const SECONDS_PER_REQUEST = 1.8;
 const SECONDS_PER_REQUEST_PARALLEL = 1.3;
 
 // A rough cost for profiling `usernames` before starting: {users, saved, requests,
-// seconds}. `saved` counts users whose lifetime totals are saved (and still fresh).
-export async function estimateScan(cache, usernames, { after = null, delay = SCAN_DEFAULTS.delay, concurrency = SCAN_DEFAULTS.concurrency } = {}) {
+// seconds}. `saved` counts users whose lifetime totals are saved (and still fresh) for this
+// post: counts are saved per post (docs/adr/0006), so without `before` (the post's time)
+// none are found.
+export async function estimateScan(cache, usernames, { after = null, before = null, delay = SCAN_DEFAULTS.delay, concurrency = SCAN_DEFAULTS.concurrency } = {}) {
   const bucket = windowBucket(after);
   let saved = 0;
   // In batches, so a big thread doesn't open thousands of storage reads at once.
   for (let i = 0; i < usernames.length; i += 100) {
     const hits = await Promise.all(usernames.slice(i, i + 100)
-      .map((u) => cacheGet(cache, lifetimeKey(u, bucket), isRows)));
+      .map((u) => cacheGet(cache, lifetimeKey(u, before, bucket), isRows)));
     saved += hits.filter(Boolean).length;
   }
   const requests = saved * REQUESTS_SAVED + (usernames.length - saved) * REQUESTS_NEW;
@@ -1150,23 +1170,23 @@ export function emptyProfile(username, threadComments) {
   };
 }
 
-// Build a user's profile. `threadComments` is their comment count in the thread and
-// `lastCommentUtc` when they made the newest one (null if unknown). With `only`, the
-// profile lists just those subreddits (plus the post's own), including ones with no
-// activity so the answer is explicit. With `after` (epoch seconds), only activity from
-// then on is counted, "before the post" included. With `cache` ({get(key) -> {value,
+// Build a user's profile. `threadComments` is their comment count in the thread. Every
+// count stops at the post (docs/adr/0006). With `only`, the profile lists just those
+// subreddits (plus the post's own), including ones with no activity so the answer is
+// explicit. With `after` (epoch seconds), only activity from then on is counted. With `cache` ({get(key) -> {value,
 // fetchedAt} | null, set(key, value)}), earlier results are reused and new ones saved.
 // With `dumps` (a DumpSource, see dumps.js), "before" facts for a covered subreddit
 // come from its archive files. With `only` and `dumps`, when the archive covers every
 // wanted subreddit, lifetime counts come from it plus one interactions query (see
 // archiveLifetime).
-export async function buildProfile(client, username, threadComments, post, { only = null, after = null, lastCommentUtc = null, cache = null, dumps = null } = {}) {
+export async function buildProfile(client, username, threadComments, post, { only = null, after = null, cache = null, dumps = null } = {}) {
   const profile = emptyProfile(username, threadComments);
   const user = username.toLowerCase();
   const bucket = windowBucket(after);
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
 
-  const { rows, hit } = await lifetimeRows(client, dumps, cache, username, wanted, after, bucket);
+  // Every count stops at the post (docs/adr/0006).
+  const { rows, hit } = await lifetimeRows(client, dumps, cache, username, wanted, after, post.createdUtc, bucket);
 
   const byKey = new Map();
   for (const [sub, posts, comments] of rows) {
@@ -1195,19 +1215,15 @@ export async function buildProfile(client, username, threadComments, post, { onl
     }
   }
 
-  // Only ask for "before the post" counts when the lifetime totals leave room for any:
-  // the OP's own post and every comment in the thread came after the post was made.
-  // That holds only if the totals include the post and all of this user's comments in
-  // the thread: true for totals fetched just now (the thread came from the same
-  // archive), and for saved ones fetched well after their last comment here.
+  // The counts in the post's subreddit are the "before" counts, so the timeline (first date,
+  // days active) is only looked up for a kind with any. That holds for counts fetched just
+  // now, and for saved ones fetched well after the post (anything made before it archived).
   // A post older than the window has no "before" inside it at all.
   const target = byKey.get(post.subreddit.toLowerCase()) ?? { posts: 0, comments: 0 };
-  const isOp = user === post.author.toLowerCase();
-  const last = Math.max(post.createdUtc, lastCommentUtc ?? (threadComments > 0 ? Infinity : 0));
-  const trusted = !hit || hit.fetchedAt >= last + INGEST_LAG;
+  const trusted = !hit || hit.fetchedAt >= post.createdUtc + INGEST_LAG;
   const inWindow = after === null || post.createdUtc > after;
-  const needPosts = inWindow && (!trusted || target.posts > (isOp ? 1 : 0));
-  const needComments = inWindow && (!trusted || target.comments > threadComments);
+  const needPosts = inWindow && (!trusted || target.posts > 0);
+  const needComments = inWindow && (!trusted || target.comments > 0);
   let fromCache = Boolean(hit);
   if (needPosts || needComments) {
     // "Before" counts can't change once the archive has everything up to the post, so a
@@ -1488,10 +1504,11 @@ export const redditPostUrl = (post) =>
   `https://www.reddit.com/r/${encodeURIComponent(post.subreddit)}/comments/${encodeURIComponent(post.id)}/`;
 
 // Link to the Arctic Shift search page listing an author's posts or comments in a
-// subreddit, newest first. kind: "posts" | "comments"; after: epoch seconds or null.
-export function arcticSearchUrl(kind, author, subreddit, after = null) {
+// subreddit, newest first. kind: "posts" | "comments"; after, before: epoch seconds or null.
+export function arcticSearchUrl(kind, author, subreddit, after = null, before = null) {
   const q = new URLSearchParams({ fun: `${kind}_search`, author, subreddit });
   if (after !== null) q.set("after", String(after));
+  if (before !== null) q.set("before", String(before));
   q.set("limit", "100");
   q.set("sort", "desc");
   return `${BASE_URL}/search?${q}`;
@@ -1657,6 +1674,9 @@ export function importScan(rec) {
     requests: isCount(s.requests) ? s.requests : 0,
     // Scans saved before archive requests were counted have none (null: not shown).
     archiveRequests: isCount(s.archiveRequests) ? s.archiveRequests : null,
+    // "post" for scans whose counts stop at the post (docs/adr/0006); older ones counted up to
+    // when they ran.
+    countsTo: s.countsTo === "post" ? "post" : null,
     seconds: isCount(s.seconds) ? s.seconds : 0,
     profilingSeconds: isCount(s.profilingSeconds) ? s.profilingSeconds : null,
     fromSaved: isCount(s.fromSaved) ? s.fromSaved : 0,
