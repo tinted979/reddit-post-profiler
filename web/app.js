@@ -551,6 +551,11 @@ async function run({ fromQueue = false } = {}) {
     urlPost: fromQueue ? null : postId,
   });
   markCurrentScan();
+  // The post, results and saved list are about to be hidden or disabled, and Analyze and
+  // the options too (Enter in an option field starts a scan):
+  // keyboard focus on any of them moves to Stop once it shows (below), instead of being
+  // dropped.
+  const refocus = ["post-card", "results", "saved-list", "run", "option-fields"].some((id) => $(id).contains(document.activeElement));
   $("post-card").hidden = true;
   $("results").hidden = true;
   $("users").replaceChildren();
@@ -639,6 +644,8 @@ async function run({ fromQueue = false } = {}) {
 
   try {
     setStatus("Looking up the post…");
+    // Only now is the status line (and Stop in it) shown on a first scan.
+    if (refocus) $("stop").focus({ preventScroll: true });
     announce("Looking up the post…");
     const post = await client.getPost(postId);
     if (!post) {
@@ -869,6 +876,18 @@ const STATUS_PILLS = {
 };
 
 function renderQueue() {
+  // Where keyboard focus is, noted before anything changes: the list is rebuilt below, and
+  // Clear finished may hide itself, so focus is put back afterwards.
+  const list = $("queue-list");
+  const clear = $("queue-clear");
+  const clearHadFocus = document.activeElement === clear;
+  const focusedRow = list.contains(document.activeElement) ? document.activeElement.closest("li") : null;
+  const focused = focusedRow && {
+    id: focusedRow.dataset.id,
+    text: document.activeElement.textContent,
+    index: [...list.children].indexOf(focusedRow),
+  };
+
   const c = queue.counts();
   const busy = state.controller !== null;
   const parts = [];
@@ -886,12 +905,12 @@ function renderQueue() {
     toggle.textContent = queueCurrent ? "Resume queue" : "Start queue";
     toggle.disabled = !c.waiting && !queueCurrent;
   }
-  $("queue-clear").hidden = !(c.done + c.failed + c.stopped);
-
   for (const id of ["queue-input", "queue-add", "queue-clear"]) $(id).disabled = !queueOwner;
   if (!queueOwner) toggle.disabled = true;
+  clear.hidden = !(c.done + c.failed + c.stopped);
+  if (clear.hidden && clearHadFocus) focusQueueControls();
 
-  $("queue-list").replaceChildren(...queue.items.map((item) => {
+  list.replaceChildren(...queue.items.map((item) => {
     const [cls, label] = STATUS_PILLS[item.status];
     const actions = el("span", { class: "queue-actions" });
     const name = item.title ? `r/${item.subreddit} · ${item.title}` : item.ref;
@@ -916,6 +935,25 @@ function renderQueue() {
     li.dataset.id = item.id;
     return li;
   }));
+  if (focused) restoreQueueFocus(focused);
+}
+
+// After the queue list is rebuilt: focus the same button in the same row, else another
+// button there (a Retry became a Remove), else one in the row that took its place or the
+// one before (the row was removed), else the queue's controls.
+function restoreQueueFocus({ id, text, index }) {
+  const enabled = (row) => [...(row?.querySelectorAll("button") ?? [])].filter((b) => !b.disabled);
+  const rows = [...$("queue-list").children];
+  const same = enabled(rows.find((row) => row.dataset.id === id));
+  const target = same.find((b) => b.textContent === text) ?? same[0] ??
+    enabled(rows[Math.min(index, rows.length - 1)])[0] ?? enabled(rows[index - 1])[0];
+  if (target) target.focus({ preventScroll: true });
+  else focusQueueControls();
+}
+
+function focusQueueControls() {
+  const target = [$("queue-toggle"), $("queue-input")].find((e) => !e.disabled) ?? $("scheduler").querySelector("summary");
+  target.focus({ preventScroll: true });
 }
 
 function addToQueue() {
