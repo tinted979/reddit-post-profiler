@@ -39,7 +39,10 @@ export function breakdownLines({ requests, byLabel, retries, tails, archive, arc
   if (retries.size) lines.push(`Retries: ${[...retries].map(([why, n]) => `${why} ${n}`).join(", ")} (included above)`);
   if (!tails.length) lines.push("No recent activity was fetched for the whole subreddit.");
   for (const t of tails) {
-    const how = t.reachedEnd ? "reached the present" : t.error ? `stopped: ${t.error}` : "stopped at the budget";
+    const how = t.reachedEnd ? "reached the present"
+      : t.error ? `stopped: ${t.error}`
+      : t.projected ? `stopped: finishing would take about ${t.projected} pages, more than asking per user`
+      : "stopped at the budget";
     const upTo = t.reachedEnd || t.through === null ? "" : `; complete up to ${utcMinute(t.through)}`;
     lines.push(`r/${t.subreddit} ${t.kind} since the archive files: ${t.pages} of ${t.budget} pages, ${how}${upTo}`);
   }
