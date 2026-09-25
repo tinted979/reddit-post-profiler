@@ -5,19 +5,16 @@
 import {
   Aborted,
   ArcticShiftClient,
-  ArcticShiftError,
   BADGE_FIELDS,
   BADGE_TIERS,
   Eta,
-  QueryTimeout,
-  ServerBusy,
   buildProfile,
   DEFAULT_BADGES,
   activityTier,
   badgeFacts,
-  formatBadges,
   parseBadges,
   profileFacts,
+  formatBadges,
   sameBadges,
   tierCounts,
   arcticSearchUrl,
@@ -30,14 +27,9 @@ import {
   LARGE_SCAN,
   mapPool,
   parsePostRef,
-  parseSubreddits,
-  parseUsernames,
   redditPostUrl,
   redditSubredditUrl,
-  SCAN_DEFAULTS,
   DAY,
-  HISTORY_YEARS,
-  clampScanNumbers,
   scanStats,
   serializeProfile,
   sortedSubreddits,
@@ -45,12 +37,13 @@ import {
   wait,
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
+import { describeRule, explain, formatDuration, formatEta, plural, requestsText, timelineText, tookText } from "./format.js";
+import { FIELD_IDS, optionsSummary, parseMinCount, parseOptions, readShareParams, scanOptionNotes, shareParams } from "./options.js";
 import { DumpSource } from "./dumps.js";
 import { LinkQueue, MAX_WAITING, QUEUE_CONCURRENCY, QUEUE_KEY } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
 const TITLE = document.title;
-const DEFAULTS = SCAN_DEFAULTS;
 
 const state = {
   runId: 0, // bumped for every run; callbacks from an older run are ignored
@@ -79,8 +72,6 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
-const plural = (n, word) => `${n} ${n === 1 ? word : `${word}s`}`;
-
 function debounce(fn, ms) {
   let timer;
   return () => {
@@ -93,21 +84,13 @@ function debounce(fn, ms) {
 
 // The options as a run will use them, clamped to what the tool supports.
 function readOptions() {
-  const num = (id) => Number.parseFloat($(id).value);
-  const years = Number($("years").value);
-  return {
-    includeOp: $("include-op").checked,
-    exclude: parseUsernames($("exclude").value.split(/[\s,]+/)),
-    only: parseSubreddits($("only-subs").value.split(/[\s,]+/)),
-    years: HISTORY_YEARS.includes(years) ? years : null,
-    ...clampScanNumbers({
-      maxUsers: num("max-users"), delay: num("delay"), concurrency: num("concurrency"), cacheDays: num("cache-days"),
-    }),
-  };
+  const fields = { includeOp: $("include-op").checked };
+  for (const [key, id] of Object.entries(FIELD_IDS)) fields[key] = $(id).value;
+  return parseOptions(fields);
 }
 
 function minCount() {
-  return Math.max(0, Math.floor(Number.parseFloat($("min-count").value)) || 0);
+  return parseMinCount($("min-count").value);
 }
 
 // Put the options back in the form as they'll be used (after a shared link or a typo).
@@ -126,19 +109,8 @@ function showOptions(opts) {
 // "Options: author included · top 20 · last 5 years", so settings from a shared link are
 // visible without opening the panel.
 function updateOptionsSummary(o = readOptions()) {
-  const parts = [];
-  if (o.includeOp) parts.push("author included");
-  if (o.exclude.length) parts.push(`skipping ${plural(o.exclude.length, "user")}`);
-  if (o.maxUsers) parts.push(`top ${o.maxUsers}`);
-  if (o.only.length) {
-    parts.push(o.only.length <= 3 ? `only ${o.only.map((s) => `r/${s}`).join(", ")}` : `only ${o.only.length} subreddits`);
-  }
-  if (o.years) parts.push(`last ${plural(o.years, "year")}`);
-  if (o.cacheDays !== DEFAULTS.cacheDays) parts.push(o.cacheDays ? `results kept ${plural(o.cacheDays, "day")}` : "not saving results");
-  if (o.delay !== DEFAULTS.delay) parts.push(`${o.delay}s between requests`);
-  if (o.concurrency !== DEFAULTS.concurrency) parts.push(`${o.concurrency} in parallel`);
-  if (!sameBadges(badges, DEFAULT_BADGES)) parts.push("custom badges");
-  $("options-summary").textContent = parts.length ? `: ${parts.join(" · ")}` : "";
+  const text = optionsSummary(o, badges);
+  $("options-summary").textContent = text ? `: ${text}` : "";
 }
 
 // ---- Badges ----
@@ -166,13 +138,6 @@ function showBadges() {
 }
 
 // "3+ posts and comments, on 2+ days, the first 14+ days before"
-function describeRule(r) {
-  const parts = [`${Math.max(1, r.count)}+ ${r.count === 1 ? "post or comment" : "posts and comments"}`];
-  if (r.days > 0) parts.push(`on ${r.days}+ ${r.days === 1 ? "day" : "different days"}`);
-  if (r.tenure > 0) parts.push(`the first ${r.tenure}+ ${r.tenure === 1 ? "day" : "days"} before`);
-  return parts.join(", ");
-}
-
 function renderBadgeLegend() {
   $("badge-legend").replaceChildren(
     el("b", {}, "regular"), ` (${describeRule(badges.regular)}), `,
@@ -225,40 +190,6 @@ function renderStatus() {
 }
 
 // Rounded so it doesn't flicker: 5 s steps under a minute, 10 s under 10 minutes.
-function formatEta(seconds) {
-  if (seconds === null) return "estimating time left…";
-  if (seconds < 5) return "almost done";
-  if (seconds < 60) return `about ${Math.ceil(seconds / 5) * 5} s left`;
-  if (seconds < 600) {
-    const s = Math.ceil(seconds / 10) * 10;
-    return `about ${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""} left`;
-  }
-  const m = Math.ceil(seconds / 60);
-  return m < 60 ? `about ${m} min left` : `about ${Math.floor(m / 60)} h ${m % 60} min left`;
-}
-
-// A measured duration: "4.2 s", "38 s", "1 min 38 s", "1 h 5 min".
-function formatDuration(seconds) {
-  if (seconds < 10) return `${seconds.toFixed(1)} s`;
-  const s = Math.round(seconds);
-  if (s < 60) return `${s} s`;
-  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""}`;
-  const m = Math.round(s / 60);
-  return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
-}
-
-// "N Arctic Shift requests and M archive requests" (archive null: from before archive
-// requests were counted, so left out).
-function requestsText(arcticShift, archive) {
-  const api = plural(arcticShift, "Arctic Shift request");
-  return archive === null || archive === undefined ? api : `${api} and ${plural(archive, "archive request")}`;
-}
-
-function tookText({ seconds, profilingSeconds }) {
-  const total = formatDuration(seconds);
-  return profilingSeconds === null ? total : `${total} (profiling ${formatDuration(profilingSeconds)})`;
-}
-
 function startEta(total) {
   stopEta();
   status.eta = new Eta(total);
@@ -317,17 +248,6 @@ function announce(text) {
 }
 
 // Plain-language explanation of an error from core.js; the raw message goes in details.
-function explain(err) {
-  if (err instanceof ServerBusy) return "Arctic Shift is overloaded right now. Try again in a few minutes.";
-  if (err instanceof QueryTimeout) return "Arctic Shift couldn't count this much history in time.";
-  if (err instanceof ArcticShiftError) {
-    if (err.status === 429) return "Arctic Shift is limiting requests right now. Wait a minute and try again.";
-    if (err.status === null) return "Couldn't reach Arctic Shift. Check your connection and try again.";
-    return `Arctic Shift returned an error (HTTP ${err.status}).`;
-  }
-  return err.message;
-}
-
 function showError(message, detail = null) {
   const box = $("error");
   box.replaceChildren();
@@ -457,21 +377,6 @@ function activity(profile, post) {
 const TIER_LABELS = { new: "new here", occasional: "occasional", regular: "regular" };
 
 // ", on 12 different days, the first 5 months before" (or why there's no timeline).
-function timelineText(f) {
-  if (f.days === null) return " (no timeline saved, so the badge goes by the count alone)";
-  let text = `, on ${f.exact ? "" : "at least "}${f.days === 1 ? "1 day" : `${f.days} different days`}`;
-  if (f.tenureDays !== null) text += `, the first ${formatAge(f.tenureDays)} before`;
-  return text;
-}
-
-function formatAge(days) {
-  if (days < 1) return "less than a day";
-  if (days < 14) return plural(Math.floor(days), "day");
-  if (days < 60) return plural(Math.floor(days / 7), "week");
-  if (days < 730) return plural(Math.floor(days / 30.44), "month");
-  return plural(Math.floor(days / 365.25), "year");
-}
-
 const searchWords = new WeakMap();
 
 function userCard(profile, post) {
@@ -1330,16 +1235,6 @@ function scanItem(scan) {
   return li;
 }
 
-function scanOptionNotes(o = {}) {
-  return [
-    o.years && `last ${plural(o.years, "year")}`,
-    o.only?.length && `only ${o.only.map((x) => `r/${x}`).join(", ")}`,
-    o.maxUsers && `top ${o.maxUsers}`,
-    o.includeOp && "author included",
-    o.exclude?.length && `skipped ${o.exclude.join(", ")}`,
-  ].filter(Boolean);
-}
-
 function markCurrentScan() {
   for (const li of $("saved-list").children) {
     if (li.dataset.id === state.savedId) li.setAttribute("aria-current", "true");
@@ -1441,19 +1336,8 @@ function currentPostRef() {
 
 function shareUrl(postRef, opts = readOptions()) {
   const url = new URL(window.location.href);
-  url.search = "";
   url.hash = "";
-  url.searchParams.set("post", postRef);
-  if (opts.includeOp) url.searchParams.set("op", "1");
-  if (opts.exclude.length) url.searchParams.set("exclude", opts.exclude.join(","));
-  if (opts.only.length) url.searchParams.set("subs", opts.only.join(","));
-  if (opts.years) url.searchParams.set("years", String(opts.years));
-  if (opts.maxUsers) url.searchParams.set("max", String(opts.maxUsers));
-  if (minCount()) url.searchParams.set("min", String(minCount()));
-  if (opts.delay !== DEFAULTS.delay) url.searchParams.set("delay", String(opts.delay));
-  if (opts.concurrency !== DEFAULTS.concurrency) url.searchParams.set("par", String(opts.concurrency));
-  if (opts.cacheDays !== DEFAULTS.cacheDays) url.searchParams.set("cache", String(opts.cacheDays));
-  if (!sameBadges(badges, DEFAULT_BADGES)) url.searchParams.set("badges", formatBadges(badges));
+  url.search = shareParams(postRef, opts, { minCount: minCount(), badges }).toString();
   return url.toString();
 }
 
@@ -1541,30 +1425,22 @@ function init() {
 
   // Pre-fill from a shared link (the Options panel stays closed; its summary lists what's
   // set) and start straight away.
-  const params = new URLSearchParams(window.location.search);
+  const { post, fields } = readShareParams(new URLSearchParams(window.location.search));
   // A link's badge rules apply to this visit without replacing the ones saved here.
-  badges = parseBadges(params.get("badges")) ?? storedBadges() ?? DEFAULT_BADGES;
+  badges = parseBadges(fields.badges ?? null) ?? storedBadges() ?? DEFAULT_BADGES;
   showBadges();
-  const fill = (id, key) => {
-    if (params.has(key)) $(id).value = params.get(key);
-  };
-  $("include-op").checked = params.get("op") === "1";
-  fill("exclude", "exclude");
-  fill("only-subs", "subs");
-  fill("years", "years");
-  fill("max-users", "max");
-  fill("min-count", "min");
-  fill("delay", "delay");
-  fill("concurrency", "par");
-  fill("cache-days", "cache");
+  $("include-op").checked = fields.includeOp;
+  for (const [key, id] of Object.entries(FIELD_IDS)) {
+    if (key in fields) $(id).value = fields[key];
+  }
   const opts = readOptions();
   showOptions(opts);
   // Clearing out old records walks the whole store, and the scan's own reads would queue
   // behind it (long enough, on a big store, to switch saved results off for the run).
   const pruned = openCache(opts.cacheDays).prune();
   renderSaved();
-  if (params.get("post")) {
-    $("post").value = params.get("post");
+  if (post) {
+    $("post").value = post;
     pruned.finally(() => run());
   }
 }
