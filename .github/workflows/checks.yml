@@ -66,6 +66,8 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: bash .github/scripts/pr-guards.sh
       - name: Workflow lint
+        # Runs even when a guard above is waiting on an ack: label, so lint errors show at once.
+        if: ${{ !cancelled() }}
         env:
           ACTIONLINT_VERSION: 1.7.12
           ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
