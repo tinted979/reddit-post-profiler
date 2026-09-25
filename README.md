@@ -249,7 +249,7 @@ saved scans keep both counts.
 ## Development
 
 ```sh
-cd web && npm test       # web app tests (Node 22+, no dependencies)
+cd web && npm ci && npm test   # web app tests (Node 22+; npm ci installs the one test-only dependency)
 uv run --with duckdb --with pytest pytest tools   # dump build and upload-check tests
 ```
 

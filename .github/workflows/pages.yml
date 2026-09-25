@@ -23,9 +23,15 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: Web tests
         working-directory: web
-        run: npm test
+        # fake-indexeddb is the one (dev-only) dependency: the tests run the real IndexedDB
+        # backend on it. The site itself has none.
+        run: |
+          npm ci
+          npm test
       - name: Local files load only as `from "./x.js"`
         # The deploy's missing-file check and cache busting only see that form, so fail on
         # any other way of loading a local file: a side-effect import, any dynamic import(),
