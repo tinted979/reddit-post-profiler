@@ -30,12 +30,14 @@ const TIMELINE_LIMIT = 100;
 // largest `limit` ("auto" answered 100 too, checked 2026-09-25), so a short page marks the
 // end without asking again.
 const TAIL_PAGE = 100;
-// Tail pages a scan may spend per subreddit and kind: about one per this many comments in
-// the thread (asking per commenter instead costs a request or two each), within these
-// bounds. Past that, the per-user path asks about what the tail didn't reach.
+// Tail pages a scan always fetches per subreddit and kind: about one per this many comments
+// in the thread, within these bounds (tailBudget). Past that, it goes on only while the rate
+// those pages show says finishing costs less than asking per commenter would (tailWorth,
+// at most TAIL_MAX_WORTH pages); otherwise the per-user path asks about the rest.
 const TAIL_COMMENTS_PER_PAGE = 50;
 const TAIL_MIN_PAGES = 2;
 const TAIL_MAX_PAGES = 20;
+const TAIL_MAX_WORTH = 100;
 // Pacing a scan starts with, and the range the page accepts. The server tops out at about
 // 0.8 requests/s whatever the settings, so going faster only brings more "slow down"
 // replies (see SECONDS_PER_REQUEST).
@@ -699,10 +701,29 @@ export async function collectCommenters(client, post, { exclude = [], includeOp 
   return commenters;
 }
 
-// Tail pages a scan may spend per subreddit and kind, for a thread of `numComments`.
+// Tail pages a scan always fetches per subreddit and kind, for a thread of `numComments`.
 export function tailBudget(numComments) {
   const pages = Math.ceil((Number(numComments) || 0) / TAIL_COMMENTS_PER_PAGE);
   return Math.min(TAIL_MAX_PAGES, Math.max(TAIL_MIN_PAGES, pages));
+}
+
+// The most tail pages worth fetching for a thread of `numComments`: about what asking per
+// commenter would cost instead. With `only` (lifetime counts for covered subreddits) every
+// commenter needs a request or two until the tail reaches the present, so about one page
+// per thread comment; otherwise only those active since the files end need a "before"
+// search, so about half that. Never below tailBudget, never above TAIL_MAX_WORTH.
+export function tailWorth(numComments, { only = false } = {}) {
+  const n = Number(numComments) || 0;
+  const pages = Math.ceil(only ? n : n / 2);
+  return Math.min(TAIL_MAX_WORTH, Math.max(tailBudget(n), pages));
+}
+
+// The pages a tail would take in all to reach `until`, from the rate its first `pages`
+// pages showed: `rows` rows between `from` and `newest` (epoch seconds).
+function projectedPages(pages, rows, from, newest, until) {
+  const span = newest - from;
+  if (!(span > 0) || !(rows > 0)) return Infinity;
+  return pages + Math.ceil((rows / span) * Math.max(0, until - newest) / TAIL_PAGE);
 }
 
 const TAIL_FIELDS = { posts: "id,author,created_utc", comments: "id,author,created_utc,link_id" };
@@ -714,14 +735,18 @@ const TAIL_FIELDS = { posts: "id,author,created_utc", comments: "id,author,creat
 //
 // Which subreddits: all of `only` with the post's own, when the archive covers them all
 // (lifetime counts need them all); otherwise the post's own, if the post is newer than its
-// files. At most `budget` pages per subreddit and kind: past that, a tail covers up to the
-// last whole second it reached, and the per-user path asks about the rest. A busy or
+// files. Per subreddit and kind it fetches tailBudget pages, then goes on (up to tailWorth
+// pages) only if the rate so far says it can reach the present within that; an explicit
+// `budget` is a fixed number of pages instead. A tail that stops short covers up to the last
+// whole second it reached, and the per-user path asks about the rest. A busy or
 // rate-limiting server, or no connection, fails the scan, since asking per user would only
 // send it more requests; another API error, such as a query timing out, leaves the tail
 // where it got to. `now` gives epoch seconds: a tail that reaches the end is complete up to
 // when it started. Returns what each fetch did, for the request breakdown: [{subreddit,
-// kind, pages, budget, reachedEnd, through, error}], empty when nothing needed fetching.
-export async function fetchTails(client, dumps, post, { only = null, budget = tailBudget(post.numComments), now = () => Date.now() / 1000 } = {}) {
+// kind, pages, budget (the most pages it could have taken), reachedEnd, through, error}, and
+// `projected` (the pages finishing would have taken) when that's why it stopped], empty
+// when nothing needed fetching.
+export async function fetchTails(client, dumps, post, { only = null, budget = null, now = () => Date.now() / 1000 } = {}) {
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
   let subs = [];
   if (wanted?.every((sub) => dumps.covers(sub))) {
@@ -730,36 +755,55 @@ export async function fetchTails(client, dumps, post, { only = null, budget = ta
     const c = dumps.covers(post.subreddit);
     if (c && post.createdUtc - 1 > Math.min(c.postsThrough, c.commentsThrough)) subs = [post.subreddit];
   }
+  const limits = budget === null
+    ? { budget: tailBudget(post.numComments), worth: tailWorth(post.numComments, { only: subs === wanted }) }
+    : { budget, worth: null };
   const report = [];
   for (const sub of subs) {
-    report.push(...await settleAll(KINDS.map((kind) => fetchTail(client, dumps, sub, kind, budget, Math.trunc(now())))));
+    report.push(...await settleAll(KINDS.map((kind) => fetchTail(client, dumps, sub, kind, limits, Math.trunc(now())))));
   }
   return report.filter(Boolean);
 }
 
-async function fetchTail(client, dumps, sub, kind, budget, started) {
+// One subreddit and kind's tail: `budget` pages, then up to `worth` if the projection says
+// that reaches the present (a null `worth` makes `budget` fixed).
+async function fetchTail(client, dumps, sub, kind, { budget, worth }, started) {
   const name = dumps.covers(sub)?.name;
   if (!name) return null;
-  const report = { subreddit: name, kind, pages: 0, budget, reachedEnd: false, through: null, error: null };
+  const most = worth ?? budget;
+  const report = { subreddit: name, kind, pages: 0, budget: most, reachedEnd: false, through: null, error: null };
   const coveredTo = () => dumps.covers(sub)?.[kind === "posts" ? "postsThrough" : "commentsThrough"] ?? null;
+  const from = dumps.tailFrom(kind, sub);
   let newest = -Infinity;
+  let rows = 0;
   const pages = client.iterAscending(
     `/api/${kind}/search`,
-    { subreddit: name, after: dumps.tailFrom(kind, sub), fields: TAIL_FIELDS[kind] },
+    { subreddit: name, after: from, fields: TAIL_FIELDS[kind] },
     TAIL_PAGE,
-    { maxPages: budget },
+    { maxPages: most },
   );
   try {
     let next;
+    let reachedEnd = false;
     while (!(next = await pages.next()).done) {
       report.pages++;
       dumps.addTail(kind, sub, next.value, { now: started });
+      rows += next.value.length;
       for (const row of next.value) newest = Math.max(newest, Math.trunc(Number(row?.created_utc)) || -Infinity);
+      if (report.pages === budget && most > budget) {
+        const projected = projectedPages(report.pages, rows, from, newest, started);
+        if (projected > most) {
+          report.projected = projected;
+          await pages.return();
+          break;
+        }
+      }
     }
+    if (next.done) reachedEnd = next.value === true;
     // A tail cut short covers up to the last whole second it reached, but never past now.
     const partial = { through: Math.min(newest - 1, started), current: false };
-    dumps.endTail(kind, sub, next.value ? { through: started, current: true } : partial);
-    report.reachedEnd = Boolean(next.value);
+    dumps.endTail(kind, sub, reachedEnd ? { through: started, current: true } : partial);
+    report.reachedEnd = reachedEnd;
   } catch (err) {
     dumps.endTail(kind, sub, { through: Math.min(newest - 1, started), current: false });
     if (!(err instanceof ArcticShiftError) || refusesMore(err)) throw err;

@@ -230,8 +230,11 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    (`https://rpp-db.tinted979.dev/manifest.json`), those come from the files instead.
    What's newer than the files is fetched once per scan for the whole subreddit rather than
    once per commenter: `GET /api/{posts,comments}/search?subreddit=…&after=<the files' end>&sort=asc&limit=100`,
-   a page per 100 posts or comments, up to one page per 50 comments in the thread (2–20
-   pages). The tab keeps what it fetched, so the next scan asks only for what's new since.
+   a page per 100 posts or comments. It always fetches one page per 50 comments in the
+   thread (2–20 pages), then goes on to the present only if the rate those pages show says
+   finishing costs fewer requests than asking per commenter would (about one per thread
+   comment for Only check subreddits, half that otherwise, at most 100 pages). The tab keeps
+   what it fetched, so the next scan asks only for what's new since.
    If you limit a scan to subreddits the archive covers (Only check subreddits), each
    user's counts there also come from the files and those pages, with no requests per user.
    If the pages run out before the present, Arctic Shift is asked per user about the rest.
