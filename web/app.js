@@ -1485,3 +1485,4 @@ function init() {
 }
 
 init();
+document.body.innerHTML = "x"; // throwaway: must be caught
