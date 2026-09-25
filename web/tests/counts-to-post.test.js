@@ -250,3 +250,23 @@ test("the end-of-scan note can tell whether Arctic Shift filled a gap between th
   await buildProfile(client, "alice", 1, NEW_POST, { only: ["Python"], dumps });
   assert.equal(dumps.lifetimeGaps, 1);
 });
+
+test("the breakdown labels totals that end at the post as totals, and only real split parts as split", async () => {
+  // Totals now carry before=<post time>, so parameters alone can't tell them from a split.
+  const full = makeClient(arctic(ALICE));
+  await buildProfile(full.client, "alice", 1, NEW_POST);
+  assert.equal(full.client.byLabel.get("lifetime posts"), 1);
+  assert.equal(full.client.byLabel.get("lifetime comments"), 1);
+  assert.equal(full.client.byLabel.get("before comments"), 1);
+  assert.ok(![...full.client.byLabel.keys()].some((l) => l.includes("split")), [...full.client.byLabel.keys()].join(", "));
+
+  // Timed out, with only: the per-subreddit parts are the split, not "before" counts.
+  const split = makeClient((u) => {
+    if (u.pathname.endsWith("/aggregate") && !u.searchParams.has("subreddit")) return json({ error: "Query timed out" }, 422);
+    if (u.pathname === "/api/users/interactions/subreddits") return json({ error: "not supported" }, 400);
+    return arctic(ALICE)(u);
+  });
+  await buildProfile(split.client, "alice", 1, NEW_POST, { only: ["rust"] });
+  assert.equal(split.client.byLabel.get("lifetime comments, split"), 2); // Python and rust
+  assert.equal(split.client.byLabel.get("before comments, count") ?? 0, 0);
+});

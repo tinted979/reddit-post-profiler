@@ -62,5 +62,5 @@ The AI pull request reviewers (`.github/workflows/agent-review.yml`, roles in `.
 ## Backlog and decisions
 
 - Known debt is GitHub issues labelled `debt`; agent findings are labelled `agent:finding`. Before refactoring or cleanup, check whether an issue covers it, and close it from the PR (`Closes #N`). File newly found debt as a `debt` issue.
-- Lasting decisions are in `docs/adr/` (no build step or dependencies, Arctic Shift etiquette, frozen storage names, the static archive and its scheduled sync); the `adr` skill says how to add one.
+- Lasting decisions are in `docs/adr/` (no build step or dependencies, Arctic Shift etiquette, frozen storage names, the static archive and its scheduled sync, every count stopping at the post); the `adr` skill says how to add one.
 - Live browser checks: the `live-browser-test` skill.

@@ -1,6 +1,6 @@
 # 0005. Keep the archive current with a scheduled sync, and share each subreddit's tail
 
-**Status:** Accepted (recorded 2026-09-25; plan in docs/history/2026-09-25-archive-sync.md). Supersedes 0004.
+**Status:** Accepted (recorded 2026-09-25; plan in docs/history/2026-09-25-archive-sync.md). Supersedes 0004. Partly superseded by 0006: the page's tail stops at the post, and where a covered post's thread comes from.
 
 ## Context
 

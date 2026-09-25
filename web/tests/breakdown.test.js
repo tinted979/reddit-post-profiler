@@ -46,14 +46,16 @@ test("requestLabel names what each request shape is for", () => {
     ["/api/comments/search", { link_id: "abc", sort: "asc" }, "thread pages"],
     ["/api/posts/search/aggregate", { aggregate: "subreddit", author: "a", limit: "" }, "lifetime posts"],
     ["/api/comments/search/aggregate", { aggregate: "subreddit", author: "a", limit: "", after: 5 }, "lifetime comments"],
-    ["/api/comments/search/aggregate", { aggregate: "subreddit", author: "a", after: 5, before: 9 }, "lifetime comments, split"],
-    ["/api/comments/search/aggregate", { aggregate: "subreddit", author: "a", subreddit: "rust" }, "lifetime comments, split"],
+    // Every count carries `before` (docs/adr/0006), so the client says which are split parts.
+    ["/api/comments/search/aggregate", { aggregate: "subreddit", author: "a", after: 5, before: 9 }, "lifetime comments, split", { split: true }],
+    ["/api/comments/search/aggregate", { aggregate: "subreddit", author: "a", subreddit: "rust", before: 9 }, "lifetime comments, split", { split: true }],
+    ["/api/comments/search/aggregate", { aggregate: "subreddit", author: "a", before: 9 }, "lifetime comments"],
     ["/api/users/interactions/subreddits", { author: "a" }, "interactions"],
     ["/api/comments/search", { author: "a", subreddit: "Python", before: 9, fields: "created_utc" }, "before comments"],
     ["/api/posts/search/aggregate", { aggregate: "subreddit", author: "a", subreddit: "Python", before: 9 }, "before posts, count"],
     ["/api/somewhere/else", {}, "/api/somewhere/else"],
   ];
-  for (const [path, params, label] of cases) assert.equal(requestLabel(path, params), label, `${path} ${JSON.stringify(params)}`);
+  for (const [path, params, label, opts] of cases) assert.equal(requestLabel(path, params, opts), label, `${path} ${JSON.stringify(params)}`);
 });
 
 test("the client counts every request it sends by label, retries included, and the retries by reason", async () => {

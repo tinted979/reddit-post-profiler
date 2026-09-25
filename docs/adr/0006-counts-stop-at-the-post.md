@@ -1,6 +1,6 @@
 # 0006. Every count stops at the post
 
-**Status:** Accepted (recorded 2026-09-26).
+**Status:** Accepted (recorded 2026-09-26). Partly supersedes 0005: a covered subreddit's tail now stops at the post, and a covered post's thread comes from the files plus one search (post older than the files) or the comment tree (newer), not from the tail.
 
 ## Context
 

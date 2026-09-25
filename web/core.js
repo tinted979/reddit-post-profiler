@@ -352,7 +352,7 @@ export class ArcticShiftClient {
   }
 
   async _request(path, params, group) {
-    const label = requestLabel(path, params);
+    const label = requestLabel(path, params, { split: Boolean(group) });
     const url = new URL(path, this.baseUrl);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
     url.searchParams.set("meta-app", APP_TAG);
@@ -628,9 +628,11 @@ export class ArcticShiftClient {
 }
 
 // What an API request is for, from its path and parameters, for the scan's request
-// breakdown (format.js breakdownLines gives each label its words). A shape this doesn't
+// breakdown (format.js breakdownLines gives each label its words). `split` says it's a part
+// of a split-up count (subredditCounts sends those as a group): every count carries
+// `before` now (docs/adr/0006), so the parameters alone can't say. A shape this doesn't
 // know is labelled with its path.
-export function requestLabel(path, params = {}) {
+export function requestLabel(path, params = {}, { split = false } = {}) {
   const has = (k) => params[k] !== undefined && params[k] !== null;
   if (path === "/api/posts/ids") return "post";
   if (path === "/api/comments/tree") return "thread tree";
@@ -639,9 +641,9 @@ export function requestLabel(path, params = {}) {
   if (!m) return path;
   const [, kind, aggregate] = m;
   if (aggregate) {
-    if (has("subreddit") && has("before")) return `before ${kind}, count`;
     // Split up: per subreddit (a scan with `only`) or per year.
-    return has("subreddit") || has("before") ? `lifetime ${kind}, split` : `lifetime ${kind}`;
+    if (split) return `lifetime ${kind}, split`;
+    return has("subreddit") ? `before ${kind}, count` : `lifetime ${kind}`;
   }
   if (has("link_id")) return "thread pages";
   if (has("author")) return `before ${kind}`;
@@ -1131,7 +1133,9 @@ const SECONDS_PER_REQUEST = 1.8;
 const SECONDS_PER_REQUEST_PARALLEL = 1.3;
 
 // A rough cost for profiling `usernames` before starting: {users, saved, requests,
-// seconds}. `saved` counts users whose lifetime totals are saved (and still fresh).
+// seconds}. `saved` counts users whose lifetime totals are saved (and still fresh) for this
+// post: counts are saved per post (docs/adr/0006), so without `before` (the post's time)
+// none are found.
 export async function estimateScan(cache, usernames, { after = null, before = null, delay = SCAN_DEFAULTS.delay, concurrency = SCAN_DEFAULTS.concurrency } = {}) {
   const bucket = windowBucket(after);
   let saved = 0;
