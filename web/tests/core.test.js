@@ -1023,14 +1023,25 @@ test("a stopped rescan doesn't replace a complete saved scan", async () => {
   assert.equal((await store.load("p1")).summary.scannedAt, 300);
 });
 
-test("a scan where every lookup failed isn't saved, over a saved scan or at all", async () => {
+test("a scan with no successful lookup isn't saved, over a saved scan or at all", async () => {
   const store = new ScanStore();
   const rows = sampleProfiles().map(serializeProfile);
-  assert.equal(await store.save({ id: "p1", scannedAt: 100, complete: true, stats: { profiled: 3, failed: 0 } }, rows), "saved");
-  const allFailed = { profiled: 3, failed: 3 };
-  assert.equal(await store.save({ id: "p1", scannedAt: 200, complete: true, stats: allFailed }, rows), "kept");
-  assert.equal(await store.save({ id: "p2", scannedAt: 200, complete: true, stats: allFailed }, rows), "kept");
+  assert.equal(await store.save({ id: "p1", scannedAt: 100, complete: true }, rows), "saved");
+  // Judged from the profiles themselves, not the summary's stats (imports are untrusted).
+  const failedRows = rows.map((r) => ({ ...r, error: "lookup failed" }));
+  assert.equal(await store.save({ id: "p1", scannedAt: 200, complete: true }, failedRows), "empty");
+  assert.equal(await store.save({ id: "p2", scannedAt: 200, complete: false }, failedRows), "empty");
+  assert.equal(await store.save({ id: "p1", scannedAt: 300, complete: true, stats: { profiled: 0, failed: 0 } }, []), "empty");
   assert.deepEqual((await store.list()).map((s) => [s.id, s.scannedAt]), [["p1", 100]]);
+});
+
+test("importing a newer copy with no profiles keeps the saved scan", async () => {
+  const store = new ScanStore();
+  const scan = importScan(savedScan());
+  await store.save(scan.summary, scan.profiles);
+  const empty = importScan({ ...savedScan(), profiles: [], summary: { ...savedScan().summary, scannedAt: scan.summary.scannedAt + 1 } });
+  assert.deepEqual(await store.importAll([empty]), { added: 0, replaced: 0, kept: 1, failed: 0 });
+  assert.equal((await store.load(POST.id)).profiles.length, scan.profiles.length);
 });
 
 test("importing a newer but stopped copy of a complete saved scan keeps the complete one", async () => {
@@ -1047,7 +1058,7 @@ test("ScanStore gives up on a store that hangs", async () => {
   const hang = () => new Promise(() => {});
   const store = new ScanStore({ backend: { getPrefix: hang, set: hang, setMany: hang, get: hang, delete: hang, clear: hang }, timeoutMs: 10 });
   assert.deepEqual(await store.list(), []);
-  assert.equal(await store.save({ id: "x", scannedAt: 1 }, []), "failed");
+  assert.equal(await store.save({ id: "x", scannedAt: 1 }, sampleProfiles().map(serializeProfile)), "failed");
 });
 
 test("a hung store stays off for new ScanStore and ProfileCache objects on the same backend", async () => {

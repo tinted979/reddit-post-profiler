@@ -251,13 +251,13 @@ export class ScanStore {
     }
   }
 
-  // Returns "saved", "kept" (not written because it isn't worth keeping: every lookup
-  // failed, or it's a stopped scan and a complete scan of the post is saved) or "failed"
-  // (storage full, blocked or hung). Both records go in one transaction, so a failed save
-  // can't pair a scan's old summary with new profiles.
+  // Returns "saved"; "empty" (not written: no profile without an error, judged from the
+  // profiles rather than an imported summary's stats); "kept" (not written: a stopped scan,
+  // and a complete scan of the post is saved); or "failed" (storage full, blocked or
+  // hung). Both records go in one transaction, so a failed save can't pair a scan's old
+  // summary with new profiles.
   save(summary, profiles) {
-    const { profiled = 0, failed = 0 } = summary.stats ?? {};
-    if (profiled > 0 && failed === profiled) return Promise.resolve("kept");
+    if (!profiles.some((p) => !p?.error)) return Promise.resolve("empty");
     return this._call(async () => {
       if (summary.complete !== true) {
         const saved = await this.backend.get(`sum|${summary.id}`);
@@ -320,7 +320,7 @@ export class ScanStore {
         result.failed = scans.length - i; // storage full or blocked: stop here
         break;
       }
-      if (saved === "kept") {
+      if (saved === "kept" || saved === "empty") {
         result.kept++;
         continue;
       }

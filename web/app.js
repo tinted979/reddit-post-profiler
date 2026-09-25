@@ -706,15 +706,15 @@ async function run({ fromQueue = false } = {}) {
       stats: scanStats(profiles, state.post, state.beforeKnown, badges),
       facts: badgeFacts(profiles, state.post), // tier counts under whatever badge rules apply later
     };
-    // A scan where every lookup failed, or a stopped one when a complete scan of the post
-    // is saved, is "kept": the saved scan stays as it was.
+    // A scan where every lookup failed isn't saved ("empty"), and a stopped one doesn't
+    // replace a complete scan of the post ("kept").
     const result = await openScans().save(summary, profiles.map(serializeProfile));
     if (runId !== state.runId) return;
     if (result === "saved") {
       savedOk = true;
       state.savedId = state.post.id;
       renderSaved();
-    } else if (result === "kept" && !complete) {
+    } else if (result === "kept") {
       setStatus(`${status.text} The complete scan of this post saved earlier was kept.`);
     }
   };
