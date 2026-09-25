@@ -1,0 +1,28 @@
+name: Check the live archive
+
+# The page reads the archive files (R2, behind Cloudflare) quietly: if a setting changes
+# (compression, a challenge page, CORS) or the manifest goes bad, it switches the archive
+# off and every scan goes back to the Arctic Shift API, with only a note at the end of a
+# scan to show for it. This checks what the page needs, weekly and on demand, so that shows
+# up as a failed run (GitHub emails about those) instead. It reads only public URLs, so it
+# needs no secrets.
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: web/.nvmrc
+      # The manifest, CORS preflights for every origin in tools/r2-cors.json, and a range
+      # read of every file. See the script for what each checks.
+      - name: Check the archive
+        run: tools/check_dumps.sh

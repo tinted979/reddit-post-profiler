@@ -18,10 +18,11 @@
 #     a new build's r/<sub>/<version>/ mustn't already exist on R2 (its files wouldn't be
 #     replaced, so the manifest's byte sizes wouldn't match what's served).
 #  2. Build files go up (never replaced: --ignore-existing; immutable, cached a year), and
-#     each is checked through the public URL: a byte range comes back as a range (206, with
-#     the full size), uncompressed, with CORS for the page only.
-#  3. Only then the manifest goes up (cached 5 minutes) and is checked, so a browser never
-#     reads a manifest naming files that aren't there or aren't served right.
+#     each is checked through the public URL (tools/check_dumps.sh files): a byte range
+#     comes back as a range (206, with the full size), uncompressed, with CORS.
+#  3. Only then the manifest goes up (cached 5 minutes) and is checked (check_dumps.sh
+#     manifest and cors), so a browser never reads a manifest naming files that aren't
+#     there or aren't served right.
 # Nothing is deleted: a browser holding the previous manifest still needs the previous
 # build. Old builds can be removed by hand once no manifest names them.
 
@@ -35,7 +36,6 @@ fi
 REMOTE="${RCLONE_REMOTE:-r2}"
 BUCKET="${R2_BUCKET:-rpp-db}"
 PUBLIC="${DUMPS_URL:-https://rpp-db.tinted979.dev}"
-ORIGIN="https://tinted979.github.io"
 
 fail() { echo "error: $*" >&2; exit 1; }
 # curl for the checks. A host that can't be reached must go through the checks' own
@@ -54,12 +54,9 @@ FILES=$(node -e '
   for (const s of Object.values(m.subreddits)) for (const f of Object.values(s.files)) console.log(f.path + "\t" + f.bytes);
 ' "$DUMPS")
 [ -n "$FILES" ] || fail "$DUMPS/manifest.json lists no files"
-while IFS=$'\t' read -r path bytes; do
+while IFS=$'\t' read -r path _; do
   [ -f "$DUMPS/$path" ] || fail "the manifest names $path, which isn't in $DUMPS"
 done <<< "$FILES"
-
-# A header line from `curl -D -`, matched whole (headers end in \r).
-has_header() { grep -qiE "^$1"$'\r?$' <<< "$2"; }
 
 echo "Checking against what's live ..."
 work=$(mktemp -d)
@@ -85,38 +82,14 @@ rclone copy "$DUMPS/r" "$REMOTE:$BUCKET/r" --ignore-existing \
   --header-upload "Content-Type: application/vnd.apache.parquet" \
   --include "*.parquet" --progress
 
-echo "Checking the build files at $PUBLIC ..."
-problems=0
-check() { echo "  $*" >&2; problems=$((problems + 1)); }
-while IFS=$'\t' read -r path bytes; do
-  url="$PUBLIC/$path"
-  before=$problems
-  headers=$(fetch -D - -o /dev/null -H "Origin: $ORIGIN" -H "Range: bytes=0-99" "$url")
-  grep -q "^HTTP/[0-9.]* 206" <<< "$headers" || check "$path: not 206: $(head -1 <<< "$headers")"
-  has_header "content-range: bytes 0-99/$bytes" "$headers" || check "$path: Content-Range isn't bytes 0-99/$bytes"
-  has_header "access-control-allow-origin: $ORIGIN" "$headers" || check "$path: no CORS header for $ORIGIN"
-  grep -qi "^content-encoding:" <<< "$headers" && check "$path: served compressed, which breaks range reads"
-  # Shown for information: whether the edge cache is holding the file yet.
-  cache=$(fetch -D - -o /dev/null -H "Range: bytes=0-99" "$url" | grep -i "^cf-cache-status:" | tr -d '\r' || true)
-  [ "$problems" -eq "$before" ] && echo "  ok: $path (${bytes} bytes; ${cache:-no cf-cache-status})"
-done <<< "$FILES"
-[ "$problems" -eq 0 ] || fail "$problems problem(s) found above; the manifest was not uploaded, so the live one still stands"
+DUMPS_URL="$PUBLIC" tools/check_dumps.sh files "$DUMPS/manifest.json" ||
+  fail "the manifest was not uploaded, so the live one still stands"
 
 echo "Uploading manifest.json ..."
 rclone copyto "$DUMPS/manifest.json" "$REMOTE:$BUCKET/manifest.json" \
   --header-upload "Cache-Control: public, max-age=300" \
   --header-upload "Content-Type: application/json"
 
-echo "Checking the manifest ..."
-# Readable from the page's origin ...
-headers=$(fetch -D - -o /dev/null -H "Origin: $ORIGIN" "$PUBLIC/manifest.json?check=$(date +%s)")
-grep -q "^HTTP/[0-9.]* 200" <<< "$headers" || check "manifest.json: not 200: $(head -1 <<< "$headers")"
-has_header "access-control-allow-origin: $ORIGIN" "$headers" || check "manifest.json: no CORS header for $ORIGIN"
-# ... and not from anywhere else (CORS widened to "*" or another origin by mistake).
-headers=$(fetch -D - -o /dev/null -H "Origin: https://example.com" "$PUBLIC/manifest.json?check=$(date +%s)")
-grep -qi "^access-control-allow-origin:" <<< "$headers" && check "manifest.json: CORS allows https://example.com"
-
-if [ "$problems" -gt 0 ]; then
-  fail "$problems problem(s) found above"
-fi
+DUMPS_URL="$PUBLIC" tools/check_dumps.sh manifest
+DUMPS_URL="$PUBLIC" tools/check_dumps.sh cors
 echo "Done: every file in the manifest is served correctly."
