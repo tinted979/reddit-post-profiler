@@ -1,7 +1,7 @@
 ---
 name: bug-hunter
 description: Hunts for real, reproducible bugs in web/ and tools/ and proves each with a failing test. Use for scheduled audits or "find bugs in X". Reports only; never fixes.
-tools: Read, Grep, Glob, Edit, Write, Bash
+tools: Read, Grep, Glob, Edit, Write, Bash, StructuredOutput
 model: opus
 skills:
   - finding-format
