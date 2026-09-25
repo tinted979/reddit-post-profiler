@@ -14,7 +14,8 @@ set -uo pipefail
 : "${PR:?}" "${OWNER:?}" "${GITHUB_REPOSITORY:?}"
 
 base=HEAD^1   # the checkout is the PR's merge commit; its first parent is main
-changed=$(git diff --name-only "$base" HEAD)
+# --no-renames: a move lists both paths, so moving a file out of a protected folder still counts.
+changed=$(git diff --name-only --no-renames "$base" HEAD)
 fail=0
 
 # Commit authors are whatever the committer wrote, so this fails closed: a login that isn't
@@ -55,7 +56,7 @@ fi
 # Agents may add tests but not change or delete existing ones (the refactorer's hook enforces
 # it for its Edit tool only), so any such change in agent work needs the owner's look.
 if [ -n "$agents" ]; then
-  touched=$(git diff --name-only --diff-filter=MDR "$base" HEAD -- web/tests tools/tests)
+  touched=$(git diff --name-only --no-renames --diff-filter=MD "$base" HEAD -- web/tests tools/tests)
   if [ -n "$touched" ]; then
     owner_ack ack:tests || {
       echo "::error::This agent PR changes or deletes existing tests. Check no assertion got weaker, then add ack:tests:"

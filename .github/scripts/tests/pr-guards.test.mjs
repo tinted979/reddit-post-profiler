@@ -52,11 +52,16 @@ function guards({ authors = ["owner"], files, labels = [], labeler = "owner" }) 
     write(dir, "web/tests/a.test.js", testFile("one"));
     write(dir, "web/core.js", "export const x = 1;\n");
     write(dir, ".gitignore", "node_modules/\n");
+    write(dir, ".claude/settings.json", "{}\n");
     mkdirSync(join(dir, "tools"));
     git(dir, "init", "-q");
     git(dir, "add", "-A");
     git(dir, "commit", "-qm", "base");
-    for (const [path, text] of Object.entries(files)) write(dir, path, text);
+    // A null text deletes the file (with another path added, git would see a move).
+    for (const [path, text] of Object.entries(files)) {
+      if (text === null) rmSync(join(dir, path));
+      else write(dir, path, text);
+    }
     git(dir, "add", "-A");
     git(dir, "commit", "-qm", "change");
     const env = {
@@ -89,6 +94,14 @@ test("agent work can't change protected paths, even with ack:sensitive", () => {
       assert.match(r.out, /no label waives this/);
     }
   }
+});
+
+test("moving a protected file out of its folder still counts as changing it", () => {
+  const moved = { ".claude/settings.json": null, "notes/settings.json": "{}\n" };
+  const r = guards({ authors: agent, files: moved });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /no label waives this/);
+  assert.equal(guards({ files: moved }).status, 1, "the owner's own move needs ack:sensitive");
 });
 
 test("the owner's PR needs the owner's own ack:sensitive for protected paths, whatever its branch", () => {
