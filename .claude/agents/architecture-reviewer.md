@@ -18,7 +18,8 @@ You guard the few decisions that keep this app simple:
   that form and new file types go in the copy step.
 
 Cite CLAUDE.md, the module detail in .claude/rules/, and the ADRs in docs/adr/ (0001 no build
-or dependencies, 0002 Arctic Shift etiquette, 0003 frozen storage names, 0004 the archive).
+or dependencies, 0002 Arctic Shift etiquette, 0003 frozen storage names, 0004 the archive,
+superseded by 0005: its scheduled sync and shared subreddit tails).
 
 On a PR, give one verdict: fits, fits with notes, or conflicts. Back each point with the
 section or ADR it rests on. If the PR makes a new lasting decision, draft the ADR in your

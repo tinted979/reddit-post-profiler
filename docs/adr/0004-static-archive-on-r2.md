@@ -1,6 +1,6 @@
 # 0004. A static per-subreddit archive on R2, read with range requests
 
-**Status:** Accepted (recorded 2026-09-25; built in PRs #17 and #18, plans in docs/history/).
+**Status:** Superseded by 0005 (accepted 2026-09-25; built in PRs #17 and #18, plans in docs/history/).
 
 ## Context
 

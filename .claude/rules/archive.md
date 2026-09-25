@@ -8,7 +8,7 @@ paths:
 ---
 # The subreddit archive: dumps.js, hyparquet.js and tools/
 
-Moved from CLAUDE.md (web app architecture and Subreddit dumps). Why it's built this way: docs/adr/0004.
+Moved from CLAUDE.md (web app architecture and Subreddit dumps). Why it's built this way: docs/adr/0005 (which supersedes 0004).
 
 - **`dumps.js`:** `DumpSource`: loads the archive manifest from `https://rpp-db.tinted979.dev` (checked as untrusted input: subreddit names, each file under its own `r/<key>/`, no cutoff more than a day past the page's clock), says which subreddits it covers, and reads one author's timestamps from a Parquet file with hyparquet range requests. A failed read switches it off for the rest of the scan; Stop throws `Aborted`. `open({ onRequest })` calls `onRequest` once per request sent to the archive server (the manifest, even when it gives no archive, and each range read), which `app.js` counts. `core.js` doesn't import it: `buildProfile(…, { dumps })` calls `covers`/`timestamps` and bumps `lifetimeReads` for the end-of-scan note.
 - **`hyparquet.js`:** a saved copy of hyparquet 1.31.1's bundled build (MIT). Don't edit it; update it by downloading a new `+esm` build as its header describes.
