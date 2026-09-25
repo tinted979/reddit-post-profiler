@@ -131,9 +131,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.issue.number }}
         run: |
-          read -r cross head < <(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json isCrossRepository,headRefName --jq '"\(.isCrossRepository) \(.headRefName)"')
+          read -r cross bot head < <(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json isCrossRepository,author,headRefName --jq '"\(.isCrossRepository) \(.author.is_bot) \(.headRefName)"')
           if [ "$cross" != false ]; then echo "::error::#$PR comes from a fork; @claude only works on this repository's branches."; exit 1; fi
           case "$head" in claude/*) ;; *) echo "::error::#$PR's branch $head isn't a claude/* branch; @claude only pushes to those."; exit 1 ;; esac
+          # Only PRs an agent opened: their author can't be forged, so pr-guards.sh always treats
+          # them as agent work. On the owner's own PRs, an agent's commits could pass as the owner's.
+          if [ "$bot" != true ]; then echo "::error::#$PR wasn't opened by the Claude App; @claude only revises agents' PRs."; exit 1; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

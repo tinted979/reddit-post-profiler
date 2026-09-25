@@ -81,7 +81,8 @@ const agent = ["app/claude", "owner"]; // the Claude App opened it
 const agentCommit = ["owner", "owner", "claude[bot]"]; // the owner's PR, with an agent's commit
 
 test("agent work can't change protected paths, even with ack:sensitive", () => {
-  for (const authors of [agent, agentCommit, ["owner", "Copilot"]]) {
+  // "(unlinked)" is what pr-guards.sh's jq makes of a commit author with no GitHub login.
+  for (const authors of [agent, agentCommit, ["owner", "Copilot"], ["owner", "(unlinked)"]]) {
     for (const files of [workflow, { "CLAUDE.md": "x" }, { ".claude/settings.json": "{}" }]) {
       const r = guards({ authors, files, labels: ["ack:sensitive"] });
       assert.equal(r.status, 1, r.out);

@@ -812,7 +812,7 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 >   - Agent work that touches a protected path fails, and no label waives it. Agent work means a PR opened by, or with a commit written by, anyone but the owner (Dependabot aside). It's judged by authorship, not branch name, because an agent can pick any branch name.
 >   - Changing or deleting an existing test in agent work needs `ack:tests`.
 >   - A PR could still edit `checks.yml` itself. What closes that is the Claude App having no `workflows` permission.
-> - **The follow-up job refuses fork PRs and non-`claude/*` branches.** It may only `git push` or `git push origin HEAD`.
+> - **The follow-up job only revises PRs the Claude App opened in this repository.** It refuses forks, non-`claude/*` branches and the owner's own PRs. Commit authors can be forged, so only a PR's author reliably marks agent work. It may only `git push` or `git push origin HEAD`. `pr-guards.sh` treats any commit author that isn't exactly the owner or Dependabot as agent work, including authors with no linked login.
 > - **The env scrub needs `bubblewrap` and `socat` on the runner.** Claude Code 2.1.282 won't start without bubblewrap, and Bash fails without socat. Every agent job installs both, lifts Ubuntu 24.04's AppArmor block on user namespaces, and checks both work.
 > - **`pr-guards.sh` covers every PR, whatever its branch.** The owner's `ack:` labels waive its checks, except that agent work may never touch protected paths.
 

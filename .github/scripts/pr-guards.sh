@@ -17,7 +17,11 @@ base=HEAD^1   # the checkout is the PR's merge commit; its first parent is main
 changed=$(git diff --name-only "$base" HEAD)
 fail=0
 
-authors=$(gh pr view "$PR" --json author,commits --jq '.author.login, (.commits[].authors[0].login)') ||
+# Commit authors are whatever the committer wrote, so this fails closed: a login that isn't
+# exactly the owner's or Dependabot's, including none (an unlinked email), is agent work. The
+# PR's own author can't be forged, and follow-up only pushes to PRs the Claude App opened.
+authors=$(gh pr view "$PR" --json author,commits \
+  --jq '(.author.login, (.commits[].authors[0].login)) | if . == null or . == "" then "(unlinked)" else . end') ||
   { echo "::error::Couldn't read the PR's authors."; exit 1; }
 agents=$(grep -vxE "$OWNER|(app/)?dependabot(\[bot\])?" <<<"$authors" | sort -u)
 if [ -n "$agents" ]; then
