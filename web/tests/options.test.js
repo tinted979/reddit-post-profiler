@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { DEFAULT_BADGES, SCAN_DEFAULTS, SCAN_LIMITS } from "../core.js";
 import {
   FIELD_IDS,
+  mergeOptions,
   SHARE_PARAMS,
   optionsSummary,
   parseMinCount,
@@ -95,6 +96,34 @@ test("optionsSummary lists what differs from the defaults", () => {
     "author included · skipping 1 user · only 4 subreddits · not saving results · custom badges",
   );
   assert.equal(optionsSummary({ ...DEFAULT_OPTS, only: ["Python"], years: 1, delay: 2 }, DEFAULT_BADGES), "only r/Python · last 1 year · 2s between requests");
+});
+
+test("mergeOptions lays stored options over the base, keeping only valid fields", () => {
+  const base = { ...DEFAULT_OPTS, exclude: ["me"], only: ["Base"], years: 5, maxUsers: 50, delay: 2 };
+  // A queued item's options: all fields set.
+  const item = { includeOp: true, exclude: ["alice"], only: ["Python"], years: null, maxUsers: null, delay: 1, concurrency: 1, cacheDays: 0 };
+  assert.deepEqual(mergeOptions(base, item), item);
+  // Missing fields (an older page's item) come from the base.
+  assert.deepEqual(mergeOptions(base, { only: ["Python"] }), { ...base, only: ["Python"] });
+  assert.deepEqual(mergeOptions(base, undefined), base);
+  assert.deepEqual(mergeOptions(base, "nonsense"), base);
+});
+
+test("mergeOptions cleans odd stored values instead of passing them to a scan", () => {
+  const odd = {
+    includeOp: "yes", exclude: "alice", only: ["ok", 7, "u/x y"], years: 3, maxUsers: -4,
+    delay: "fast", concurrency: 99, cacheDays: Infinity,
+  };
+  assert.deepEqual(mergeOptions(DEFAULT_OPTS, odd), {
+    includeOp: false, // not a boolean: the base's
+    exclude: [], // not a list: the base's
+    only: ["ok"], // non-strings dropped, names cleaned like the form's
+    years: null, // not an offered window
+    maxUsers: null, // below 1: no cap
+    delay: SCAN_DEFAULTS.delay,
+    concurrency: SCAN_LIMITS.concurrency.max,
+    cacheDays: SCAN_DEFAULTS.cacheDays,
+  });
 });
 
 test("scanOptionNotes describes a saved scan's options", () => {

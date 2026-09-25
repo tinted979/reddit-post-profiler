@@ -55,6 +55,29 @@ export function parseOptions(fields) {
   };
 }
 
+// Options saved with a queued item or a saved scan, laid over `base` (full options, e.g.
+// the form's). The stored ones come from localStorage or IndexedDB, maybe written by an
+// older version of the page, so each field is used only if it's valid (numbers clamped
+// like the form's); a missing or odd field keeps the base's.
+export function mergeOptions(base, stored) {
+  const o = stored && typeof stored === "object" ? stored : {};
+  const has = (key) => key in o;
+  const list = (v, parse, fallback) => (Array.isArray(v) ? parse(v.filter((x) => typeof x === "string")) : fallback);
+  const num = (key) => (has(key) ? (typeof o[key] === "number" ? o[key] : NaN) : base[key]);
+  return {
+    includeOp: typeof o.includeOp === "boolean" ? o.includeOp : base.includeOp,
+    exclude: list(o.exclude, parseUsernames, base.exclude),
+    only: list(o.only, parseSubreddits, base.only),
+    years: has("years") ? (HISTORY_YEARS.includes(o.years) ? o.years : null) : base.years,
+    ...clampScanNumbers({
+      maxUsers: has("maxUsers") ? o.maxUsers ?? null : base.maxUsers,
+      delay: num("delay"),
+      concurrency: num("concurrency"),
+      cacheDays: num("cacheDays"),
+    }),
+  };
+}
+
 // The "hide subreddits below N" box: a whole number, at least 0.
 export function parseMinCount(text) {
   return Math.max(0, Math.floor(Number.parseFloat(text)) || 0);

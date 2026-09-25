@@ -38,7 +38,7 @@ import {
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
 import { describeRule, explain, formatDuration, formatEta, plural, requestsText, timelineText, tookText } from "./format.js";
-import { FIELD_IDS, optionsSummary, parseMinCount, parseOptions, readShareParams, scanOptionNotes, shareParams } from "./options.js";
+import { FIELD_IDS, mergeOptions, optionsSummary, parseMinCount, parseOptions, readShareParams, scanOptionNotes, shareParams } from "./options.js";
 import { DumpSource } from "./dumps.js";
 import { LinkQueue, MAX_WAITING, QUEUE_CONCURRENCY, QUEUE_KEY } from "./queue.js";
 
@@ -95,6 +95,7 @@ function minCount() {
 
 // Put the options back in the form as they'll be used (after a shared link or a typo).
 function showOptions(opts) {
+  $("include-op").checked = opts.includeOp;
   $("exclude").value = opts.exclude.join(", ");
   $("only-subs").value = opts.only.join(", ");
   $("years").value = opts.years ?? "";
@@ -518,20 +519,28 @@ function renderUsers() {
 // Scan the post in the box with the options in the form. Resolves with how it ended:
 // {kind: "done" | "empty" | "stopped" | "failed" | "invalid" | "offline" | "busy",
 //  message, post, profiled, total, failed}.
-async function run({ fromQueue = false } = {}) {
+// Scan a post. A manual run takes the post and options from the form (and puts the options
+// back as they'll be used); a queued run passes its own and leaves the form alone, so
+// whatever someone is typing there meanwhile stays put.
+async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
   if (state.controller) return { kind: "busy", message: "A scan is already running." };
-  const opts = readOptions();
-  showOptions(opts);
+  if (!fromQueue) {
+    postRef = $("post").value;
+    opts = readOptions();
+    showOptions(opts);
+    $("post").removeAttribute("aria-invalid");
+  }
   showError("");
-  $("post").removeAttribute("aria-invalid");
   let postId;
   try {
-    postId = parsePostRef($("post").value);
+    postId = parsePostRef(postRef);
   } catch (err) {
     showError(err.message);
-    $("post").setAttribute("aria-invalid", "true");
-    $("post").setAttribute("aria-describedby", "error");
-    if (!queueRunning()) $("post").focus();
+    if (!fromQueue) {
+      $("post").setAttribute("aria-invalid", "true");
+      $("post").setAttribute("aria-describedby", "error");
+      if (!queueRunning()) $("post").focus();
+    }
     return { kind: "invalid", message: err.message };
   }
   if (navigator.onLine === false) {
@@ -1033,14 +1042,6 @@ function clearFinishedQueued() {
   renderQueue();
 }
 
-// Put a queued item's link and options in the form, for run() to use.
-function fillFromItem(item) {
-  $("post").value = item.ref;
-  const o = { ...readOptions(), ...item.opts };
-  $("include-op").checked = Boolean(o.includeOp);
-  showOptions(o);
-}
-
 // Scan the next waiting item, and keep going while the queue is on. Anything that ends
 // a scan (including a manual run) calls this, so it's safe to call any time.
 async function pumpQueue() {
@@ -1065,10 +1066,11 @@ async function pumpQueue() {
   queueCurrent = item.id;
   queue.update(item.id, { status: "running", note: "Starting…" });
   renderQueue();
-  fillFromItem(item);
   let outcome;
   try {
-    outcome = await run({ fromQueue: true });
+    // The item's options as it was added, over the form's for any it lacks (an item from
+    // an older page); straight to run(), not through the form.
+    outcome = await run({ fromQueue: true, postRef: item.ref, opts: mergeOptions(readOptions(), item.opts) });
   } catch (err) {
     outcome = { kind: "failed", message: err.message };
   }
@@ -1284,15 +1286,10 @@ function markCurrentScan() {
 function fillFromScan(summary) {
   const { post, opts: o = {} } = summary;
   $("post").value = redditPostUrl(post);
-  $("include-op").checked = Boolean(o.includeOp);
-  showOptions({
-    ...readOptions(),
-    includeOp: Boolean(o.includeOp),
-    exclude: o.exclude ?? [],
-    only: o.only ?? [],
-    years: o.years ?? null,
-    maxUsers: o.maxUsers ?? null,
-  });
+  // The scan's own options (which ones it saved) over the form's for the rest.
+  showOptions(mergeOptions(readOptions(), {
+    includeOp: Boolean(o.includeOp), exclude: o.exclude ?? [], only: o.only ?? [], years: o.years ?? null, maxUsers: o.maxUsers ?? null,
+  }));
 }
 
 // Show a saved scan's users, as they were when it was saved, with no requests.
