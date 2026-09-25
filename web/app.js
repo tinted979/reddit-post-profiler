@@ -551,16 +551,17 @@ async function run({ fromQueue = false } = {}) {
     urlPost: fromQueue ? null : postId,
   });
   markCurrentScan();
-  // The post, results and saved list are about to be hidden or disabled, and Analyze too:
-  // keyboard focus on any of them moves to Stop once it shows, instead of being dropped.
-  const refocus = ["post-card", "results", "saved-list", "run"].some((id) => $(id).contains(document.activeElement));
+  // The post, results and saved list are about to be hidden or disabled, and Analyze and
+  // the options too (Enter in an option field starts a scan):
+  // keyboard focus on any of them moves to Stop once it shows (below), instead of being
+  // dropped.
+  const refocus = ["post-card", "results", "saved-list", "run", "option-fields"].some((id) => $(id).contains(document.activeElement));
   $("post-card").hidden = true;
   $("results").hidden = true;
   $("users").replaceChildren();
   $("bar").hidden = false;
   clearWaits();
   setRunning(true);
-  if (refocus) $("stop").focus({ preventScroll: true });
   setProgress(0);
 
   const cache = openCache(opts.cacheDays);
@@ -643,6 +644,8 @@ async function run({ fromQueue = false } = {}) {
 
   try {
     setStatus("Looking up the post…");
+    // Only now is the status line (and Stop in it) shown on a first scan.
+    if (refocus) $("stop").focus({ preventScroll: true });
     announce("Looking up the post…");
     const post = await client.getPost(postId);
     if (!post) {
