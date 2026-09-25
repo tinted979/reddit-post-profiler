@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Upload dump builds (from tools/build_dumps.py) to the R2 bucket, then check that the
-# public URL serves every file the manifest lists the way the page needs.
+# Upload dump builds (from tools/build_dumps.py) to the R2 bucket, checking that the
+# public URL serves every file the way the page needs before the manifest points at it.
 #
-# Usage, from the repo root:  tools/upload_dumps.sh [dumps-dir]
+# Usage, from the repo root:  tools/upload_dumps.sh [dumps-dir] [--drop KEY ...] [--allow-format-change]
 #
 # Needs rclone with a remote named "r2" (override with RCLONE_REMOTE) for the bucket's
 # S3 endpoint, set up once with a token limited to Object Read & Write on the bucket:
@@ -12,24 +12,37 @@
 #
 # (no_check_bucket: a token limited to one bucket may not check or create buckets.)
 #
-# Order matters: the build files go up first, then the manifest that points at them, so a
-# browser never reads a manifest naming files that aren't there yet. Build files are
-# never replaced (--ignore-existing; builds are immutable and cached for a year), and
-# nothing is deleted: a browser holding the previous manifest (cached 5 minutes) still
-# needs the previous build. Old builds can be removed by hand once no manifest names them.
+# Steps, in this order:
+#  1. Preflight (tools/check_upload.py): the manifest about to go up replaces the live one
+#     whole, so it must keep every live subreddit (--drop KEY removes one on purpose), and
+#     a new build's r/<sub>/<version>/ mustn't already exist on R2 (its files wouldn't be
+#     replaced, so the manifest's byte sizes wouldn't match what's served).
+#  2. Build files go up (never replaced: --ignore-existing; immutable, cached a year), and
+#     each is checked through the public URL: a byte range comes back as a range (206, with
+#     the full size), uncompressed, with CORS for the page only.
+#  3. Only then the manifest goes up (cached 5 minutes) and is checked, so a browser never
+#     reads a manifest naming files that aren't there or aren't served right.
+# Nothing is deleted: a browser holding the previous manifest still needs the previous
+# build. Old builds can be removed by hand once no manifest names them.
 
 set -euo pipefail
 
-DUMPS="${1:-dumps}"
+DUMPS="dumps"
+if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then
+  DUMPS="$1"
+  shift
+fi
 REMOTE="${RCLONE_REMOTE:-r2}"
 BUCKET="${R2_BUCKET:-rpp-db}"
 PUBLIC="${DUMPS_URL:-https://rpp-db.tinted979.dev}"
 ORIGIN="https://tinted979.github.io"
 
 fail() { echo "error: $*" >&2; exit 1; }
+fetch() { curl -s --max-time 30 "$@"; }
 
-command -v rclone >/dev/null || fail "rclone isn't installed (winget install Rclone.Rclone, or https://rclone.org/install/)"
-command -v node >/dev/null || fail "node is needed to read the manifest"
+for tool in rclone node curl uv; do
+  command -v "$tool" >/dev/null || fail "$tool isn't installed"
+done
 rclone listremotes | grep -qx "$REMOTE:" || fail "no rclone remote named '$REMOTE' (see the top of this script)"
 [ -f "$DUMPS/manifest.json" ] || fail "$DUMPS/manifest.json not found: run tools/build_dumps.py first"
 
@@ -38,9 +51,26 @@ FILES=$(node -e '
   const m = JSON.parse(require("fs").readFileSync(process.argv[1] + "/manifest.json", "utf8"));
   for (const s of Object.values(m.subreddits)) for (const f of Object.values(s.files)) console.log(f.path + "\t" + f.bytes);
 ' "$DUMPS")
+[ -n "$FILES" ] || fail "$DUMPS/manifest.json lists no files"
 while IFS=$'\t' read -r path bytes; do
   [ -f "$DUMPS/$path" ] || fail "the manifest names $path, which isn't in $DUMPS"
 done <<< "$FILES"
+
+# A header line from `curl -D -`, matched whole (headers end in \r).
+has_header() { grep -qiE "^$1"$'\r?$' <<< "$2"; }
+
+echo "Checking against what's live ..."
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+status=$(fetch -o "$work/live.json" -w '%{http_code}' "$PUBLIC/manifest.json?check=$(date +%s)")
+case "$status" in
+  200) ;;
+  404) : > "$work/live.json" ;; # nothing live yet
+  *) fail "couldn't read the live manifest (HTTP $status)" ;;
+esac
+rclone lsf -R --dirs-only --max-depth 2 "$REMOTE:$BUCKET/r" > "$work/builds.txt" 2>/dev/null || : > "$work/builds.txt"
+uv run --quiet tools/check_upload.py "$DUMPS/manifest.json" "$work/live.json" "$work/builds.txt" "$@" ||
+  fail "nothing was uploaded"
 
 echo "Uploading build files to $REMOTE:$BUCKET/r ..."
 rclone copy "$DUMPS/r" "$REMOTE:$BUCKET/r" --ignore-existing \
@@ -48,36 +78,36 @@ rclone copy "$DUMPS/r" "$REMOTE:$BUCKET/r" --ignore-existing \
   --header-upload "Content-Type: application/vnd.apache.parquet" \
   --include "*.parquet" --progress
 
+echo "Checking the build files at $PUBLIC ..."
+problems=0
+check() { echo "  $*" >&2; problems=$((problems + 1)); }
+while IFS=$'\t' read -r path bytes; do
+  url="$PUBLIC/$path"
+  before=$problems
+  headers=$(fetch -D - -o /dev/null -H "Origin: $ORIGIN" -H "Range: bytes=0-99" "$url")
+  grep -q "^HTTP/[0-9.]* 206" <<< "$headers" || check "$path: not 206: $(head -1 <<< "$headers")"
+  has_header "content-range: bytes 0-99/$bytes" "$headers" || check "$path: Content-Range isn't bytes 0-99/$bytes"
+  has_header "access-control-allow-origin: $ORIGIN" "$headers" || check "$path: no CORS header for $ORIGIN"
+  grep -qi "^content-encoding:" <<< "$headers" && check "$path: served compressed, which breaks range reads"
+  # Shown for information: whether the edge cache is holding the file yet.
+  cache=$(fetch -D - -o /dev/null -H "Range: bytes=0-99" "$url" | grep -i "^cf-cache-status:" | tr -d '\r' || true)
+  [ "$problems" -eq "$before" ] && echo "  ok: $path (${bytes} bytes; ${cache:-no cf-cache-status})"
+done <<< "$FILES"
+[ "$problems" -eq 0 ] || fail "$problems problem(s) found above; the manifest was not uploaded, so the live one still stands"
+
 echo "Uploading manifest.json ..."
 rclone copyto "$DUMPS/manifest.json" "$REMOTE:$BUCKET/manifest.json" \
   --header-upload "Cache-Control: public, max-age=300" \
   --header-upload "Content-Type: application/json"
 
-echo "Checking $PUBLIC ..."
-problems=0
-check() { echo "  $*" >&2; problems=$((problems + 1)); }
-
-# The manifest: readable from the page's origin.
-headers=$(curl -s -D - -o /dev/null -H "Origin: $ORIGIN" "$PUBLIC/manifest.json?check=$(date +%s)")
+echo "Checking the manifest ..."
+# Readable from the page's origin ...
+headers=$(fetch -D - -o /dev/null -H "Origin: $ORIGIN" "$PUBLIC/manifest.json?check=$(date +%s)")
 grep -q "^HTTP/[0-9.]* 200" <<< "$headers" || check "manifest.json: not 200: $(head -1 <<< "$headers")"
-grep -qi "^access-control-allow-origin: $ORIGIN" <<< "$headers" || check "manifest.json: no CORS header for $ORIGIN"
-# ...and not from anywhere else (CORS widened to "*" or another origin by mistake).
-headers=$(curl -s -D - -o /dev/null -H "Origin: https://example.com" "$PUBLIC/manifest.json?check=$(date +%s)")
+has_header "access-control-allow-origin: $ORIGIN" "$headers" || check "manifest.json: no CORS header for $ORIGIN"
+# ... and not from anywhere else (CORS widened to "*" or another origin by mistake).
+headers=$(fetch -D - -o /dev/null -H "Origin: https://example.com" "$PUBLIC/manifest.json?check=$(date +%s)")
 grep -qi "^access-control-allow-origin:" <<< "$headers" && check "manifest.json: CORS allows https://example.com"
-
-# Each Parquet file: a byte range comes back as a range (206, Content-Range with the
-# full size), uncompressed, with CORS; a second request should be a cache hit.
-while IFS=$'\t' read -r path bytes; do
-  url="$PUBLIC/$path"
-  before=$problems
-  headers=$(curl -s -D - -o /dev/null -H "Origin: $ORIGIN" -H "Range: bytes=0-99" "$url")
-  grep -q "^HTTP/[0-9.]* 206" <<< "$headers" || check "$path: not 206: $(head -1 <<< "$headers")"
-  grep -qi "^content-range: bytes 0-99/$bytes" <<< "$headers" || check "$path: Content-Range isn't bytes 0-99/$bytes"
-  grep -qi "^access-control-allow-origin: $ORIGIN" <<< "$headers" || check "$path: no CORS header for $ORIGIN"
-  grep -qi "^content-encoding:" <<< "$headers" && check "$path: served compressed, which breaks range reads"
-  cache=$(curl -s -D - -o /dev/null -H "Range: bytes=0-99" "$url" | grep -i "^cf-cache-status:" | tr -d '\r' || true)
-  [ "$problems" -eq "$before" ] && echo "  ok: $path (${bytes} bytes; ${cache:-no cf-cache-status})"
-done <<< "$FILES"
 
 if [ "$problems" -gt 0 ]; then
   fail "$problems problem(s) found above"

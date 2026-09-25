@@ -2,6 +2,9 @@
   "name": "reddit-post-profiler",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test"
   }
