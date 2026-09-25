@@ -87,14 +87,21 @@ This merges two proposals:
   - a request budget.
 
   When the server is busy it stops with a partial result, and it never escalates.
-- **Publishing one subreddit,** with `upload_dumps.sh --only KEY`:
-  1. merge into the **live** manifest;
-  2. upload only `r/KEY/<version>/` (versions `YYYY-MM-DDTHHMMSSZ`);
-  3. check the files;
-  4. re-read the live manifest and abort if it changed;
-  5. upload the manifest last;
-  6. append to `r/KEY/published.json`.
-- **The token** is visible only to `tools/*.sh` scripts, which are already security-reviewed. They keep it in an unexported shell variable and pass it only to rclone, so the Python and Node tools never see it.
+- **Publishing one subreddit** is split between the jobs:
+  - `build` merges the new entry into the **live** manifest. Versions are named `YYYY-MM-DDTHHMMSSZ`.
+  - `publish_build.sh` then:
+    1. re-fetches the live manifest, and aborts if its sha256 changed;
+    2. uploads only `r/KEY/<version>/`;
+    3. checks the new files with plain curl range requests;
+    4. uploads the manifest last;
+    5. uploads the updated `r/KEY/published.json`.
+  - `upload_dumps.sh --only KEY` runs the same steps on the owner's machine.
+- **The token** is held only by a separate `publish` job. That job runs one security-reviewed shell script, `tools/publish_build.sh`, using only curl, sha256sum and rclone, with no Node, uv or Python.
+  - It isn't enough to hide the token from other programs in the same job, because they can read each other's environment (`/proc/<pid>/environ`). Today's `upload_dumps.sh` and `check_dumps.sh` also run Node (including `web/dumps.js`) and Python. So the boundary is a job boundary. The workflow has three jobs:
+    1. **`build`** (no secrets): download the live manifest and build through the public URL; fetch; splice; merge the manifest and check it with `parseManifest`; plan prunes; record the live manifest's sha256. Its output is an artifact.
+    2. **`publish`** (environment `archive`): `publish_build.sh` on that artifact.
+    3. **`verify`** (no secrets): `check_dumps.sh manifest cors`.
+  - The artifact is untrusted data: it could deface the archive, which the page treats as untrusted, but it can't reach the token.
 - **Pruning.** A build is deleted only when all of these hold:
   - it isn't live;
   - it isn't its subreddit's newest;
@@ -110,7 +117,9 @@ This merges two proposals:
     - ADR 0005, superseding 0004;
     - CLAUDE.md, `archive.md` and the architecture reviewer point at 0005;
     - this file.
-  - No `review-route.sh` change is needed, because of the token rule above. WORKFLOW.md's "the R2 token never touches GitHub" changes in P7b, when that stops being true.
+  - ADR 0002's status notes that 0005 partly supersedes it (the sync's own tag, and scheduled API calls).
+  - No `review-route.sh` change is needed: the token-holding job runs only `tools/*.sh`, which is already security-reviewed.
+  - WORKFLOW.md's "the R2 token never touches GitHub" changes in P7b, when that stops being true.
 - **P1: Shared tail in the page.**
   - `core.js`: `iterAscending`, which `iterThreadComments` delegates to; `fetchTail`; and `archiveLifetime` skips `interactions` when every tail is complete.
   - `dumps.js`: `addTail`, an extended `covers()`, `timestamps()` merging file and tail rows, and a per-tab `TailCache`.
@@ -120,23 +129,37 @@ This merges two proposals:
 - **P2: Thread from `comments_by_link`** (closes #55). `dumps.js` gets `threadRows(sub, linkId)`; `collectCommenters` takes a covered-post path and falls back to the tree. Tests and bench.
 - **P3: Fetcher.** A `core.js` `appTag` option and `tools/fetch_subreddit.mjs`. Tests in a new `web/tests/fetch-subreddit.test.js`.
 - **P4: Splice builder.** `build_dumps.py --splice <prev build> --cut <utc>`, `--posts-through/--comments-through` and timestamp versions. The JSONL-only mode is unchanged. Tests in a new `tools/tests/test_splice.py`.
-- **P5: Publish one subreddit.** `check_upload.py merge_one` and a refusal for a cutoff going backwards. `upload_dumps.sh --only KEY` and the publish log. Tests in `test_publish_one.py`.
-- **P6: Pruner.** `tools/prune_dumps.py` plans deletions; `prune_dumps.sh` is a dry run by default and runs `rclone purge` with `--apply`. Tests in `test_prune_dumps.py`.
+- **P5: Publish one subreddit.**
+  - `check_upload.py merge-one` needs no token. It refuses a cutoff that goes backwards or a version that's already live. It writes the merged manifest, the updated publish log, and the live manifest's sha256.
+  - `tools/publish_build.sh` uses only curl, sha256sum and rclone. It checks KEY, VERSION and every path against strict patterns before any rclone call.
+  - `upload_dumps.sh --only KEY` covers the manual path.
+  - Tests: `test_publish_one.py`. The shell script is tested with rclone and curl injected through `RCLONE`/`CURL` variables, never PATH-shadowed.
+- **P6: Pruner.**
+  - `tools/prune_dumps.py` plans deletions from the live manifest and the public publish logs. It needs no token and no listing.
+  - `publish_build.sh` applies the plan. It deletes at most N builds per run, and only paths shaped `r/<key>/<version>/` that neither the old nor the new manifest mentions (checked with `grep -F`).
+  - Tests: `test_prune_dumps.py`.
+  - The PR's Grounding proposes the prune rule for CLAUDE.md's "Dump tools" rule and `archive.md` (builds are never overwritten, and are deleted only as 0005 says).
 - **P7a: Orchestrator and config.**
   - `tools/archive.json`: `{subreddits: {<name>: {cadence}}, overlap: "2h", repair_days: 7, repair_every: "7d", budget}`.
   - `tools/archive_sync.py`: which subreddits are due or need a repair.
-  - `tools/archive_sync.sh`: for each due subreddit, download the live build, fetch, splice and publish; then prune.
+  - `tools/archive_sync.sh`: the `build` job's work. For each due subreddit it downloads the live build over the public URL, fetches, splices, merges the manifest and plans prunes, then writes the artifact.
 - **P7b: Workflow and docs** (owner, `ack:sensitive`).
   - `archive-sync.yml`:
     - hourly cron plus dispatch;
-    - `permissions: {}`, and `contents: read` for the job;
-    - `environment: archive`;
-    - gated on `vars.ARCHIVE_SYNC_ENABLED` and `main`;
-    - `concurrency` without cancel;
+    - `permissions: {}`, and `contents: read` per job;
+    - three jobs: `build` (no secrets), `publish` (`environment: archive`, runs only `publish_build.sh`) and `verify` (no secrets);
+    - the environment's deployment-branch rule allows only `main`;
+    - also gated on `vars.ARCHIVE_SYNC_ENABLED` and the ref;
+    - `concurrency` for the whole run, without cancel;
     - no caches;
     - pinned, checksummed rclone and a pinned duckdb;
     - no AI steps.
-  - Docs: CLAUDE.md Commands and rules, `archive.md`, `docs/archive-runbook.md` (closes #57), and WORKFLOW.md's token line.
+  - Docs:
+    - CLAUDE.md Commands and rules;
+    - `archive.md`;
+    - `docs/archive-runbook.md` (closes #57);
+    - WORKFLOW.md's token line;
+    - `.claude/rules/ci-and-agents.md`: the new workflow and environment.
   - Go-live:
     1. create the token (`rpp-db` only) and the environment;
     2. dispatch a dry run;

@@ -1,6 +1,6 @@
 # 0002. Arctic Shift etiquette: one throttled client, and no escalation when it's busy
 
-**Status:** Accepted (recorded 2026-09-25).
+**Status:** Accepted (recorded 2026-09-25); partly superseded by 0005, which adds the archive sync's own `meta-app` tag and one scheduled workflow that calls the live API.
 
 ## Context
 

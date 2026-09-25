@@ -23,7 +23,13 @@ Everything in 0004 still holds, except the following.
   - Each new build splices the live build's rows up to a cut onto the API's rows after it. The cut is 2 h before the cutoff, or 7 days before it once a week, to catch items ingested late.
   - A cutoff means "complete up to", not "newest item".
   - Builds are published one subreddit at a time into the live manifest, manifest last.
-- **The token.** An R2 token with Object Read & Write on `rpp-db` only lives in the `archive` environment, which only `main` can use. Only `tools/*.sh` scripts receive it, and they pass it only to rclone.
+- **The token.** An R2 token with Object Read & Write on `rpp-db` only lives in the `archive` environment. Its deployment-branch rule allows only `main`.
+  - Only a publish job holds the token. It runs no Node and no Python: just a security-reviewed `tools/*.sh` script using curl, sha256sum and rclone.
+  - It works on an artifact made by jobs without secrets, which do all the fetching, splicing and checking.
+  - Processes in the same job can read each other's environment, so a job boundary is the only one that holds.
+- **Amends 0002 in two places.**
+  - The sync tags its requests `meta-app=reddit-post-profiler-archive`, so Arctic Shift can tell sync load from visitors.
+  - One non-test workflow, `archive-sync.yml`, calls the live API. Tests and agents still never do.
 - **Pruning.** A build is deleted once all of these hold:
   - it isn't live;
   - it isn't its subreddit's newest;
@@ -39,8 +45,9 @@ Everything in 0004 still holds, except the following.
 - **The token is now in GitHub.** A leaked token could overwrite or delete the public archive, but there's nothing private to read. Mitigations:
   - an environment only `main` can use;
   - no caches, and pinned tools;
-  - only shell scripts see the token;
+  - a publish job that runs only reviewed shell;
   - a kill switch, the `ARCHIVE_SYNC_ENABLED` variable.
+- **Artifacts from the unprivileged jobs are untrusted data.** They can deface the archive, which the page already treats as untrusted, but they can't reach the token.
 - **The archive holds only what the API served.**
   - Items ingested more than 2 h late are missing until the weekly repair.
   - A bad splice carries forward: recover from builds kept 72 h, or re-import.
