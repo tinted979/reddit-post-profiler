@@ -93,12 +93,14 @@ or new to the subreddit, failures, the subreddits they're active in, and when it
 many requests it made (to Arctic Shift and to the archive files) and how long it took. Click a post to see its users again exactly as
 they were, with no requests; *Scan again* runs it again with the same options (reusing
 saved results where it can), and *Delete* removes it. A new scan of a post replaces its
-saved one.
+saved one, except that a stopped scan doesn't replace a complete one, and a scan where every
+lookup failed isn't saved at all.
 
 Under the list, the page shows how much of the browser's storage the site uses.
 *Export to a file* downloads every saved scan as one JSON file, and *Import from a file*
 adds the scans from such a file, for example on another device or browser. An imported
-scan replaces the one saved here only if it's newer, and every imported scan is checked;
+scan replaces the one saved here only if it's newer (and not a stopped copy of a complete
+one), and every imported scan is checked;
 its statistics are worked out again from its profiles. *Delete all saved scans* removes them
 all after asking; unlike *Clear saved results*, it keeps the per-user results.
 

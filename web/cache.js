@@ -152,6 +152,11 @@ export class IndexedDbBackend {
 
 const HUNG = Symbol("hung");
 
+// Backends that stopped answering. Kept here rather than on each store object, because
+// app.js opens a new store for every action: once a backend hangs, every store using it
+// stays off for the rest of the page's life instead of waiting out the timeout again.
+const hungBackends = new WeakSet();
+
 // Run a backend call, but give up on a store that doesn't answer, so a stuck database
 // can't stall the page. `onHang` is called when it gives up.
 async function withTimeout(fn, ms, onHang) {
@@ -177,15 +182,14 @@ export class ProfileCache {
     this.ttl = ttlDays * DAY;
     this._now = now;
     this._timeoutMs = timeoutMs;
-    this._hung = false;
   }
 
   get enabled() {
-    return this.ttl > 0 && !this._hung;
+    return this.ttl > 0 && !hungBackends.has(this.backend);
   }
 
   _call(fn) {
-    return withTimeout(fn, this._timeoutMs, () => (this._hung = true));
+    return withTimeout(fn, this._timeoutMs, () => hungBackends.add(this.backend));
   }
 
   async get(key) {
@@ -236,25 +240,32 @@ export class ScanStore {
   constructor({ backend = new MemoryBackend(), timeoutMs = 3000 } = {}) {
     this.backend = backend;
     this._timeoutMs = timeoutMs;
-    this._hung = false;
   }
 
   async _call(fn, fallback) {
-    if (this._hung) return fallback;
+    if (hungBackends.has(this.backend)) return fallback;
     try {
-      return await withTimeout(fn, this._timeoutMs, () => (this._hung = true));
+      return await withTimeout(fn, this._timeoutMs, () => hungBackends.add(this.backend));
     } catch {
       return fallback;
     }
   }
 
-  // Returns true if saved. Both records go in one transaction, so a failed save can't pair
-  // a scan's old summary with new profiles.
+  // Returns "saved"; "empty" (not written: no profile without an error, judged from the
+  // profiles rather than an imported summary's stats); "kept" (not written: a stopped scan,
+  // and a complete scan of the post is saved); or "failed" (storage full, blocked or
+  // hung). Both records go in one transaction, so a failed save can't pair a scan's old
+  // summary with new profiles.
   save(summary, profiles) {
+    if (!profiles.some((p) => !p?.error)) return Promise.resolve("empty");
     return this._call(async () => {
+      if (summary.complete !== true) {
+        const saved = await this.backend.get(`sum|${summary.id}`);
+        if (saved?.complete === true) return "kept";
+      }
       await this.backend.setMany([[`data|${summary.id}`, { profiles }], [`sum|${summary.id}`, summary]]);
-      return true;
-    }, false);
+      return "saved";
+    }, "failed");
   }
 
   // Summaries, newest scan first.
@@ -304,9 +315,14 @@ export class ScanStore {
         result.kept++;
         continue;
       }
-      if (!(await this.save(summary, profiles))) {
+      const saved = await this.save(summary, profiles);
+      if (saved === "failed") {
         result.failed = scans.length - i; // storage full or blocked: stop here
         break;
+      }
+      if (saved === "kept" || saved === "empty") {
+        result.kept++;
+        continue;
       }
       have.set(summary.id, summary.scannedAt);
       result[when === undefined ? "added" : "replaced"]++;
