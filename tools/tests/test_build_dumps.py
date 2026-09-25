@@ -117,3 +117,71 @@ def test_refuses_bad_names_and_wrong_files(tmp_path, dumps):
     assert not (tmp_path / "out").exists()
     with pytest.raises(SystemExit, match="no posts left"):
         build_dumps.build("Elsewhere2", *dumps, tmp_path / "out", log=lambda *_: None)
+
+
+def in_file_order(path: Path) -> list[tuple]:
+    return duckdb.sql(f"SELECT * FROM '{path.as_posix()}'").fetchall()
+
+
+def test_files_are_stored_in_lowercase_author_order_across_row_groups(tmp_path):
+    # Mixed case, where sorting by the name as written would give a different order
+    # ("Zed" < "alice"), across several row groups: the page skips groups by their
+    # min/max author, so the file itself must be in lowercase order, not just its rows.
+    names = ["Zed", "alice", "Bob", "carol", "Dave"]
+    posts = jsonl(tmp_path / "posts.jsonl", [
+        {"id": f"p{i}", "author": names[i % 5], "created_utc": 1_700_000_000 + (i * 7919) % 5000, "subreddit": SUB}
+        for i in range(5_000)])
+    comments = jsonl(tmp_path / "comments.jsonl", [
+        {"id": f"c{i}", "author": names[i % 5].upper(), "created_utc": 1_700_000_000 + i, "subreddit": SUB,
+         "link_id": f"t3_p{i % 7}"} for i in range(5_000)])
+    entry = build_dumps.build(SUB, posts, comments, tmp_path / "out", row_group=2048, log=lambda *_: None)
+    for name in ("posts_by_author", "comments_by_author"):
+        assert entry["files"][name]["row_groups"] >= 2
+        stored = in_file_order(tmp_path / "out" / entry["files"][name]["path"])
+        assert stored == sorted(stored), name
+        assert {author for author, _ in stored} == {n.lower() for n in names}
+
+
+def test_check_sorted_rejects_row_groups_out_of_order(tmp_path):
+    path = tmp_path / "unsorted.parquet"
+    duckdb.sql(f"""
+        COPY (SELECT CASE WHEN i < 3000 THEN 'zed' ELSE 'alice' END AS author, i AS created_utc
+              FROM range(6000) t(i))
+        TO '{path.as_posix()}' (FORMAT parquet, ROW_GROUP_SIZE 2048)
+    """)
+    with pytest.raises(SystemExit, match="aren't in author order"):
+        build_dumps.check_sorted(duckdb.connect(), path, "author")
+
+
+def test_refuses_to_add_to_a_manifest_of_another_format(tmp_path, dumps):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "manifest.json").write_text(json.dumps({"format": build_dumps.FORMAT + 1, "subreddits": {}}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="has format"):
+        build_dumps.build(SUB, *dumps, out, log=lambda *_: None)
+
+
+def test_removed_authors_are_dropped_and_comments_without_a_post_skip_the_link_file(tmp_path):
+    posts = jsonl(tmp_path / "posts.jsonl", [
+        {"id": "p1", "author": "alice", "created_utc": 1_700_000_000, "subreddit": SUB},
+        {"id": "p2", "author": "[removed]", "created_utc": 1_700_000_001, "subreddit": SUB}])
+    comments = jsonl(tmp_path / "comments.jsonl", [
+        {"id": "c1", "author": "bob", "created_utc": 1_700_000_002, "subreddit": SUB, "link_id": "t3_p1"},
+        {"id": "c2", "author": "carol", "created_utc": 1_700_000_003, "subreddit": SUB}])  # no link_id
+    entry = build_dumps.build(SUB, posts, comments, tmp_path / "out", log=lambda *_: None)
+    base = tmp_path / "out"
+    assert in_file_order(base / entry["files"]["posts_by_author"]["path"]) == [("alice", 1_700_000_000)]
+    # A comment without a link_id still counts for its author, but can't be filed under a post.
+    assert [a for a, _ in in_file_order(base / entry["files"]["comments_by_author"]["path"])] == ["bob", "carol"]
+    assert in_file_order(base / entry["files"]["comments_by_link"]["path"]) == [("p1", "bob", 1_700_000_002)]
+
+
+def test_main_builds_from_the_command_line(tmp_path, dumps, capsys):
+    posts, comments = dumps
+    out = tmp_path / "out"
+    build_dumps.main(["--subreddit", SUB, "--posts", str(posts), "--comments", str(comments),
+                      "--out", str(out), "--version", "v9", "--row-group", "4096"])
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["subreddits"]["some_sub"]["version"] == "v9"
+    assert (out / "r" / "some_sub" / "v9" / "posts_by_author.parquet").is_file()
+    assert "wrote" in capsys.readouterr().out
