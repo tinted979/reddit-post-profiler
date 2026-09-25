@@ -1,10 +1,18 @@
 name: Checks
 
-# The cheap, deterministic layer. ci.yml calls it on every PR and push to main (and, from
-# WORKFLOW.md stage 3, agent-review.yml calls it before any AI reviewer runs), so nobody spends
-# review attention on a red PR. The main ruleset requires `checks / test` and `checks / guards`.
+# The cheap, deterministic layer. ci.yml calls it on every PR and push to main, and
+# agent-review.yml calls it (tests only) before any AI reviewer runs, so nobody spends review
+# attention on a red PR. The main ruleset requires ci.yml's `checks / test` and `checks / guards`.
 on:
   workflow_call:
+    inputs:
+      guards:
+        description: >-
+          Run the PR guards and workflow lint. agent-review.yml turns this off: a PR that needs
+          ack:sensitive should still get its security review before the owner adds the label,
+          and ci.yml enforces the guards at merge either way.
+        type: boolean
+        default: true
 
 permissions: {}
 
@@ -42,7 +50,7 @@ jobs:
         run: shellcheck tools/*.sh .github/scripts/*.sh
 
   guards:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && inputs.guards
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

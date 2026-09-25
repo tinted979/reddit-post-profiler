@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "required": ["findings"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["title", "severity", "location", "evidence", "suggestion"],
+        "properties": {
+          "title": { "type": "string", "maxLength": 120 },
+          "severity": { "enum": ["high", "medium", "low"] },
+          "location": { "type": "string", "description": "path:line" },
+          "evidence": { "type": "string", "description": "What goes wrong, for which input, and how you know" },
+          "repro_test": { "type": "string", "description": "A test that fails today because of this" },
+          "suggestion": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -276,12 +276,13 @@ the public URL serves the new files correctly (range requests, CORS for the page
 only, no compression) before the manifest that points at them goes up. The bucket's Cloudflare
 settings are listed in [CLAUDE.md](CLAUDE.md#subreddit-dumps).
 
-`.github/workflows/code-review.yml` has Claude review each pull request once when it's
-opened, reopened or marked ready for review (drafts wait), and post its findings as inline
-comments. It needs the Claude GitHub App installed on the repo and a
+`.github/workflows/agent-review.yml` has read-only Claude reviewers comment on each pull
+request once, when it's opened ready, reopened or marked ready for review (drafts wait): a
+general reviewer always, and security or architecture reviewers when the change touches
+their area. Their roles are in `.claude/agents/`, they can only comment, and they check
+changes against the rules in [CLAUDE.md](CLAUDE.md#rules-for-changes). They need a
 `CLAUDE_CODE_OAUTH_TOKEN` secret (from `claude setup-token`), so reviews use the Claude
-subscription's usage rather than API billing. The review checks changes against the rules in
-[CLAUDE.md](CLAUDE.md#rules-for-changes).
+subscription's usage rather than API billing. [WORKFLOW.md](WORKFLOW.md) has the details.
 
 ## License
 
