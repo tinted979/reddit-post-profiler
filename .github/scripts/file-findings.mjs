@@ -19,8 +19,10 @@ const code = (s, n) => String(s ?? "").slice(0, n).replace(/@(?=[A-Za-z0-9_-])/g
 // an issue, but a writer reads the raw text, so agent text could otherwise hide instructions
 // from the owner who reads the issue before labelling it. Escaped, they show as plain text.
 const clean = (s, n) => code(s, n).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-// Only this exact marker counts, and escaped agent text can't produce it.
-const MARKER = /<!-- finding-id: ([0-9a-f]{12}) -->/g;
+// An issue's fingerprint is the marker on its last line, where this script puts it. Agent
+// text never ends a body (the suggested fix, a note and the marker follow it), so a marker
+// quoted in a finding, even in the unescaped repro test, can't pass for another's.
+const MARKER = /\n<!-- finding-id: ([0-9a-f]{12}) -->\s*$/;
 const fingerprint = (f) =>
   createHash("sha256")
     .update([f.role, f.location, f.title].map((s) => String(s ?? "").trim().toLowerCase()).join("|"))
@@ -32,7 +34,7 @@ const fingerprint = (f) =>
 export function fileFindings(files, { gh, max = 3 }) {
   const log = [];
   const known = gh("issue", "list", "--label", "agent:finding", "--state", "all", "--limit", "1000", "--json", "body");
-  const seen = new Set([...known.matchAll(MARKER)].map((m) => m[1]));
+  const seen = new Set(JSON.parse(known).map((i) => MARKER.exec(i.body ?? "")?.[1]).filter(Boolean));
 
   const all = [];
   for (const [file, text] of Object.entries(files)) {

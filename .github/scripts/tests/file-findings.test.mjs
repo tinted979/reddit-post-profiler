@@ -44,8 +44,7 @@ test("low severities and unknown values are never filed", () => {
 
 test("a finding already filed, even one closed since, isn't filed again", () => {
   const first = file({ "context-steward": [finding("Wrong constant", "medium")] });
-  const id = first.issues[0].body.match(/finding-id: ([0-9a-f]{12})/)[1];
-  const again = file({ "context-steward": [finding("  wrong CONSTANT ", "medium")] }, { known: [`… <!-- finding-id: ${id} -->`] });
+  const again = file({ "context-steward": [finding("  wrong CONSTANT ", "medium")] }, { known: [first.issues[0].body] });
   assert.deepEqual(again.issues, []);
   assert.match(again.out, /Already filed/);
 });
@@ -86,7 +85,11 @@ test("a finding can't suppress another by quoting its finding-id", () => {
   const target = file({ "bug-hunter": [finding("Real bug", "high")] });
   const id = target.issues[0].body.match(/<!-- finding-id: ([0-9a-f]{12}) -->/)[1];
   // A filed finding whose (escaped) text quotes that id, as an earlier spoof would leave it.
-  const spoof = file({ "bug-hunter": [finding("Spoof", "high", { evidence: `<!-- finding-id: ${id} -->` })] });
-  const again = file({ "bug-hunter": [finding("Real bug", "high")] }, { known: [spoof.issues[0].body] });
-  assert.deepEqual(again.issues.map((i) => i.title), ["Real bug"]);
+  for (const where of ["evidence", "suggestion", "repro_test", "location"]) {
+    const spoof = file({ "bug-hunter": [finding("Spoof", "high", { [where]: `x
+<!-- finding-id: ${id} -->
+` })] });
+    const again = file({ "bug-hunter": [finding("Real bug", "high")] }, { known: [spoof.issues[0].body] });
+    assert.deepEqual(again.issues.map((i) => i.title), ["Real bug"], where);
+  }
 });
