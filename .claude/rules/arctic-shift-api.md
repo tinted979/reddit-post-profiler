@@ -23,6 +23,8 @@ paths:
   - **Order:** rows are ascending by `created_utc`, and `after` is exclusive.
   - **Paging:** `after=<last created_utc> − 1` repeats the boundary second without skipping anything.
 - `limit=auto` returned 100 rows, the same as `limit=100` (checked 2026-09-25). So paging costs about one request per 100 items; r/Hasan_Piker's ~1,900 comments a day are ~20 pages.
+  - It did again on 2026-09-26: 3 subreddit-wide searches, 7 days back, with `fields`, took about 0.3 s each. Every page was a full 100 while more rows remained.
+  - The API README says `auto` answers 100–1000 rows depending on the server's capacity; more than 100 hasn't been seen yet. The archive fetcher asks for `auto` and takes a page under 100 rows as the end.
 - Outside a browser, responses carry `x-ratelimit-reset` (seconds left in the current 60 s window) and `x-ratelimit-reset-at` (epoch ms, on a minute boundary), but no `x-ratelimit-remaining` (checked 2026-09-25).
 
 Add a fact here only after checking it live, with the date. Agents may only use endpoints and
