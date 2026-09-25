@@ -22,6 +22,7 @@ import {
   deserializeProfile,
   emptyProfile,
   estimateScan,
+  fetchTails,
   exportScans,
   parseScanExport,
   LARGE_SCAN,
@@ -39,7 +40,7 @@ import {
 import { openCache, openScans } from "./cache.js";
 import { describeRule, explain, formatDuration, formatEta, plural, requestsText, timelineText, tookText } from "./format.js";
 import { FIELD_IDS, mergeOptions, optionsSummary, parseMinCount, parseOptions, readShareParams, scanOptionNotes, shareParams } from "./options.js";
-import { DumpSource } from "./dumps.js";
+import { DumpSource, TailStore } from "./dumps.js";
 import { LinkQueue, MAX_WAITING, QUEUE_CONCURRENCY, QUEUE_KEY } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
@@ -59,6 +60,9 @@ const state = {
   // null for a saved or queued scan, whose link would start a fresh scan on reload.
   urlPost: null,
 };
+// Covered subreddits' activity since their archive files end, kept for this tab's scans, so
+// the next scan (a queued one in the same subreddit, say) asks only for what's new.
+const tails = new TailStore();
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -670,8 +674,17 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
 
     // Archive files for the post's subreddit, if there are any: "before" facts come from
     // them rather than Arctic Shift searches. No manifest, or a broken one, means the API.
-    const dumps = await DumpSource.open({ signal: controller.signal, onRequest: () => archiveRequests++ });
-    const archive = dumps?.covers(post.subreddit) ?? null;
+    const dumps = await DumpSource.open({ signal: controller.signal, onRequest: () => archiveRequests++, tails });
+    // Where the files alone end, for the end-of-scan note.
+    const archive = dumps?.covers(post.subreddit, { withTail: false }) ?? null;
+    // What the files don't have yet, fetched once for the scan rather than per commenter.
+    let tailRequests = 0;
+    if (dumps) {
+      setStatus("Checking recent activity…");
+      const sent = client.requests;
+      await fetchTails(client, dumps, post, { only: opts.only });
+      tailRequests = client.requests - sent;
+    }
 
     setStatus("Collecting commenters…");
     const commenters = await collectCommenters(client, post, opts);
@@ -771,6 +784,12 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
           const upTo = new Date(Math.min(archive.postsThrough, archive.commentsThrough) * 1000)
             .toLocaleDateString(undefined, { dateStyle: "medium" });
           text += ` Activity in r/${archive.name} before the post, up to ${upTo}, came from archive files.`;
+          const tailed = dumps.covers(post.subreddit);
+          if (tailRequests) {
+            text += ` Activity since then came from ${plural(tailRequests, "request")} for the whole subreddit rather than for each user.`;
+          } else if (tailed && Math.min(tailed.postsThrough, tailed.commentsThrough) > Math.min(archive.postsThrough, archive.commentsThrough)) {
+            text += " Activity since then came from what an earlier scan in this tab fetched for the whole subreddit.";
+          }
         }
         if (dumps.lifetimeReads > 0) {
           text += " Subreddit counts came from the archive files plus Arctic Shift for anything newer.";

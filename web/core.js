@@ -26,6 +26,16 @@ const CACHE_VERSION = "v1";
 const BEFORE_VERSION = "v2";
 // Timestamps fetched per kind for the "before" timeline (the search endpoint's maximum).
 const TIMELINE_LIMIT = 100;
+// Rows per page of a covered subreddit's tail (see fetchTails): the search endpoint's
+// largest `limit` ("auto" answered 100 too, checked 2026-09-25), so a short page marks the
+// end without asking again.
+const TAIL_PAGE = 100;
+// Tail pages a scan may spend per subreddit and kind: about one per this many comments in
+// the thread (asking per commenter instead costs a request or two each), within these
+// bounds. Past that, the per-user path asks about what the tail didn't reach.
+const TAIL_COMMENTS_PER_PAGE = 50;
+const TAIL_MIN_PAGES = 2;
+const TAIL_MAX_PAGES = 20;
 // Pacing a scan starts with, and the range the page accepts. The server tops out at about
 // 0.8 requests/s whatever the settings, so going faster only brings more "slow down"
 // replies (see SECONDS_PER_REQUEST).
@@ -464,33 +474,43 @@ export class ArcticShiftClient {
     return out.length > 0 && out.length < limit ? out : null;
   }
 
-  // Every archived comment under a post. The search endpoint has no cursor, so page on
-  // created_utc: start the next page one second before the last one ended (comments can
-  // share a second) and dedupe by id. With pageSize "auto" the server picks the page
-  // size, so only an empty page, or two in a row with nothing new, marks the end.
+  // Every archived comment under a post.
   async *iterThreadComments(postId, pageSize = "auto") {
+    for await (const page of this.iterAscending("/api/comments/search", { link_id: postId, fields: "id,author,created_utc" }, pageSize)) {
+      yield* page;
+    }
+  }
+
+  // Every row a search matches, oldest first, from `params.after` (exclusive) on, as pages of
+  // the rows not seen before. The search endpoint has no cursor, so page on created_utc:
+  // start the next page one second before the last one ended (rows can share a second) and
+  // dedupe by id. With pageSize "auto" the server picks the page size, so only an empty
+  // page, or two in a row with nothing new, marks the end; with a number, so does a short
+  // page. After `maxPages` pages it stops early. Returns true if it reached the end.
+  async *iterAscending(path, { after = null, ...params }, pageSize = "auto", { maxPages = Infinity } = {}) {
     const seen = new Set();
-    let cursor = null;
+    let cursor = after;
     let stale = 0;
-    for (;;) {
-      const params = { link_id: postId, limit: pageSize, sort: "asc", fields: "id,author,created_utc" };
-      if (cursor !== null) params.after = cursor;
-      const page = await this._get("/api/comments/search", params);
-      if (!Array.isArray(page) || !page.length) return;
-      let fresh = 0;
-      for (const c of page) {
-        if (seen.has(c.id)) continue;
-        seen.add(c.id);
-        fresh++;
-        yield c;
+    for (let pages = 1; ; pages++) {
+      const query = { ...params, limit: pageSize, sort: "asc" };
+      if (cursor !== null) query.after = cursor;
+      const page = await this._get(path, query);
+      if (!Array.isArray(page) || !page.length) return true;
+      const fresh = [];
+      for (const row of page) {
+        if (seen.has(row.id)) continue;
+        seen.add(row.id);
+        fresh.push(row);
       }
-      if (typeof pageSize === "number" && page.length < pageSize) return;
-      stale = fresh ? 0 : stale + 1;
-      if (stale >= 2) return;
+      yield fresh;
+      if (typeof pageSize === "number" && page.length < pageSize) return true;
+      stale = fresh.length ? 0 : stale + 1;
+      if (stale >= 2) return true;
+      if (pages >= maxPages) return false;
       const lastTs = Math.trunc(Number(page[page.length - 1].created_utc));
       // A page with nothing new is stuck on one second: step past it (`after` is
       // exclusive, so after=lastTs starts at the next second).
-      let next = fresh ? lastTs - 1 : lastTs;
+      let next = fresh.length ? lastTs - 1 : lastTs;
       if (cursor !== null && next <= cursor) next = cursor + 1;
       cursor = next;
     }
@@ -629,6 +649,64 @@ export async function collectCommenters(client, post, { exclude = [], includeOp 
   return commenters;
 }
 
+// Tail pages a scan may spend per subreddit and kind, for a thread of `numComments`.
+export function tailBudget(numComments) {
+  const pages = Math.ceil((Number(numComments) || 0) / TAIL_COMMENTS_PER_PAGE);
+  return Math.min(TAIL_MAX_PAGES, Math.max(TAIL_MIN_PAGES, pages));
+}
+
+const TAIL_FIELDS = { posts: "id,author,created_utc", comments: "id,author,created_utc,link_id" };
+
+// What covered subreddits' archive files don't have yet, fetched once for the whole scan
+// into `dumps`' tails: everyone's activity after the files end (a subreddit-wide search).
+// Every commenter's "before" facts and archive lifetime counts then come from the files
+// plus the tail, instead of each asking Arctic Shift about the same window.
+//
+// Which subreddits: all of `only` with the post's own, when the archive covers them all
+// (lifetime counts need them all); otherwise the post's own, if the post is newer than its
+// files. At most `budget` pages per subreddit and kind: past that, a tail covers up to the
+// last whole second it reached, and the per-user path asks about the rest. A busy or
+// rate-limiting server, or no connection, fails the scan, since asking per user would only
+// send it more requests; another API error, such as a query timing out, leaves the tail
+// where it got to. `now` gives epoch seconds: a tail that reaches the end is complete up to
+// when it started.
+export async function fetchTails(client, dumps, post, { only = null, budget = tailBudget(post.numComments), now = () => Date.now() / 1000 } = {}) {
+  const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
+  let subs = [];
+  if (wanted?.every((sub) => dumps.covers(sub))) {
+    subs = wanted;
+  } else {
+    const c = dumps.covers(post.subreddit);
+    if (c && post.createdUtc - 1 > Math.min(c.postsThrough, c.commentsThrough)) subs = [post.subreddit];
+  }
+  for (const sub of subs) {
+    await settleAll(KINDS.map((kind) => fetchTail(client, dumps, sub, kind, budget, Math.trunc(now()))));
+  }
+}
+
+async function fetchTail(client, dumps, sub, kind, budget, started) {
+  const name = dumps.covers(sub)?.name;
+  if (!name) return;
+  let newest = -Infinity;
+  const pages = client.iterAscending(
+    `/api/${kind}/search`,
+    { subreddit: name, after: dumps.tailFrom(kind, sub), fields: TAIL_FIELDS[kind] },
+    TAIL_PAGE,
+    { maxPages: budget },
+  );
+  try {
+    let next;
+    while (!(next = await pages.next()).done) {
+      dumps.addTail(kind, sub, next.value);
+      for (const row of next.value) newest = Math.max(newest, Math.trunc(Number(row?.created_utc)) || -Infinity);
+    }
+    dumps.endTail(kind, sub, next.value ? { through: started, current: true } : { through: newest - 1, current: false });
+  } catch (err) {
+    dumps.endTail(kind, sub, { through: newest - 1, current: false });
+    if (!(err instanceof ArcticShiftError) || refusesMore(err)) throw err;
+  }
+}
+
 // Usernames as typed into "Skip users": "u/name", "/u/name" and profile links become "name";
 // anything with characters outside a Reddit username is dropped, and repeats (in any case)
 // are removed.
@@ -715,11 +793,15 @@ async function lifetimeCounts(client, username, { wanted, after, skipInteraction
 // archive doesn't cover them all or can't be read (the aggregates then answer as usual);
 // or {status: "no-interactions"} when interactions can't answer: the aggregates answer
 // instead, but without retrying the interactions query they already found unusable.
+//
+// When every wanted subreddit's tail reached the present this scan (fetchTails), the files
+// and tails already hold everything, so there's no cutoff and no interactions query.
 async function archiveLifetime(client, dumps, username, wanted, after) {
   const covered = wanted.map((sub) => dumps.covers(sub));
   if (covered.some((c) => !c)) return { status: "unavailable" };
-  const cutoff = minOf(covered.flatMap((c) => [c.postsThrough, c.commentsThrough]));
-  if (!Number.isFinite(cutoff)) return { status: "unavailable" };
+  const current = wanted.every((sub) => dumps.isCurrent?.(sub));
+  const cutoff = current ? Infinity : minOf(covered.flatMap((c) => [c.postsThrough, c.commentsThrough]));
+  if (!current && !Number.isFinite(cutoff)) return { status: "unavailable" };
   const counts = new Map();
   const byKey = new Map();
   const upToCutoff = (times) => times.filter((t) => t <= cutoff && (after === null || t > after)).length;
@@ -736,9 +818,9 @@ async function archiveLifetime(client, dumps, username, wanted, after) {
     if (err instanceof Aborted) throw err;
     return { status: "unavailable" };
   }
-  let recent;
+  let recent = new Map();
   try {
-    recent = await client.interactionCounts(username, { after: after === null ? cutoff : Math.max(after, cutoff) });
+    if (!current) recent = await client.interactionCounts(username, { after: after === null ? cutoff : Math.max(after, cutoff) });
   } catch (err) {
     if (err instanceof QueryTimeout || err instanceof Unsupported) return { status: "no-interactions" };
     throw err;
