@@ -1,7 +1,10 @@
 name: Test and deploy web app
 
+# Pushes to main deploy; other branches are tested through their pull request, so a push
+# to a PR branch runs the tests once, not twice.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -11,21 +14,33 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A newer push to the same branch or PR supersedes a run still going.
+    concurrency:
+      group: test-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version-file: web/.nvmrc
       - name: Web tests
         working-directory: web
         run: npm test
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Dump build script tests
+      - name: Local files load only as `from "./x.js"`
+        # The deploy's missing-file check and cache busting only see that form, so fail on
+        # any other way of loading a local file: a side-effect import, any dynamic import(),
+        # single quotes, or a relative new URL or Worker from a string or template literal.
         run: |
-          python -m pip install --quiet "duckdb>=1.1" pytest
-          python -m pytest tools -q
+          if grep -nE "import\s*\(\s*[^)[:space:]]|import\s+['\"]|from\s*'\./|new URL\(\s*[^A-Za-z_[:space:]]\.|new Worker\(\s*[^A-Za-z_[:space:]]" web/*.js; then
+            echo 'Load local modules with: import … from "./x.js"'
+            exit 1
+          fi
+      - uses: astral-sh/setup-uv@v6
+      - name: Dump tool tests
+        # The command in CLAUDE.md, with duckdb kept below its next major version.
+        run: uv run --python 3.12 --with "duckdb>=1.1,<2" --with pytest pytest tools -q
+      - name: Shell script lint
+        run: shellcheck tools/*.sh
 
   deploy:
     # Publish only from the default branch, after the tests pass.

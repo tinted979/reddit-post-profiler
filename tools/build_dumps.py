@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["duckdb>=1.1"]
+# dependencies = ["duckdb>=1.1,<2"]
 # ///
 """Build the web app's per-subreddit dump files from Arctic Shift JSONL dumps.
 

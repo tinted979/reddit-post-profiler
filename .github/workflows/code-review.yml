@@ -8,7 +8,10 @@ on:
     types: [opened, reopened, ready_for_review]
     paths:
       - "web/**"
+      - "tools/**" # decides what archive data goes live
       - ".github/workflows/**"
+      - "CLAUDE.md"
+      - "README.md"
 
 concurrency:
   group: code-review-${{ github.event.pull_request.number }}
@@ -27,6 +30,14 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 1
+      # The rules come from the base branch, so a PR that edits CLAUDE.md isn't reviewed
+      # against its own edited rules.
+      - name: Get the base branch's CLAUDE.md
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --depth=1 origin "$BASE_REF"
+          git show FETCH_HEAD:CLAUDE.md > .review-rules.md
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -34,8 +45,10 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Review this pull request against CLAUDE.md (especially its "Rules for changes"
-            section). The PR branch is checked out in the working directory; use
+            Review this pull request against the project rules in .review-rules.md (the
+            base branch's CLAUDE.md), especially its "Rules for changes" section. If the PR
+            changes CLAUDE.md, judge the code by the base rules and point out any rule the
+            PR loosens. The PR branch is checked out in the working directory; use
             `gh pr diff` and `gh pr view` to see the change.
 
             Report only actionable findings you can back with the code: bugs, security or

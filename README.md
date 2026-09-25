@@ -262,8 +262,10 @@ Work happens on other branches and reaches `main` through pull requests, so the 
 only changes when a pull request is merged.
 
 The archive files are built with `tools/build_dumps.py` and uploaded with
-`tools/upload_dumps.sh`, which also checks the public URL serves them correctly (range
-requests, CORS for the page's origin only, no compression). The bucket's Cloudflare
+`tools/upload_dumps.sh`. It first checks the upload against what's live
+(`tools/check_upload.py`: no live subreddit dropped, no build directory reused), then checks
+the public URL serves the new files correctly (range requests, CORS for the page's origin
+only, no compression) before the manifest that points at them goes up. The bucket's Cloudflare
 settings are listed in [CLAUDE.md](CLAUDE.md#subreddit-dumps-in-progress).
 
 `.github/workflows/code-review.yml` has Claude review each pull request once when it's
