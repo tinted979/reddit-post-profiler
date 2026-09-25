@@ -1,0 +1,82 @@
+name: CI and deploy
+
+# Tests run on PRs and on main; only main deploys, and only after the checks pass, so merging
+# a PR is the deploy decision. The deploy then checks that the live page loads this commit.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # labeled/unlabeled re-run the guards when the owner adds or removes an ack: label.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  workflow_dispatch:
+
+# A newer push to a PR supersedes a run still going. Runs on main are never cancelled, so a
+# deploy always finishes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+
+  deploy:
+    # Publish only from the default branch, after the checks pass.
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Assemble site
+        run: |
+          mkdir _site
+          # The page files at the top of web/ (not tests/ or package.json). Add any other
+          # file type the page comes to need here.
+          cp web/*.html web/*.js web/*.css _site/
+          # Fail if a module imports a file that didn't make it into the site.
+          grep -ho 'from "\./[^"]*"' _site/*.js | sed 's/from "\.\/\(.*\)"/\1/' | sort -u |
+            while read -r f; do
+              test -f "_site/$f" || { echo "missing from site: $f"; exit 1; }
+            done
+          # Pages lets browsers cache each file for 10 minutes, so after a deploy a browser
+          # could mix new and old modules. Tag every local import, script and stylesheet
+          # with the commit so one page load always gets one version.
+          v="${GITHUB_SHA::8}"
+          sed -i -E "s#(from \"\./[^\"?]+\.js)\"#\1?v=$v\"#g" _site/*.js
+          sed -i -E "s#(src=\"app\.js|href=\"style\.css)\"#\1?v=$v\"#g" _site/index.html
+          grep -q "app.js?v=$v" _site/index.html || { echo "cache-busting failed"; exit 1; }
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+      - name: Check the live site serves this commit
+        env:
+          URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          v="${GITHUB_SHA::8}"
+          for _ in $(seq 18); do
+            curl -fsS -H 'Cache-Control: no-cache' "${URL}?check=$v" | grep -q "app.js?v=$v" && exit 0
+            sleep 10
+          done
+          echo "::error::The live page doesn't load app.js?v=$v after 3 minutes."
+          exit 1
