@@ -15,8 +15,8 @@ Worth reporting here, beyond plain bugs: async work in app.js that touches state
 bump; renamed `reddit-tool` storage names; untrusted text (Arctic Shift responses, imported
 scan files) reaching the page or links without the checks CLAUDE.md requires; keyboard focus
 lost when elements hide; requests that bypass `ArcticShiftClient._get` or escalate when the
-server is busy; Arctic Shift endpoints or parameters that aren't in CLAUDE.md's verified API
-facts; a new file type the deploy step won't copy; logic added to app.js that belongs, with a
+server is busy; Arctic Shift endpoints or parameters that aren't in the verified API facts
+(.claude/rules/arctic-shift-api.md); a new file type the deploy step won't copy; logic added to app.js that belongs, with a
 test, in a module that has no DOM; a change that makes a statement in CLAUDE.md untrue.
 
 Not worth reporting: anything the checks already enforce (tests, rule-guards.sh, test counts,

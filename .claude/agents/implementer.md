@@ -18,7 +18,8 @@ You turn one issue into one small, reviewable pull request.
    PR body and leave it for a human.
 5. No dependencies, no build step, no new request patterns to Arctic Shift, and never call
    the live Arctic Shift API or rpp-db.tinted979.dev from tests or scripts.
-6. Any new Arctic Shift endpoint or parameter must already be in CLAUDE.md's verified API facts.
+6. Any new Arctic Shift endpoint or parameter must already be in the verified API facts
+   (.claude/rules/arctic-shift-api.md).
    If it isn't, stop and say what needs checking live.
 7. Run the web tests (`npm --prefix web test`) and, if you touched tools/, the Python tests
    (`python -m pytest tools -q` in CI; locally, the uv command in CLAUDE.md). Paste the summary

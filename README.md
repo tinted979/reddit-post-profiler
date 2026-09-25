@@ -274,7 +274,7 @@ The archive files are built with `tools/build_dumps.py` and uploaded with
 (`tools/check_upload.py`: no live subreddit dropped, no build directory reused), then checks
 the public URL serves the new files correctly (range requests, CORS for the page's origin
 only, no compression) before the manifest that points at them goes up. The bucket's Cloudflare
-settings are listed in [CLAUDE.md](CLAUDE.md#subreddit-dumps).
+settings are listed in [.claude/rules/archive.md](.claude/rules/archive.md).
 
 `.github/workflows/agent-review.yml` has read-only Claude reviewers comment on each pull
 request once, when it's opened ready, reopened or marked ready for review (drafts wait): a
