@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Guards for every PR. CI runs the base branch's copy of this script (checks.yml), so a PR
-# can't loosen the guards on itself.
+# can't loosen the guards on itself. It never runs the PR's code (only git and gh), so nothing
+# in the PR can tamper with its verdict; checks.yml runs it before anything that does
+# (tests-guard.sh, which counts the tests).
 #
 # Agent work is any PR opened by, or with a commit written by, someone other than the owner
 # (the Claude App's writers, Copilot); Dependabot's action bumps are treated as the owner's.
@@ -21,10 +23,10 @@ fail=0
 # Commit authors are whatever the committer wrote, so this fails closed: a login that isn't
 # exactly the owner's or Dependabot's, including none (an unlinked email), is agent work, and
 # so is a PR with more commits than gh lists (100). Forged authorship can't make agent commits
-# pass as the owner's, because agents can't push to the owner's branches at all: the "branches:
-# owner only" ruleset lets only the owner update any branch but main (PRs only),
-# claude/<number>-… (agents' own, whose PRs the App opens, an author that can't be forged)
-# and Dependabot's.
+# pass as the owner's or Dependabot's, because agents can't push to those branches at all: the
+# "branches: owner only" ruleset lets only the owner (and Dependabot, on its own branches)
+# update any branch but main and claude/<number>-…, the agents' own, whose PRs the Claude App
+# opens, and a PR's author can't be forged.
 authors=$(gh pr view "$PR" --json author,commits --jq '
   (.author.login, (.commits[].authors[0].login), (if (.commits | length) >= 100 then "(too many commits to check)" else empty end))
   | if . == null or . == "" then "(unlinked)" else . end') ||
@@ -34,12 +36,7 @@ if [ -n "$agents" ]; then
   echo "Agent work: written in part by $(paste -sd, - <<<"$agents")."
 fi
 
-owner_ack() {   # true if label $1 is on the PR and the owner was the last to add it
-  gh pr view "$PR" --json labels --jq '.labels[].name' | grep -qx "$1" &&
-    gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/events" \
-      --jq ".[] | select(.event == \"labeled\" and .label.name == \"$1\") | .actor.login" |
-    tail -n 1 | grep -qx "$OWNER"
-}
+owner_ack() { bash "$(dirname "$0")/owner-ack.sh" "$1"; }
 
 protected=$(grep -iE '^(\.github/|\.claude/|CLAUDE\.md$|web/hyparquet\.js$|tools/r2-cors\.json$)' <<<"$changed")
 if [ -n "$protected" ]; then
@@ -70,11 +67,4 @@ lines=$(git diff --numstat "$base" HEAD -- . ':!web/tests/fixtures' | awk '{s +=
 if [ "$lines" -gt 600 ]; then
   owner_ack ack:large || { echo "::error::$lines changed lines. Split the PR, or add ack:large."; fail=1; }
 fi
-
-bash "$(dirname "$0")/test-integrity.sh" "$base"
-case $? in
-  0) ;;
-  1) owner_ack ack:tests || { echo "::error::Tests were removed or skipped. If that's intended, add ack:tests."; fail=1; } ;;
-  *) echo "::error::The tests couldn't be counted (see above). ack:tests doesn't waive this; re-run the job."; fail=1 ;;
-esac
 exit $fail

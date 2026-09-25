@@ -66,20 +66,25 @@ jobs:
         with:
           node-version-file: web/.nvmrc
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-      - name: Branch guards (protected paths, agent work, size, test integrity)
-        # The base branch's copies of the guard scripts judge the PR, so a PR can't loosen them.
+      # Order matters: nothing from the PR runs until pr-guards.sh has given its verdict and
+      # the workflows are linted. Only the last step, the test count, runs the PR's own code.
+      - name: Take the guard scripts from the base branch
+        # So a PR can't loosen the checks that judge it. (A script the base doesn't have yet is
+        # skipped, for the PR that adds it.)
+        run: |
+          guards="$RUNNER_TEMP/guards"
+          mkdir -p "$guards"
+          for f in pr-guards.sh owner-ack.sh tests-guard.sh test-integrity.sh; do
+            git show "HEAD^1:.github/scripts/$f" > "$guards/$f" 2>/dev/null || rm -f "$guards/$f"
+          done
+          ls "$guards"
+      - name: Branch guards (protected paths, agent work, size)
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           OWNER: ${{ github.repository_owner }}
           HEAD_REF: ${{ github.head_ref }} # read by copies of pr-guards.sh from before PR #39
-        run: |
-          guards="$RUNNER_TEMP/guards"
-          mkdir -p "$guards"
-          for f in pr-guards.sh test-integrity.sh; do
-            git show "HEAD^1:.github/scripts/$f" > "$guards/$f"
-          done
-          bash "$guards/pr-guards.sh"
+        run: bash "$RUNNER_TEMP/guards/pr-guards.sh"
       - name: Workflow lint
         # Runs even when a guard above is waiting on an ack: label, so lint errors show at once.
         if: ${{ !cancelled() }}
@@ -94,3 +99,15 @@ jobs:
           # actionlint 1.7.12 predates concurrency `queue: max`; ignore just that.
           ./actionlint -ignore 'unexpected key "queue"'
           uvx zizmor==1.30.1 --offline --min-severity medium .github/workflows
+      - name: Test count (runs the PR's code, so it comes last)
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ -f "$RUNNER_TEMP/guards/tests-guard.sh" ]; then
+            bash "$RUNNER_TEMP/guards/tests-guard.sh"
+          else
+            echo "::notice::The base branch has no tests-guard.sh yet; its pr-guards.sh counted the tests."
+          fi

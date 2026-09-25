@@ -1,7 +1,7 @@
-// pr-guards.sh in a throwaway repository, with a fake `gh` that reports the PR's authors, its
-// labels and who added them. Agent work (anyone but the owner, Dependabot aside) can never
-// change protected paths and needs ack:tests to change existing tests; the owner's own PRs
-// need ack:sensitive for protected paths. It's judged by authorship, whatever the branch.
+// pr-guards.sh and tests-guard.sh in a throwaway repository, with a fake `gh` that reports the
+// PR's authors, its labels and who added them. Agent work (anyone but the owner, Dependabot
+// aside) can never change protected paths and needs ack:tests to change existing tests; the
+// owner's own PRs need ack:sensitive for protected paths. It's judged by authorship.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const script = join(dirname(fileURLToPath(import.meta.url)), "..", "pr-guards.sh");
+const scripts = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // `gh pr view … author,commits` prints FAKE_AUTHORS and `gh pr view … labels` FAKE_LABELS (both
 // comma separated), one per line; `gh api …` (the label events) prints FAKE_LABELER, the login
@@ -44,7 +44,7 @@ function write(dir, path, text) {
 const testFile = (...names) => `import { test } from "node:test";\n${names.map((n) => `test("${n}", () => {});`).join("\n")}\n`;
 
 // Base commit: a web package with one test file; `files` are written for the PR's commit.
-function guards({ authors = ["owner"], files, labels = [], labeler = "owner" }) {
+function guards({ authors = ["owner"], files, labels = [], labeler = "owner", script = "pr-guards.sh" }) {
   const dir = mkdtempSync(join(tmpdir(), "pr-guards-"));
   try {
     write(dir, "web/package.json", JSON.stringify({ name: "x", private: true }));
@@ -74,7 +74,7 @@ function guards({ authors = ["owner"], files, labels = [], labeler = "owner" }) 
       FAKE_LABELS: labels.join(","),
       FAKE_LABELER: labeler,
     };
-    const r = spawnSync("bash", [script], { cwd: dir, env, encoding: "utf8" });
+    const r = spawnSync("bash", [join(scripts, script)], { cwd: dir, env, encoding: "utf8" });
     return { status: r.status, out: r.stdout + r.stderr };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -127,4 +127,23 @@ test("agent work needs ack:tests to change an existing test, but not to add one"
   assert.equal(guards({ files: changed }).status, 0, "the owner's own test edits aren't flagged");
   const added = { "web/tests/b.test.js": testFile("two"), "web/core.js": "export const x = 2;\n" };
   assert.equal(guards({ authors: agent, files: added }).status, 0);
+});
+
+test("tests-guard.sh fails when a test is removed, unless the owner added ack:tests", () => {
+  // (A test file with no tests still counts as one test, so the file itself goes.)
+  const removed = { "web/tests/a.test.js": null, "web/core.js": "export const x = 3;\n" };
+  const r = guards({ files: removed, script: "tests-guard.sh" });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /Tests were removed or skipped/);
+  const acked = guards({ files: removed, labels: ["ack:tests"], script: "tests-guard.sh" });
+  assert.equal(acked.status, 0, acked.out);
+  // The label is checked before the PR's code runs: with it, the tests aren't even counted.
+  assert.doesNotMatch(acked.out, /node tests:/);
+  assert.equal(guards({ files: removed, labels: ["ack:tests"], labeler: "someone-else", script: "tests-guard.sh" }).status, 1);
+});
+
+test("pr-guards.sh doesn't run the PR's code", () => {
+  const r = guards({ files: { "web/tests/a.test.js": null } });
+  assert.equal(r.status, 0, r.out);
+  assert.doesNotMatch(r.out, /node tests:/);
 });

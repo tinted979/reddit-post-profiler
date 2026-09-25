@@ -60,6 +60,17 @@ jobs:
             "$GITHUB_REPOSITORY_OWNER"|github-actions|app/github-actions) ;;
             *) echo "::error::#$ISSUE was written by $author. Restate it as your own issue first."; exit 1 ;;
           esac
+          # The text must still be what the owner (or the audit) wrote: agents' tokens can edit
+          # issues, so refuse one edited by anyone else. Edits by the owner are fine.
+          # shellcheck disable=SC2016 # $owner etc. are GraphQL variables, not shell ones
+          editors=$(gh api graphql -F owner="$GITHUB_REPOSITORY_OWNER" -F name="${GITHUB_REPOSITORY#*/}" -F number="$ISSUE"             -f query='query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) { issue(number: $number) {
+                userContentEdits(first: 100) { nodes { editor { login } } } } } }'             --jq '.data.repository.issue.userContentEdits.nodes[] | .editor.login // "(unknown)"' | sort -u)
+          others=$(grep -vxE "$GITHUB_REPOSITORY_OWNER|github-actions" <<<"$editors" | grep . || true)
+          if [ -n "$others" ]; then
+            echo "::error::#$ISSUE was edited by $(paste -sd, - <<<"$others"). Check its text, then restate it as a new issue."
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -96,12 +107,13 @@ jobs:
             Work on issue #${{ env.ISSUE }} as the ${{ env.AGENT_ROLE }} agent (.claude/agents/${{ env.AGENT_ROLE }}.md),
             which says how to work and what "done" is. Read the issue with `gh issue view ${{ env.ISSUE }}`.
             Create a new branch with `git switch -c claude/${{ env.ISSUE }}-<short-slug>`, push only
-            to it with `git push -u origin`, and open the PR with `gh pr create --draft --base main`.
+            that branch with `git push -u origin claude/${{ env.ISSUE }}-<short-slug>`, and open the
+            PR with `gh pr create --draft --base main`.
             Run the web tests with `npm --prefix web test`.
           claude_args: >-
             --agent ${{ env.AGENT_ROLE }}
             --max-turns 80
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(python -m pytest:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git switch -c claude/*),Bash(git add:*),Bash(git commit:*),Bash(git push -u origin claude/*),Bash(gh issue view ${{ env.ISSUE }}),Bash(gh issue comment ${{ env.ISSUE }}:*),Bash(gh pr list:*),Bash(gh pr create:*)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(python -m pytest:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git switch -c claude/${{ env.ISSUE }}-*),Bash(git add:*),Bash(git commit:*),Bash(git push -u origin claude/${{ env.ISSUE }}-*),Bash(gh issue view ${{ env.ISSUE }}),Bash(gh issue comment ${{ env.ISSUE }}:*),Bash(gh pr list:*),Bash(gh pr create --draft:*)"
 
   follow-up:
     if: >-

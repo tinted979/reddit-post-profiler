@@ -813,6 +813,12 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 >   - Changing or deleting an existing test in agent work needs `ack:tests`.
 >   - A PR could still edit `checks.yml` itself. What closes that is the Claude App having no `workflows` permission.
 > - **A third ruleset, "branches: owner only"** (added after the security review of #39): only a repo admin, or Dependabot on its own branches, may update, force-push or delete any branch except `main` and `claude/[0-9]*`. Commit authorship can be forged, and a writer's code holds the App token, so without this ruleset an agent could push commits that name the owner as author onto the owner's own PRs, and `ack:sensitive` would let them through. With it, the owner's branches hold only the owner's pushes. Side effects: interactive branch names can't start with a digit, and the Copilot agent can't push to the owner's branches.
+> - **Nothing from the PR runs before the guard's verdict** (security review of #39). Bash reads a script as it runs, so PR code run by the same process could rewrite the rest of the guard. So:
+>   - `pr-guards.sh` runs only git and gh.
+>   - The test count moved to `tests-guard.sh`, which runs last in the job. It checks the owner's `ack:tests` before running any PR code.
+>   - `owner-ack.sh` is shared by both.
+>   - The test count is only as trustworthy as the PR's code, since that code could fake it. The protected-path verdict is unaffected.
+> - **`from-issue` refuses an issue edited by anyone but the owner** (or the audit bot). It checks the GraphQL `userContentEdits`, because the agents' App token can edit issues. Writers may only create and push `claude/<issue>-*` and must open PRs with `--draft`.
 > - **`pr-guards.sh` fails closed** when a PR has more commits than `gh` lists (100). It uses `--no-renames`, so moving a file out of a protected folder still counts as changing it.
 > - **The follow-up job only revises PRs the Claude App opened in this repository.** It refuses forks, non-`claude/*` branches and the owner's own PRs. Commit authors can be forged, so only a PR's author reliably marks agent work. It may only `git push` or `git push origin HEAD`. `pr-guards.sh` treats any commit author that isn't exactly the owner or Dependabot as agent work, including authors with no linked login.
 > - **The env scrub needs `bubblewrap` and `socat` on the runner.** Claude Code 2.1.282 won't start without bubblewrap, and Bash fails without socat. Every agent job installs both, lifts Ubuntu 24.04's AppArmor block on user namespaces, and checks both work.
