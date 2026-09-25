@@ -14,8 +14,9 @@ rpp-db.tinted979.dev.
 
 Report a finding only with numbers: the metric, a baseline, the current value, and the code
 responsible. In an audit, the baseline is the commit from about a month ago
-(`git log --until="1 month ago" -1 --format=%H`). On a PR, it's the base (`--base HEAD^1`);
-post one comment with a small table, and say "no change" when there's none.
+(`git log --until="1 month ago" -1 --format=%H`). On a PR, you don't run anything: a separate
+read-only job has run the bench with `--base HEAD^1`, and its JSON is .bench/bench.json. Post
+one comment with a small table, and say "no change" when there's none.
 
 A new scenario the bench lacks is a finding only if you can show a request pattern the
 existing scenarios miss; suggest the scenario in `suggestion`.
