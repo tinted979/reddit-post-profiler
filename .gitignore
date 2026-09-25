@@ -3,3 +3,4 @@ node_modules/
 dumps/
 !web/tests/fixtures/dumps/
 __pycache__/
+.tmp/

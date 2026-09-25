@@ -26,6 +26,10 @@ Usage (from the repo root; uv installs DuckDB in a throwaway environment):
   uv run tools/build_dumps.py --subreddit Hasan_Piker \\
       --posts F:/r_Hasan_Piker_posts.jsonl --comments F:/r_Hasan_Piker_comments.jsonl
 
+Add --memory-limit 4GB (any DuckDB size) to cap DuckDB's memory; past it DuckDB spills
+to <out>/.tmp, which is removed when the build ends. See --help for --out, --version and
+--row-group.
+
 Then upload the output directory (default dumps/, which git ignores) as it is.
 """
 
@@ -35,6 +39,7 @@ import argparse
 import datetime as dt
 import json
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -63,33 +68,32 @@ def sql_str(value: str) -> str:
 
 
 def load(con: duckdb.DuckDBPyConnection, table: str, path: Path, columns: dict[str, str], subreddit: str) -> dict:
-    """Load the needed columns of a JSONL dump into `table`, cleaned. Returns counts."""
+    """Load the needed columns of a JSONL dump into `table`, cleaned. Returns counts.
+
+    The dump is streamed twice: once for the counts, then straight into the cleaned
+    table, so no raw copy of it is ever held."""
     cols = {**columns, "id": "VARCHAR", "author": "VARCHAR", "created_utc": "VARCHAR", "subreddit": "VARCHAR"}
     spec = "{" + ", ".join(f"{sql_str(k)}: {sql_str(v)}" for k, v in cols.items()) + "}"
     # ignore_errors skips malformed lines, such as a last line still being written.
-    con.execute(f"""
-        CREATE TEMP TABLE raw_{table} AS
-        SELECT * FROM read_ndjson({sql_str(path.as_posix())}, columns = {spec}, ignore_errors = true)
-    """)
+    source = f"read_ndjson({sql_str(path.as_posix())}, columns = {spec}, ignore_errors = true)"
     raw, other_sub, unusable = con.execute(f"""
         SELECT count(*),
                count(*) FILTER (lower(subreddit) <> lower({sql_str(subreddit)})),
                count(*) FILTER (id IS NULL OR TRY_CAST(created_utc AS DOUBLE) IS NULL)
-        FROM raw_{table}
+        FROM {source}
     """).fetchone()
     extra = ", ".join(columns)
     extra = f", {extra}" if extra else ""
     con.execute(f"""
         CREATE TEMP TABLE {table} AS
         SELECT id, author, CAST(CAST(created_utc AS DOUBLE) AS BIGINT) AS created_utc{extra}
-        FROM raw_{table}
+        FROM {source}
         WHERE lower(subreddit) = lower({sql_str(subreddit)})
           AND id IS NOT NULL AND TRY_CAST(created_utc AS DOUBLE) IS NOT NULL
           AND author IS NOT NULL AND author <> ''
           AND lower(author) NOT IN ({", ".join(sql_str(a) for a in EXCLUDED)})
         QUALIFY row_number() OVER (PARTITION BY id ORDER BY created_utc) = 1
     """)
-    con.execute(f"DROP TABLE raw_{table}")
     kept, first, last = con.execute(f"SELECT count(*), min(created_utc), max(created_utc) FROM {table}").fetchone()
     return {"raw": raw, "other_subreddit": other_sub, "unusable": unusable, "kept": kept, "first": first, "last": last}
 
@@ -119,16 +123,40 @@ def check_sorted(con: duckdb.DuckDBPyConnection, path: Path, key: str) -> None:
             raise SystemExit(f"{path.name}: row groups aren't in {key} order ({prev_max!r} then {next_min!r})")
 
 
+def temp_dir(out: Path) -> Path:
+    """Where DuckDB spills: inside the output directory, never the current one, and
+    outside r/, so the upload (r/**/*.parquet and manifest.json) never picks it up."""
+    return out / ".tmp"
+
+
+def connect(out: Path, memory_limit: str | None = None) -> duckdb.DuckDBPyConnection:
+    """An in-memory DuckDB that spills under `out`, doesn't keep insertion order (every
+    COPY has its own ORDER BY) and, if given, keeps to `memory_limit` (e.g. "4GB")."""
+    config = {"temp_directory": temp_dir(out).as_posix(), "preserve_insertion_order": False}
+    if memory_limit:
+        config["memory_limit"] = memory_limit
+    return duckdb.connect(config=config)
+
+
 def build(subreddit: str, posts: Path, comments: Path, out: Path, version: str | None = None,
-          row_group: int = DEFAULT_ROW_GROUP, now: float | None = None, log=print) -> dict:
+          row_group: int = DEFAULT_ROW_GROUP, now: float | None = None, log=print,
+          memory_limit: str | None = None) -> dict:
     if not SUBREDDIT_NAME.match(subreddit):
         raise SystemExit(f"not a subreddit name: {subreddit!r}")
     for path in (posts, comments):
         if not path.is_file():
             raise SystemExit(f"no such file: {path}")
     started = time.time()
-    con = duckdb.connect()
+    con = connect(out, memory_limit)
+    try:
+        return _build(con, subreddit, posts, comments, out, version, row_group, now, log, started)
+    finally:
+        con.close()
+        shutil.rmtree(temp_dir(out), ignore_errors=True)
 
+
+def _build(con: duckdb.DuckDBPyConnection, subreddit: str, posts: Path, comments: Path, out: Path,
+           version: str | None, row_group: int, now: float | None, log, started: float) -> dict:
     p = load(con, "posts", posts, {}, subreddit)
     c = load(con, "comments", comments, {"link_id": "VARCHAR"}, subreddit)
     for kind, n in (("posts", p), ("comments", c)):
@@ -207,8 +235,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--version", help="build directory name (default: the date the data runs to)")
     parser.add_argument("--row-group", type=int, default=DEFAULT_ROW_GROUP,
                         help=f"rows per Parquet row group (default: {DEFAULT_ROW_GROUP})")
+    parser.add_argument("--memory-limit",
+                        help="DuckDB's memory limit, e.g. 4GB (default: DuckDB's own, 80%% of RAM)")
     args = parser.parse_args(argv)
-    build(args.subreddit, args.posts, args.comments, args.out, args.version, args.row_group)
+    build(args.subreddit, args.posts, args.comments, args.out, args.version, args.row_group,
+          memory_limit=args.memory_limit)
 
 
 if __name__ == "__main__":
