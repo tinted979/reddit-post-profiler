@@ -1,0 +1,223 @@
+name: Agent write
+
+# The only workflow whose agents change code, and the owner starts every run:
+#   - label an issue agent:implement or agent:refactor (or dispatch with an issue number);
+#   - comment "@claude ..." on a PR to have the implementer revise it.
+# Writers push only claude/* branches and open draft PRs; one writer runs at a time, repo-wide.
+# They push with a token from the owner's own writer app (vars.WRITER_APP_CLIENT_ID,
+# secrets.WRITER_APP_PRIVATE_KEY): contents, pull requests and issues, and deliberately no
+# workflows or actions permission, so GitHub refuses any push that touches .github/workflows/.
+# (The Claude GitHub App asks for workflows and actions write, so it isn't used here.) The app's
+# pushes and PRs trigger CI (GITHUB_TOKEN's don't) but can never merge: the main rulesets need
+# the owner's code-owner approval and green checks, and "branches: owner only" keeps it off the
+# owner's branches.
+# The path hook (.claude/hooks/guard-paths.mjs, restored from the base branch) blocks edits to
+# CLAUDE.md, .claude/ and .github/ when AGENT_ROLE is set, and existing tests for the refactorer.
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to work on
+        type: number
+        required: true
+      role:
+        description: Which writer
+        type: choice
+        options: [implementer, refactorer]
+        default: implementer
+
+permissions: {}
+
+jobs:
+  from-issue:
+    if: >-
+      vars.AGENTS_ENABLED == 'true' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'issues' &&
+        (github.event.label.name == 'agent:implement' || github.event.label.name == 'agent:refactor')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # queue: max keeps every waiting run; by default a third queued run cancels the pending one.
+    concurrency:
+      group: agent-write
+      queue: max
+    permissions:
+      contents: read      # GITHUB_TOKEN stays read-only: pushes and PRs use the writer app's token,
+      issues: read        # which can't merge (see the main rulesets)
+      pull-requests: read
+    env:
+      ISSUE: ${{ inputs.issue || github.event.issue.number }}
+      AGENT_ROLE: ${{ inputs.role || (github.event.label.name == 'agent:refactor' && 'refactorer' || 'implementer') }}
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+    steps:
+      - name: Only work from issues the owner wrote or an audit filed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          author=$(gh issue view "$ISSUE" --repo "$GITHUB_REPOSITORY" --json author --jq .author.login)
+          case "$author" in
+            "$GITHUB_REPOSITORY_OWNER"|github-actions|app/github-actions) ;;
+            *) echo "::error::#$ISSUE was written by $author. Restate it as your own issue first."; exit 1 ;;
+          esac
+          # The text must still be what the owner (or the audit) wrote: agents' tokens can edit
+          # issues, so refuse one whose body or title anyone else changed. Edits by the owner are
+          # fine. A failed query fails the step.
+          # shellcheck disable=SC2016 # $owner etc. are GraphQL variables, not shell ones
+          query='query($owner: String!, $name: String!, $number: Int!) {
+            repository(owner: $owner, name: $name) { issue(number: $number) {
+              userContentEdits(first: 100) { nodes { editor { login } } }
+              timelineItems(first: 100, itemTypes: [RENAMED_TITLE_EVENT]) {
+                nodes { ... on RenamedTitleEvent { actor { login } } } } } } }'
+          editors=$(gh api graphql -f query="$query" \
+            -F owner="$GITHUB_REPOSITORY_OWNER" -F name="${GITHUB_REPOSITORY#*/}" -F number="$ISSUE" \
+            --jq '.data.repository.issue | (.userContentEdits.nodes[] | .editor.login // "(unknown)"), (.timelineItems.nodes[] | .actor.login // "(unknown)")' |
+            sort -u)
+          others=$(grep -vxE "$GITHUB_REPOSITORY_OWNER|github-actions" <<<"$editors" | grep . || true)
+          if [ -n "$others" ]; then
+            echo "::error::#$ISSUE was edited by $(paste -sd, - <<<"$others"). Check its text, then restate it as a new issue."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: web/.nvmrc
+          package-manager-cache: false
+      - name: Install the web tests' dev dependency
+        working-directory: web
+        run: npm ci
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false # no cache to poison: nothing restored, nothing saved
+      - name: Python for the dump tool tests (python -m pytest)
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/py"
+          uv pip install --python "$RUNNER_TEMP/py" "duckdb>=1.1,<2" pytest
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+      - name: Install bubblewrap and socat (the env scrub's subprocess sandbox needs both)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap socat
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor, and bwrap needs
+          # them. This runner is thrown away after the job.
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          command -v socat
+          bwrap --ro-bind / / --unshare-pid true && echo "bubblewrap works"
+      - name: Writer token (contents, pull requests, issues; no workflows or actions)
+        id: writer
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.WRITER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WRITER_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.writer.outputs.token }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            ISSUE: ${{ env.ISSUE }}
+
+            Work on issue #${{ env.ISSUE }} as the ${{ env.AGENT_ROLE }} agent (.claude/agents/${{ env.AGENT_ROLE }}.md),
+            which says how to work and what "done" is. Read the issue with `gh issue view ${{ env.ISSUE }}`.
+            Create a new branch with `git switch -c claude/${{ env.ISSUE }}-<short-slug>`, push only
+            that branch with `git push -u origin claude/${{ env.ISSUE }}-<short-slug>`, and open the
+            PR with `gh pr create --draft --base main`.
+            Run the web tests with `npm --prefix web test`.
+          claude_args: >-
+            --agent ${{ env.AGENT_ROLE }}
+            --max-turns 80
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(python -m pytest:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git switch -c claude/${{ env.ISSUE }}-*),Bash(git add:*),Bash(git commit:*),Bash(git push -u origin claude/${{ env.ISSUE }}-*),Bash(gh issue view ${{ env.ISSUE }}),Bash(gh issue comment ${{ env.ISSUE }}:*),Bash(gh pr list:*),Bash(gh pr create --draft:*)"
+
+  follow-up:
+    if: >-
+      vars.AGENTS_ENABLED == 'true' &&
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      github.event.comment.user.login == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: agent-write
+      queue: max
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    env:
+      AGENT_ROLE: implementer
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+    steps:
+      - name: Only agent branches in this repository
+        # A fork's PR would run the fork's code (its tests, its package.json) next to the App's
+        # write credentials, and a non-claude/* branch isn't the agents' to push to.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          WRITER_APP: app/${{ vars.WRITER_APP_SLUG }}
+        run: |
+          read -r cross author head < <(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json isCrossRepository,author,headRefName --jq '"\(.isCrossRepository) \(.author.login) \(.headRefName)"')
+          if [ "$cross" != false ]; then echo "::error::#$PR comes from a fork; @claude only works on this repository's branches."; exit 1; fi
+          case "$head" in claude/*) ;; *) echo "::error::#$PR's branch $head isn't a claude/* branch; @claude only pushes to those."; exit 1 ;; esac
+          # Only PRs the writer app opened (gh shows an app as app/<slug>): their author can't be
+          # forged, so pr-guards.sh always treats them as agent work. On anyone else's PR, an
+          # agent's commits could pass as that person's.
+          if [ "$author" != "$WRITER_APP" ]; then echo "::error::#$PR was opened by $author, not $WRITER_APP; @claude only revises its PRs."; exit 1; fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: web/.nvmrc
+          package-manager-cache: false
+      - name: Install the web tests' dev dependency
+        working-directory: web
+        run: npm ci
+      # No prompt: tag mode. The action reads the owner's comment, checks out the PR branch and
+      # pushes follow-up commits to it. Only the owner's and the reviewers' (github-actions[bot])
+      # comments are passed to Claude, so nobody else can steer it through the PR thread.
+      - name: Install bubblewrap and socat (the env scrub's subprocess sandbox needs both)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap socat
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor, and bwrap needs
+          # them. This runner is thrown away after the job.
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          command -v socat
+          bwrap --ro-bind / / --unshare-pid true && echo "bubblewrap works"
+      - name: Writer token (contents, pull requests, issues; no workflows or actions)
+        id: writer
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.WRITER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WRITER_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.writer.outputs.token }}
+          include_comments_by_actor: ${{ github.repository_owner }},github-actions[bot]
+          claude_args: >-
+            --agent implementer
+            --max-turns 40
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push),Bash(git push origin HEAD)"

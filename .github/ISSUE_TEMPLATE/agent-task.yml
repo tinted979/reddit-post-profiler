@@ -1,0 +1,32 @@
+name: Agent task
+description: A change small and clear enough to hand to the implementer or refactorer (label it agent:implement or agent:refactor).
+labels: []
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What's wrong or missing, as a visitor would see it.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checkable statements. The agent stops and asks if these are missing or contradict CLAUDE.md.
+      placeholder: "- A stopped scan of the same post never overwrites a complete one\n- web/tests covers the case"
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Likely files
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+  - type: textarea
+    id: verify
+    attributes:
+      label: How to verify
+      description: Tests to add or run, and anything to check by hand (UI, live API).
