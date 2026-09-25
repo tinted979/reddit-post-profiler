@@ -139,7 +139,7 @@ jobs:
           claude_args: >-
             --agent ${{ env.AGENT_ROLE }}
             --max-turns 80
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(python -m pytest:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git switch -c claude/${{ env.ISSUE }}-*),Bash(git add:*),Bash(git commit:*),Bash(git push -u origin claude/${{ env.ISSUE }}-*),Bash(gh issue view ${{ env.ISSUE }}),Bash(gh issue comment ${{ env.ISSUE }}:*),Bash(gh pr list:*),Bash(gh pr create --draft:*)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(node web/bench/scan-bench.mjs:*),Bash(python -m pytest:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git switch -c claude/${{ env.ISSUE }}-*),Bash(git add:*),Bash(git commit:*),Bash(git push -u origin claude/${{ env.ISSUE }}-*),Bash(gh issue view ${{ env.ISSUE }}),Bash(gh issue comment ${{ env.ISSUE }}:*),Bash(gh pr list:*),Bash(gh pr create --draft:*)"
 
   follow-up:
     if: >-
@@ -220,4 +220,4 @@ jobs:
           claude_args: >-
             --agent implementer
             --max-turns 40
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push),Bash(git push origin HEAD)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(node web/bench/scan-bench.mjs:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push),Bash(git push origin HEAD)"
