@@ -51,12 +51,18 @@ if [ -n "$protected" ]; then
 fi
 
 # Agents may add tests but not change or delete existing ones (the refactorer's hook enforces
-# it for its Edit tool only), so any such change in agent work needs the owner's look.
+# it for its Edit tool only), nor touch what decides which tests run (web/package.json's test
+# script, pytest's config and conftest files, even new ones). Any of that in agent work needs
+# the owner's look.
 if [ -n "$agents" ]; then
-  touched=$(git diff --name-only --no-renames --diff-filter=MD "$base" HEAD -- web/tests tools/tests)
+  touched=$( {
+    git diff --name-only --no-renames --diff-filter=MD "$base" HEAD -- web/tests tools/tests
+    git diff --name-only --no-renames "$base" HEAD -- web/package.json web/.nvmrc \
+      ':(glob)**/conftest.py' ':(glob)**/pytest.ini' ':(glob)**/pyproject.toml' ':(glob)**/setup.cfg' ':(glob)**/tox.ini'
+  } | sort -u)
   if [ -n "$touched" ]; then
     owner_ack ack:tests || {
-      echo "::error::This agent PR changes or deletes existing tests. Check no assertion got weaker, then add ack:tests:"
+      echo "::error::This agent PR changes existing tests or what decides which tests run. Check no assertion got weaker and nothing stopped running, then add ack:tests:"
       while read -r f; do echo "  $f"; done <<<"$touched"
       fail=1
     }

@@ -122,7 +122,7 @@ test("agent work needs ack:tests to change an existing test, but not to add one"
   const changed = { "web/tests/a.test.js": testFile("one renamed") };
   const r = guards({ authors: agent, files: changed });
   assert.equal(r.status, 1, r.out);
-  assert.match(r.out, /changes or deletes existing tests/);
+  assert.match(r.out, /changes existing tests or what decides which tests run/);
   assert.equal(guards({ authors: agent, files: changed, labels: ["ack:tests"] }).status, 0);
   assert.equal(guards({ files: changed }).status, 0, "the owner's own test edits aren't flagged");
   const added = { "web/tests/b.test.js": testFile("two"), "web/core.js": "export const x = 2;\n" };
@@ -146,4 +146,18 @@ test("pr-guards.sh doesn't run the PR's code", () => {
   const r = guards({ files: { "web/tests/a.test.js": null } });
   assert.equal(r.status, 0, r.out);
   assert.doesNotMatch(r.out, /node tests:/);
+});
+
+test("agent work needs ack:tests to change what decides which tests run", () => {
+  for (const files of [
+    { "web/package.json": JSON.stringify({ name: "x", private: true, scripts: { test: "true" } }) },
+    { "tools/conftest.py": "collect_ignore_glob = ['*']\n" },
+    { "pytest.ini": "[pytest]\naddopts = --co\n" },
+  ]) {
+    const r = guards({ authors: agent, files });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /what decides which tests run/);
+    assert.equal(guards({ authors: agent, files, labels: ["ack:tests"] }).status, 0);
+  }
+  assert.equal(guards({ authors: agent, files: { "web/core.js": "export const x = 4;\n" } }).status, 0);
 });

@@ -61,11 +61,18 @@ jobs:
             *) echo "::error::#$ISSUE was written by $author. Restate it as your own issue first."; exit 1 ;;
           esac
           # The text must still be what the owner (or the audit) wrote: agents' tokens can edit
-          # issues, so refuse one edited by anyone else. Edits by the owner are fine.
+          # issues, so refuse one whose body or title anyone else changed. Edits by the owner are
+          # fine. A failed query fails the step.
           # shellcheck disable=SC2016 # $owner etc. are GraphQL variables, not shell ones
-          editors=$(gh api graphql -F owner="$GITHUB_REPOSITORY_OWNER" -F name="${GITHUB_REPOSITORY#*/}" -F number="$ISSUE"             -f query='query($owner: String!, $name: String!, $number: Int!) {
-              repository(owner: $owner, name: $name) { issue(number: $number) {
-                userContentEdits(first: 100) { nodes { editor { login } } } } } }'             --jq '.data.repository.issue.userContentEdits.nodes[] | .editor.login // "(unknown)"' | sort -u)
+          query='query($owner: String!, $name: String!, $number: Int!) {
+            repository(owner: $owner, name: $name) { issue(number: $number) {
+              userContentEdits(first: 100) { nodes { editor { login } } }
+              timelineItems(first: 100, itemTypes: [RENAMED_TITLE_EVENT]) {
+                nodes { ... on RenamedTitleEvent { actor { login } } } } } } }'
+          editors=$(gh api graphql -f query="$query" \
+            -F owner="$GITHUB_REPOSITORY_OWNER" -F name="${GITHUB_REPOSITORY#*/}" -F number="$ISSUE" \
+            --jq '.data.repository.issue | (.userContentEdits.nodes[] | .editor.login // "(unknown)"), (.timelineItems.nodes[] | .actor.login // "(unknown)")' |
+            sort -u)
           others=$(grep -vxE "$GITHUB_REPOSITORY_OWNER|github-actions" <<<"$editors" | grep . || true)
           if [ -n "$others" ]; then
             echo "::error::#$ISSUE was edited by $(paste -sd, - <<<"$others"). Check its text, then restate it as a new issue."
@@ -143,13 +150,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.issue.number }}
         run: |
-          read -r cross bot head < <(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
-            --json isCrossRepository,author,headRefName --jq '"\(.isCrossRepository) \(.author.is_bot) \(.headRefName)"')
+          read -r cross author head < <(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json isCrossRepository,author,headRefName --jq '"\(.isCrossRepository) \(.author.login) \(.headRefName)"')
           if [ "$cross" != false ]; then echo "::error::#$PR comes from a fork; @claude only works on this repository's branches."; exit 1; fi
           case "$head" in claude/*) ;; *) echo "::error::#$PR's branch $head isn't a claude/* branch; @claude only pushes to those."; exit 1 ;; esac
-          # Only PRs an agent opened: their author can't be forged, so pr-guards.sh always treats
-          # them as agent work. On the owner's own PRs, an agent's commits could pass as the owner's.
-          if [ "$bot" != true ]; then echo "::error::#$PR wasn't opened by the Claude App; @claude only revises agents' PRs."; exit 1; fi
+          # Only PRs the Claude App opened (gh shows an app as app/<slug>): their author can't be
+          # forged, so pr-guards.sh always treats them as agent work. On anyone else's PR, an
+          # agent's commits could pass as that person's.
+          if [ "$author" != app/claude ]; then echo "::error::#$PR was opened by $author, not the Claude App; @claude only revises its PRs."; exit 1; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
