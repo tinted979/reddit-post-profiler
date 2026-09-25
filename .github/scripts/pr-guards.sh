@@ -18,10 +18,15 @@ changed=$(git diff --name-only "$base" HEAD)
 fail=0
 
 # Commit authors are whatever the committer wrote, so this fails closed: a login that isn't
-# exactly the owner's or Dependabot's, including none (an unlinked email), is agent work. The
-# PR's own author can't be forged, and follow-up only pushes to PRs the Claude App opened.
-authors=$(gh pr view "$PR" --json author,commits \
-  --jq '(.author.login, (.commits[].authors[0].login)) | if . == null or . == "" then "(unlinked)" else . end') ||
+# exactly the owner's or Dependabot's, including none (an unlinked email), is agent work, and
+# so is a PR with more commits than gh lists (100). Forged authorship can't make agent commits
+# pass as the owner's, because agents can't push to the owner's branches at all: the "branches:
+# owner only" ruleset lets only the owner update any branch but main (PRs only),
+# claude/<number>-… (agents' own, whose PRs the App opens, an author that can't be forged)
+# and Dependabot's.
+authors=$(gh pr view "$PR" --json author,commits --jq '
+  (.author.login, (.commits[].authors[0].login), (if (.commits | length) >= 100 then "(too many commits to check)" else empty end))
+  | if . == null or . == "" then "(unlinked)" else . end') ||
   { echo "::error::Couldn't read the PR's authors."; exit 1; }
 agents=$(grep -vxE "$OWNER|(app/)?dependabot(\[bot\])?" <<<"$authors" | sort -u)
 if [ -n "$agents" ]; then
