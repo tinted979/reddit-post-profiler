@@ -92,15 +92,20 @@ const within = (t, u) => {
 // interactions rows ([[subreddit, posts, comments], …]) answered for a query with `after`;
 // `timeouts` makes the unfiltered lifetime aggregates time out; `tail` ({posts, comments}
 // as [{id, author, created_utc, link_id}, …]) is everyone's activity in the post's
-// subreddit, for subreddit-wide searches. Anything else is unexpected: it's recorded in
-// `unexpected` and answered with a 400.
-export function apiModel({ user, lifetime = {}, before = {}, recent = [], timeouts = false, tail = null }, unexpected) {
+// subreddit, for subreddit-wide searches; `tree` ([[author, created_utc], …]) is the post's
+// comment tree. Anything else is unexpected: it's recorded in `unexpected` and answered
+// with a 400.
+export function apiModel({ user, lifetime = {}, before = {}, recent = [], timeouts = false, tail = null, tree = null }, unexpected) {
   const refuse = (u) => {
     unexpected.push(u.toString());
     return json({ error: "unexpected request in the bench" }, 400);
   };
   return (u) => {
     if (u.origin !== new URL(BASE_URL).origin || u.searchParams.get("meta-app") !== APP_TAG) return refuse(u);
+    if (tree && u.pathname === "/api/comments/tree") {
+      if (u.searchParams.get("link_id") !== POST.id) return refuse(u);
+      return json({ data: tree.map(([author, t], i) => ({ kind: "t1", data: { id: `k${i}`, author, created_utc: t, replies: "" } })) });
+    }
     const whole = /^\/api\/(posts|comments)\/search$/.exec(u.pathname);
     if (tail && whole && !u.searchParams.has("author")) {
       const kind = whole[1];
@@ -222,6 +227,9 @@ const STALE_TAIL = {
   tail: { posts: [], comments: [...others(1_500, 1_699_990_000, 400), ...ARCHIVED_TAIL.tail.comments.slice(-2)] },
 };
 
+// The thread as the comment tree gives it: alice's comment, the one in ARCHIVED_TAIL's tail.
+const TREE = [["alice", POST.createdUtc + 600]];
+
 // Seconds since the epoch the cache thinks it is: a month after the post, so saved
 // answers count as fetched well after the thread.
 const CACHE_NOW = POST.createdUtc + 30 * DAY;
@@ -235,6 +243,8 @@ export const SCENARIOS = Object.freeze([
   { name: "archive-only", about: "a scan limited to the covered subreddit: lifetime from the files + one interactions query", world: ARCHIVED, archive: true, only: ["Python"] },
   { name: "archive-tail-only", about: "the same scan after one fetch of the subreddit's activity since the files (per scan, not per user): nothing per user", world: ARCHIVED_TAIL, archive: true, tail: true, only: ["Python"] },
   { name: "archive-tail-full", about: "a full scan of a covered post after that fetch: only the two lifetime aggregates per user", world: ARCHIVED_TAIL, archive: true, tail: true },
+  { name: "thread-tree", about: "collecting the thread's commenters without the archive: one comment tree request per scan", world: { ...ARCHIVED, tree: TREE }, thread: true },
+  { name: "archive-tail-thread", about: "the same after the tail fetch of a covered subreddit: the commenters come from the archive, with no tree request", world: { ...ARCHIVED_TAIL, tree: TREE }, archive: true, tail: true, only: ["Python"], thread: true },
   { name: "archive-tail-stale", about: "a build a week old (1,500 comments since): the tail's pages grow with its age, but are still one set per scan", world: STALE_TAIL, archive: true, tail: true, only: ["Python"], post: { numComments: 1000 } },
 ]);
 
@@ -266,6 +276,7 @@ async function profileOnce(scenario, { cache = null, unexpected }) {
   const post = { ...POST, ...scenario.post };
   const start = clock.now();
   if (scenario.tail) await core.fetchTails(client, dumps, post, { only: scenario.only ?? null, now: () => TAIL_NOW });
+  const commenters = scenario.thread ? await core.collectCommenters(client, post, { dumps }) : null;
   const threadComments = 1;
   const profile = await buildProfile(client, scenario.world.user, threadComments, post, {
     only: scenario.only ?? null,
@@ -285,6 +296,7 @@ async function profileOnce(scenario, { cache = null, unexpected }) {
       timelineComplete: profile.targetTimelineComplete,
       cached: profile.cached,
       subreddits: [...profile.subreddits].map(([name, c]) => [name, c.posts, c.comments]),
+      ...(commenters && { commenters: Object.fromEntries(commenters) }),
     },
   };
 }

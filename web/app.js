@@ -687,7 +687,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
     }
 
     setStatus("Collecting commenters…");
-    const commenters = await collectCommenters(client, post, opts);
+    const commenters = await collectCommenters(client, post, { ...opts, dumps });
     thread = threadStats(commenters);
     renderPost(post, thread);
 
@@ -793,6 +793,9 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
         }
         if (dumps.lifetimeReads > 0) {
           text += " Subreddit counts came from the archive files plus Arctic Shift for anything newer.";
+        }
+        if (dumps.threadReads > 0) {
+          text += " The thread's comments came from the archive files and the subreddit's recent activity, with no request of their own.";
         }
       }
     }

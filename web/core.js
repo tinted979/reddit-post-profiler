@@ -625,13 +625,24 @@ export function yearlyRanges(before, nowSeconds, after = null) {
 // The thread's commenters: Map of author -> {count, last}, their comments in the thread
 // and when they made the newest one (epoch seconds). Deleted accounts, AutoModerator and
 // `exclude` are left out; with `includeOp` the post's author is added with no comments.
-export async function collectCommenters(client, post, { exclude = [], includeOp = false } = {}) {
+// With `dumps` (a DumpSource) whose tail for the post's subreddit reached the present this
+// scan (fetchTails), the archive has the whole thread: its comments_by_link rows and the tail
+// answer, with no request. Otherwise, or if that file can't be read, the API does.
+export async function collectCommenters(client, post, { exclude = [], includeOp = false, dumps = null } = {}) {
   const excluded = new Set(DEFAULT_EXCLUDED);
   for (const name of exclude) excluded.add(name.toLowerCase().replace(/^\/?u\//, ""));
+  let archived = null;
+  if (dumps?.isCurrent?.(post.subreddit)) {
+    try {
+      archived = await dumps.threadRows(post.subreddit, post.id);
+    } catch (err) {
+      if (err instanceof Aborted) throw err;
+    }
+  }
   // A thread too big for one tree response would be downloaded and then thrown away.
-  const tree = post.numComments >= TREE_LIMIT ? null : await client.threadCommentsTree(post.id);
+  const tree = archived || post.numComments >= TREE_LIMIT ? null : await client.threadCommentsTree(post.id);
   const commenters = new Map();
-  for await (const c of tree ?? client.iterThreadComments(post.id)) {
+  for await (const c of archived ?? tree ?? client.iterThreadComments(post.id)) {
     const author = c.author;
     if (typeof author !== "string" || !author || excluded.has(author.toLowerCase())) continue;
     const at = Math.trunc(Number(c.created_utc)) || 0;
@@ -697,12 +708,14 @@ async function fetchTail(client, dumps, sub, kind, budget, started) {
   try {
     let next;
     while (!(next = await pages.next()).done) {
-      dumps.addTail(kind, sub, next.value);
+      dumps.addTail(kind, sub, next.value, { now: started });
       for (const row of next.value) newest = Math.max(newest, Math.trunc(Number(row?.created_utc)) || -Infinity);
     }
-    dumps.endTail(kind, sub, next.value ? { through: started, current: true } : { through: newest - 1, current: false });
+    // A tail cut short covers up to the last whole second it reached, but never past now.
+    const partial = { through: Math.min(newest - 1, started), current: false };
+    dumps.endTail(kind, sub, next.value ? { through: started, current: true } : partial);
   } catch (err) {
-    dumps.endTail(kind, sub, { through: newest - 1, current: false });
+    dumps.endTail(kind, sub, { through: Math.min(newest - 1, started), current: false });
     if (!(err instanceof ArcticShiftError) || refusesMore(err)) throw err;
   }
 }
