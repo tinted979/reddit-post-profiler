@@ -181,20 +181,21 @@ One row per (user, subreddit), sorted by the user's comment count in the thread,
 activity in each subreddit:
 
 ```
-username,thread_comments,target_subreddit,target_posts_before,target_comments_before,subreddit,posts,comments,total,error,target_active_days_before,target_first_before_utc,target_badge
-barkmonster,2,learnpython,0,24,learnpython,0,82,82,,12,2024-03-05T18:22:10.000Z,occasional
-barkmonster,2,learnpython,0,24,ADHD,0,53,53,,12,2024-03-05T18:22:10.000Z,occasional
+username,thread_comments,target_subreddit,target_posts_before,target_comments_before,subreddit,posts,comments,total,error,target_active_days_before,target_first_before_utc,target_badge,target_days_exact
+barkmonster,2,learnpython,0,24,learnpython,0,82,82,,12,2024-03-05T18:22:10.000Z,occasional,true
+barkmonster,2,learnpython,0,24,ADHD,0,53,53,,12,2024-03-05T18:22:10.000Z,occasional,true
 …
 ```
 
 - `thread_comments`: the user's comment count in the analysed thread
 - `target_subreddit`: the post's subreddit
-- `target_posts_before` / `target_comments_before`: their activity there before the post was created (blank if the lookup failed)
+- `target_posts_before` / `target_comments_before`: their activity there before the post was created (blank if the lookup failed, or for a post older than the `years` window, where it isn't looked up)
 - `posts` / `comments` / `total`: their counts in `subreddit`, as archived by Arctic Shift: all-time, or since the start of the `years` window
 - `error`: why the lookup failed, if it did
-- `target_active_days_before`: different days they posted or commented in the post's subreddit before it (a lower bound past 100 posts or comments)
+- `target_active_days_before`: different days they posted or commented in the post's subreddit before it (see `target_days_exact`)
 - `target_first_before_utc`: when the first of those was
 - `target_badge`: `new`, `occasional` or `regular` under the badge settings in use (blank for a post older than the `years` window)
+- `target_days_exact`: `true`, or `false` when `target_active_days_before` is only a lower bound (past 100 posts or comments there, when the archive files don't cover the subreddit); blank when unknown
 
 Subreddits below the minimum (`min`) are left out, except the post's own.
 A user with no archived activity, or whose lookup failed, still gets one row. A CSV

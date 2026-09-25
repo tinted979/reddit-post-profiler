@@ -32,8 +32,10 @@ import {
   parsePostRef,
   parseSubreddits,
   parseUsernames,
+  redditPostUrl,
+  redditSubredditUrl,
   SCAN_DEFAULTS,
-  SCAN_LIMITS,
+  clampScanNumbers,
   scanStats,
   serializeProfile,
   sortedSubreddits,
@@ -46,7 +48,7 @@ import { LinkQueue, MAX_WAITING, QUEUE_KEY } from "./queue.js";
 
 const $ = (id) => document.getElementById(id);
 const TITLE = document.title;
-const DEFAULTS = { ...SCAN_DEFAULTS, cacheDays: 7 };
+const DEFAULTS = SCAN_DEFAULTS;
 // Most users profiled in parallel by a queued scan, which runs unattended.
 const QUEUE_CONCURRENCY = 2;
 
@@ -92,21 +94,15 @@ function debounce(fn, ms) {
 // The options as a run will use them, clamped to what the tool supports.
 function readOptions() {
   const num = (id) => Number.parseFloat($(id).value);
-  const maxUsers = Math.floor(num("max-users"));
   const years = Number($("years").value);
-  const delay = num("delay");
-  const concurrency = Math.round(num("concurrency"));
-  const cacheDays = num("cache-days");
-  const clamp = (n, { min, max }) => Math.min(max, Math.max(min, n));
   return {
     includeOp: $("include-op").checked,
     exclude: parseUsernames($("exclude").value.split(/[\s,]+/)),
     only: parseSubreddits($("only-subs").value.split(/[\s,]+/)),
     years: [1, 5, 10].includes(years) ? years : null,
-    maxUsers: maxUsers > 0 ? maxUsers : null,
-    delay: Number.isFinite(delay) ? clamp(delay, SCAN_LIMITS.delay) : DEFAULTS.delay,
-    concurrency: Number.isFinite(concurrency) ? clamp(concurrency, SCAN_LIMITS.concurrency) : DEFAULTS.concurrency,
-    cacheDays: cacheDays >= 0 ? cacheDays : DEFAULTS.cacheDays,
+    ...clampScanNumbers({
+      maxUsers: num("max-users"), delay: num("delay"), concurrency: num("concurrency"), cacheDays: num("cache-days"),
+    }),
   };
 }
 
@@ -415,7 +411,7 @@ function renderPost(post, thread) {
   $("post-card").hidden = false;
   $("post-sub").textContent = `r/${post.subreddit}`;
   $("post-title").textContent = post.title || "(untitled post)";
-  $("post-title").href = `https://www.reddit.com/r/${post.subreddit}/comments/${post.id}/`;
+  $("post-title").href = redditPostUrl(post);
   let meta = `by u/${post.author} · ${formatDate(post.createdUtc)}`;
   let title = "";
   if (thread) {
@@ -537,7 +533,7 @@ function subredditTable(subs, post, username) {
   for (const s of subs) {
     body.append(
       el("tr", { class: s.name.toLowerCase() === target ? "target" : "" },
-        el("td", {}, el("a", { href: `https://www.reddit.com/r/${s.name}/`, target: "_blank", rel: "noopener" }, `r/${s.name}`)),
+        el("td", {}, el("a", { href: redditSubredditUrl(s.name), target: "_blank", rel: "noopener" }, `r/${s.name}`)),
         countCell("posts", s.posts, s.name),
         countCell("comments", s.comments, s.name),
         el("td", {}, String(s.total))),
@@ -1331,7 +1327,7 @@ function markCurrentScan() {
 // Put a saved scan's post and options (not pace or caching) back in the form.
 function fillFromScan(summary) {
   const { post, opts: o = {} } = summary;
-  $("post").value = `https://www.reddit.com/r/${post.subreddit}/comments/${post.id}/`;
+  $("post").value = redditPostUrl(post);
   $("include-op").checked = Boolean(o.includeOp);
   showOptions({
     ...readOptions(),
