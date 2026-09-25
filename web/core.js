@@ -101,6 +101,9 @@ const URL_PATTERNS = [
   new RegExp(`reddit\\.com/gallery/(${ID})(?:[/?#]|$)`, "i"),
 ];
 const BARE_ID = new RegExp(`^(?:t3_)?(${ID})$`, "i");
+// A subreddit, or a user's profile (u_<username>; usernames are 3–20 characters and may
+// contain "-").
+const SUBREDDIT = /^(?:\w{2,21}|u_[\w-]{3,20})$/;
 
 export function parsePostRef(ref) {
   ref = String(ref).trim();
@@ -410,10 +413,9 @@ export class ArcticShiftClient {
     const p = Array.isArray(data) ? data[0] : null;
     if (!p?.subreddit) return null;
     // Every later query is built from these, so a reply that doesn't fit fails here rather
-    // than sending before=NaN or links to the wrong place. A post on a user's profile is in
-    // u_<username>, and usernames (3–20 characters) may contain "-".
+    // than sending before=NaN or links to the wrong place.
     const createdUtc = Math.trunc(Number(p.created_utc));
-    if (p.id !== postId || !/^(?:\w{2,21}|u_[\w-]{3,20})$/.test(p.subreddit) || !(createdUtc > 0)) {
+    if (p.id !== postId || !SUBREDDIT.test(p.subreddit) || !(createdUtc > 0)) {
       throw new ArcticShiftError(`unexpected post record for ${postId}`);
     }
     return {
@@ -658,7 +660,7 @@ export function parseSubreddits(names) {
       .replace(/^(?:https?:\/\/)?(?:[\w-]+\.)*reddit\.com/i, "")
       .replace(/^\/?r\//i, "")
       .replace(/\/.*$/, "");
-    if (/^\w{2,21}$/.test(name) && !seen.has(name.toLowerCase())) {
+    if (SUBREDDIT.test(name) && !seen.has(name.toLowerCase())) {
       seen.add(name.toLowerCase());
       out.push(name);
     }

@@ -617,6 +617,28 @@ test("buildProfile with only keeps listed subreddits and adds empty ones", async
   });
 });
 
+test("parseSubreddits takes a user profile's u_ subreddit, hyphens included", () => {
+  assert.deepEqual(
+    parseSubreddits(["u_some-user", "U_Some-User", "r/u_abcdefghijklmnopqrst", "some-sub", "u_abcdefghijklmnopqrstu", "u_-"]),
+    ["u_some-user", "u_abcdefghijklmnopqrst"],
+  );
+});
+
+test("buildProfile with only keeps a post's hyphenated profile subreddit and its before counts", async () => {
+  const post = { ...POST, subreddit: "u_some-user" };
+  const { client } = makeClient(aggregates({
+    posts: [["u_some-user", 2], ["funny", 1]],
+    comments: [["u_some-user", 6]],
+    before: { posts: 1, comments: 4 },
+  }));
+  const p = await buildProfile(client, "alice", 2, post, { only: ["rust"] });
+  assert.deepEqual(Object.fromEntries(p.subreddits), {
+    "u_some-user": { posts: 2, comments: 6 }, rust: { posts: 0, comments: 0 },
+  });
+  assert.equal(p.targetPostsBefore, 1);
+  assert.equal(p.targetCommentsBefore, 4);
+});
+
 test("a timed-out aggregate falls back to one query per listed subreddit", async () => {
   const { client, calls } = makeClient((u) => {
     const sub = u.searchParams.get("subreddit");
