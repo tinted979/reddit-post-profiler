@@ -46,11 +46,11 @@ for (const [name, make] of Object.entries(BACKENDS)) {
   });
 
   test(`${name}: clear and prune count what they delete`, async () => {
-    const b = make();
-    await b.setMany([["new", { fetchedAt: 100 }], ["old", { fetchedAt: 10 }], ["broken", { value: 1 }]]);
-    assert.equal(await b.prune(50), 2); // older than the cutoff, and no fetchedAt
-    assert.deepEqual(await b.getMany(["new", "old", "broken"]), [{ fetchedAt: 100 }, null, null]);
-    assert.equal(await b.clear(), 1);
+    const b = make("counts");
+    await b.setMany([["new", { fetchedAt: 100 }], ["edge", { fetchedAt: 50 }], ["old", { fetchedAt: 10 }], ["older", { fetchedAt: 5 }]]);
+    assert.equal(await b.prune(50), 2); // fetched before the cutoff
+    assert.deepEqual(await b.getMany(["new", "edge", "old", "older"]), [{ fetchedAt: 100 }, { fetchedAt: 50 }, null, null]);
+    assert.equal(await b.clear(), 2);
     assert.equal(await b.get("new"), null);
   });
 
@@ -131,15 +131,90 @@ test("a newer version of the page in another tab isn't blocked by this one", asy
   const backend = new IndexedDbBackend("counts", idb);
   await backend.set("k", { fetchedAt: 1 }); // this tab has the database open
   const upgraded = await new Promise((resolve, reject) => {
-    const req = idb.open("reddit-tool", 3); // the other tab's newer page
+    const req = idb.open("reddit-tool", 4); // the other tab's newer page (this one is 3)
     req.onupgradeneeded = () => {};
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
     req.onblocked = () => reject(new Error("blocked by the older tab"));
   });
-  assert.equal(upgraded.version, 3);
+  assert.equal(upgraded.version, 4);
   upgraded.close();
   // The older tab can't use the newer database; its store fails and ProfileCache carries on.
   const cache = new ProfileCache({ backend, ttlDays: 7 });
   assert.equal(await cache.get("k"), null);
+});
+
+// Opens the test's database directly, to look at what the page's code made of it.
+const openRaw = (idb) => new Promise((resolve, reject) => {
+  const req = idb.open("reddit-tool");
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => reject(req.error);
+});
+
+test("the saved-results store is indexed by fetchedAt, so prune needn't read every record", async () => {
+  const idb = new IDBFactory();
+  const counts = new IndexedDbBackend("counts", idb);
+  await counts.set("k", { value: 1, fetchedAt: 5 });
+  const db = await openRaw(idb);
+  assert.equal(db.version, 3);
+  assert.ok(db.transaction("counts").objectStore("counts").indexNames.contains("fetchedAt"));
+  db.close();
+});
+
+test("upgrading a version 2 database adds the index and drops records it can't find", async () => {
+  const idb = new IDBFactory();
+  await new Promise((resolve, reject) => {
+    const req = idb.open("reddit-tool", 2);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore("counts");
+      req.result.createObjectStore("scans");
+    };
+    req.onsuccess = () => {
+      const tx = req.result.transaction(["counts", "scans"], "readwrite");
+      const c = tx.objectStore("counts");
+      c.put({ value: 1, fetchedAt: 100 }, "new");
+      c.put({ value: 2, fetchedAt: 10 }, "old");
+      c.put({ value: 3 }, "no-time"); // never written by this page, but old data can be odd
+      c.put({ value: 4, fetchedAt: "soon" }, "odd-time");
+      tx.objectStore("scans").put({ id: "p1" }, "sum|p1");
+      tx.oncomplete = () => (req.result.close(), resolve());
+    };
+    req.onerror = () => reject(req.error);
+  });
+  const counts = new IndexedDbBackend("counts", idb);
+  // Records the index can't see would never be pruned, so the upgrade drops them.
+  assert.deepEqual(await counts.getMany(["new", "old", "no-time", "odd-time"]),
+    [{ value: 1, fetchedAt: 100 }, { value: 2, fetchedAt: 10 }, null, null]);
+  assert.deepEqual(await new IndexedDbBackend("scans", idb).get("sum|p1"), { id: "p1" }); // saved scans untouched
+  assert.equal(await counts.prune(50), 1);
+});
+
+class FakeStorage {
+  constructor() {
+    this.data = new Map();
+  }
+  getItem(k) {
+    return this.data.get(k) ?? null;
+  }
+  setItem(k, v) {
+    this.data.set(k, String(v));
+  }
+}
+
+test("pruneDaily prunes at most once a day", async () => {
+  const clock = { t: 100 * 86400 };
+  const backend = new MemoryBackend();
+  const cache = new ProfileCache({ backend, ttlDays: 7, now: () => clock.t });
+  const storage = new FakeStorage();
+  await backend.set("old", { fetchedAt: clock.t - 40 * 86400 });
+  assert.equal(await cache.pruneDaily(storage), 1);
+  await backend.set("old2", { fetchedAt: clock.t - 40 * 86400 });
+  clock.t += 3600;
+  assert.equal(await cache.pruneDaily(storage), null); // pruned an hour ago: skipped
+  assert.ok(await backend.get("old2"));
+  clock.t += 86400;
+  assert.equal(await cache.pruneDaily(storage), 1);
+  // Storage that can't be read or written (blocked) doesn't stop pruning.
+  const blocked = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } };
+  assert.equal(await cache.pruneDaily(blocked), 0);
 });

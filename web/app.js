@@ -1474,9 +1474,9 @@ function init() {
   }
   const opts = readOptions();
   showOptions(opts);
-  // Clearing out old records walks the whole store, and the scan's own reads would queue
-  // behind it (long enough, on a big store, to switch saved results off for the run).
-  const pruned = openCache(opts.cacheDays).prune();
+  // Clear out old saved results, at most once a day. A share link's scan waits for it, so
+  // its own reads don't queue behind the prune.
+  const pruned = openCache(opts.cacheDays).pruneDaily();
   renderSaved();
   if (post) {
     $("post").value = post;

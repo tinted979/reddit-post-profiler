@@ -59,7 +59,10 @@ export class MemoryBackend {
 
 // Named before the project became Reddit Post Profiler; kept so visitors' saved data survives.
 const DB_NAME = "reddit-tool";
-const DB_VERSION = 2; // 1: counts; 2: + scans
+const DB_VERSION = 3; // 1: counts; 2: + scans; 3: + a fetchedAt index on counts
+// When saved results were last pruned (epoch seconds), so it happens at most once a day.
+// Named like the page's other localStorage keys.
+export const PRUNE_KEY = "reddit-tool-pruned";
 const STORES = ["counts", "scans"];
 
 // One connection per IndexedDB factory, shared by every store.
@@ -73,6 +76,20 @@ function openDb(idb) {
     req.onupgradeneeded = () => {
       for (const name of STORES) {
         if (!req.result.objectStoreNames.contains(name)) req.result.createObjectStore(name);
+      }
+      // Saved results by when they were fetched, so pruning finds the old ones without
+      // reading every record. A record without a numeric fetchedAt would never be found
+      // (it's missing from the index, or sorts after every number), so drop those now, once.
+      const counts = req.transaction.objectStore("counts");
+      if (!counts.indexNames.contains("fetchedAt")) {
+        counts.createIndex("fetchedAt", "fetchedAt");
+        const cursor = counts.openCursor();
+        cursor.onsuccess = () => {
+          const c = cursor.result;
+          if (!c) return;
+          if (!Number.isFinite(c.value?.fetchedAt)) c.delete();
+          c.continue();
+        };
       }
     };
     req.onsuccess = () => {
@@ -160,14 +177,20 @@ export class IndexedDbBackend {
     return n;
   }
 
+  // With the fetchedAt index (the counts store), only the keys of records fetched before
+  // `cutoff` are walked, and nothing is read; without it, every record is.
   async prune(cutoff) {
     let n = 0;
     await this._run("readwrite", (s) => {
-      const req = s.openCursor();
+      const byTime = s.indexNames.contains("fetchedAt");
+      const req = byTime ? s.index("fetchedAt").openKeyCursor(IDBKeyRange.upperBound(cutoff, true)) : s.openCursor();
       req.onsuccess = () => {
         const cursor = req.result;
         if (!cursor) return;
-        if (!(cursor.value?.fetchedAt >= cutoff)) {
+        if (byTime) {
+          s.delete(cursor.primaryKey);
+          n++;
+        } else if (!(cursor.value?.fetchedAt >= cutoff)) {
           cursor.delete();
           n++;
         }
@@ -248,6 +271,26 @@ export class ProfileCache {
     } catch {
       return 0;
     }
+  }
+
+  // prune(), at most once a day (`storage`, localStorage by default, remembers when):
+  // there's no need to look on every page load. Returns how many were deleted, or null if
+  // it was skipped. Storage that can't be used doesn't stop it.
+  async pruneDaily(storage = globalThis.localStorage) {
+    let last = NaN;
+    try {
+      last = Number(storage?.getItem(PRUNE_KEY));
+    } catch {
+      // blocked: prune anyway
+    }
+    if (this._now() - last < DAY) return null;
+    const n = await this.prune();
+    try {
+      storage?.setItem(PRUNE_KEY, String(this._now()));
+    } catch {
+      // blocked: prune again next time
+    }
+    return n;
   }
 
   // Delete records older than `maxAgeDays` (default: the TTL, but at least 30 days, so
