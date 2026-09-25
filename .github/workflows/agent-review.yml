@@ -1,0 +1,114 @@
+name: Agent review
+
+# Read-only AI reviewers. They run once per PR, when the owner opens it ready or marks a draft
+# ready, and only after the tests pass. The general reviewer always runs (README- and plan-only
+# PRs aside); specialists join when the diff touches their area (.github/scripts/review-route.sh).
+# A review:<role> label runs, or re-runs, one reviewer on demand. New pushes don't re-trigger.
+#
+# They use the job's GITHUB_TOKEN, not the Claude App, so `permissions:` below is a hard
+# ceiling: a reviewer can comment, and nothing else, whatever its prompt says. There's no
+# id-token, so the run can't be exchanged for the App's write token either.
+#
+# On a PR, claude-code-action restores .claude/ and CLAUDE.md from the base branch (the PR's
+# own versions are kept under .claude-pr/ for reference), so a PR can't rewrite the rules or the
+# reviewer it's reviewed by. Roles whose agent file isn't on the base branch yet are skipped.
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, labeled]
+
+permissions: {}
+
+jobs:
+  gate:
+    if: >-
+      vars.AGENTS_ENABLED == 'true' &&
+      github.actor == github.repository_owner &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'labeled' || startsWith(github.event.label.name, 'review:'))
+    uses: ./.github/workflows/checks.yml
+    with:
+      guards: false
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+
+  route:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      roles: ${{ steps.pick.outputs.roles }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+        run: |
+          gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only > files.txt
+          gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" > diff.txt
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+            --jq '.[] | select(.status == "added") | .filename' > added.txt
+          wanted=$(bash .github/scripts/review-route.sh files.txt added.txt diff.txt)
+          roles=()
+          for role in $(jq -r '.[]' <<<"$wanted"); do
+            if gh api "repos/$GITHUB_REPOSITORY/contents/.claude/agents/$role.md?ref=$BASE" --silent 2>/dev/null; then
+              roles+=("$role")
+            else
+              echo "::notice::Skipping $role: .claude/agents/$role.md isn't on $BASE yet."
+            fi
+          done
+          echo "roles=$(jq -cn '$ARGS.positional' --args "${roles[@]}")" >> "$GITHUB_OUTPUT"
+
+  review:
+    needs: route
+    if: needs.route.outputs.roles != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        role: ${{ fromJSON(needs.route.outputs.roles) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: review-${{ github.event.pull_request.number }}-${{ matrix.role }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      AGENT_ROLE: ${{ matrix.role }}
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request as the ${{ matrix.role }} agent (.claude/agents/${{ matrix.role }}.md).
+            That file and the finding-format skill (.claude/skills/finding-format/SKILL.md; read it
+            if it isn't already in your context) define what to report and how. CLAUDE.md and
+            .claude/ are the base branch's; the PR's versions of them, if it changes them, are
+            under .claude-pr/. Use `gh pr diff` and `gh pr view`; read changed files in full
+            before commenting on them. Post findings as inline comments, then one summary
+            comment with `gh pr comment`.
+          claude_args: >-
+            --agent ${{ matrix.role }}
+            --max-turns 30
+            --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment"

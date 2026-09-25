@@ -801,6 +801,10 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 > - **The perf-auditor** joins the monthly schedule only once `scan-bench.mjs` exists.
 > - **`archive-check.yml`** (not covered here) is hardened the same way: pinned, with `persist-credentials: false`.
 > - **Tests.** The hook, the rule guards and the issue filer have tests in `.github/scripts/tests/`.
+> - **The review gate runs the tests only** (`checks.yml` with `guards: false`). With the full checks in front of it, the security reviewer could never run before `ack:sensitive`, though §3.6 says you read it before adding that label. `ci.yml` still enforces the guards at merge.
+> - **The review router is a script,** `.github/scripts/review-route.sh`, with tests. Before running a role, `agent-review.yml` checks that its `.claude/agents/<role>.md` exists on the base branch. The action removes base-restored paths that the base lacks, so a new role can't run until it's merged (including on the PR that adds it). This also makes later stages' roles switch on without editing the workflow.
+> - **Reviewers don't get `node --test`.** `checks / test` has already run the tests, and the reviewers skip anything the checks enforce.
+> - **`test-integrity.sh` exits 2 when it can't count tests** (a checkout, `npm ci` or uv failure), so a setup failure doesn't pass as a lower count. `pr-guards.sh` reports exit 2 as its own error, and `ack:tests` doesn't waive it.
 > - **`pr-guards.sh` covers every `claude/*` branch,** including interactive sessions' `claude/<topic>` branches. The owner's `ack:` labels waive it the same way.
 
 These are complete, working drafts. The workflows pass `actionlint` 1.7.12 (ignoring only its unknown-key error for `queue`) and `zizmor` 1.30.1 at medium severity. The scripts were run against this repository: the rule guards pass on today's code and fail on injected violations; the test-integrity check caught a deleted test and an added `test.skip`; the hook blocked, asked and allowed as intended; the issue filer respected its cap, severity order and de-duplication. Action SHAs were resolved on 25 Sept 2026.
