@@ -31,6 +31,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: web/.nvmrc
+          package-manager-cache: false
       - name: Web tests
         working-directory: web
         # fake-indexeddb is the one (dev-only) dependency: the tests run the real IndexedDB
@@ -39,6 +40,8 @@ jobs:
           npm ci
           npm test
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false # no cache to poison: nothing restored, nothing saved
       - name: Dump tool tests
         # The command in CLAUDE.md, with duckdb kept below its next major version.
         run: uv run --python 3.12 --with "duckdb>=1.1,<2" --with pytest pytest tools -q
@@ -65,7 +68,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: web/.nvmrc
+          package-manager-cache: false
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false # no cache to poison: nothing restored, nothing saved
       # Order matters: nothing from the PR runs until pr-guards.sh has given its verdict and
       # the workflows are linted. Only the last step, the test count, runs the PR's own code.
       - name: Take the guard scripts from the base branch
