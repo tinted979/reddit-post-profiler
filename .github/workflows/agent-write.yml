@@ -1,0 +1,135 @@
+name: Agent write
+
+# The only workflow whose agents change code, and the owner starts every run:
+#   - label an issue agent:implement or agent:refactor (or dispatch with an issue number);
+#   - comment "@claude ..." on a PR to have the implementer revise it.
+# Writers push only claude/* branches and open draft PRs; one writer runs at a time, repo-wide.
+# They push with the Claude App's token, whose pushes and PRs trigger CI (GITHUB_TOKEN's don't)
+# but can never merge: the main rulesets need the owner's code-owner approval and green checks.
+# The path hook (.claude/hooks/guard-paths.mjs, restored from the base branch) blocks edits to
+# CLAUDE.md, .claude/ and .github/ when AGENT_ROLE is set, and existing tests for the refactorer.
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to work on
+        type: number
+        required: true
+      role:
+        description: Which writer
+        type: choice
+        options: [implementer, refactorer]
+        default: implementer
+
+permissions: {}
+
+jobs:
+  from-issue:
+    if: >-
+      vars.AGENTS_ENABLED == 'true' &&
+      github.actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'issues' &&
+        (github.event.label.name == 'agent:implement' || github.event.label.name == 'agent:refactor')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # queue: max keeps every waiting run; by default a third queued run cancels the pending one.
+    concurrency:
+      group: agent-write
+      queue: max
+    permissions:
+      contents: read      # GITHUB_TOKEN stays read-only: pushes and PRs use the Claude App's token,
+      issues: read        # which can't merge (see the main rulesets)
+      pull-requests: read
+      id-token: write     # lets the action exchange an OIDC token for the Claude App token
+    env:
+      ISSUE: ${{ inputs.issue || github.event.issue.number }}
+      AGENT_ROLE: ${{ inputs.role || (github.event.label.name == 'agent:refactor' && 'refactorer' || 'implementer') }}
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+    steps:
+      - name: Only work from issues the owner wrote or an audit filed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          author=$(gh issue view "$ISSUE" --repo "$GITHUB_REPOSITORY" --json author --jq .author.login)
+          case "$author" in
+            "$GITHUB_REPOSITORY_OWNER"|github-actions|app/github-actions) ;;
+            *) echo "::error::#$ISSUE was written by $author. Restate it as your own issue first."; exit 1 ;;
+          esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: web/.nvmrc
+      - name: Install the web tests' dev dependency
+        working-directory: web
+        run: npm ci
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Python for the dump tool tests (python -m pytest)
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/py"
+          uv pip install --python "$RUNNER_TEMP/py" "duckdb>=1.1,<2" pytest
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+      - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            ISSUE: ${{ env.ISSUE }}
+
+            Work on issue #${{ env.ISSUE }} as the ${{ env.AGENT_ROLE }} agent (.claude/agents/${{ env.AGENT_ROLE }}.md),
+            which says how to work and what "done" is. Read the issue with `gh issue view ${{ env.ISSUE }}`.
+            Create a new branch with `git switch -c claude/${{ env.ISSUE }}-<short-slug>`, push only
+            to it with `git push -u origin`, and open the PR with `gh pr create --draft --base main`.
+            Run the web tests with `npm --prefix web test`.
+          claude_args: >-
+            --agent ${{ env.AGENT_ROLE }}
+            --max-turns 80
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(python -m pytest:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git switch -c claude/*),Bash(git add:*),Bash(git commit:*),Bash(git push -u origin claude/*),Bash(gh issue view ${{ env.ISSUE }}),Bash(gh issue comment ${{ env.ISSUE }}:*),Bash(gh pr list:*),Bash(gh pr create:*)"
+
+  follow-up:
+    if: >-
+      vars.AGENTS_ENABLED == 'true' &&
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      github.event.comment.user.login == github.repository_owner &&
+      contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: agent-write
+      queue: max
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      id-token: write
+    env:
+      AGENT_ROLE: implementer
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: web/.nvmrc
+      - name: Install the web tests' dev dependency
+        working-directory: web
+        run: npm ci
+      # No prompt: tag mode. The action reads the owner's comment, checks out the PR branch and
+      # pushes follow-up commits to it. Only the owner's and the reviewers' (github-actions[bot])
+      # comments are passed to Claude, so nobody else can steer it through the PR thread.
+      - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          include_comments_by_actor: ${{ github.repository_owner }},github-actions[bot]
+          claude_args: >-
+            --agent implementer
+            --max-turns 40
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*)"
