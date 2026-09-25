@@ -26,7 +26,10 @@ if [ "$lines" -gt 600 ]; then
   owner_ack ack:large || { echo "::error::$lines changed lines. Split the PR, or add ack:large."; fail=1; }
 fi
 
-if ! bash "$(dirname "$0")/test-integrity.sh" "$base"; then
-  owner_ack ack:tests || { echo "::error::Tests were removed or skipped. If that's intended, add ack:tests."; fail=1; }
-fi
+bash "$(dirname "$0")/test-integrity.sh" "$base"
+case $? in
+  0) ;;
+  1) owner_ack ack:tests || { echo "::error::Tests were removed or skipped. If that's intended, add ack:tests."; fail=1; } ;;
+  *) echo "::error::The tests couldn't be counted (see above). ack:tests doesn't waive this; re-run the job."; fail=1 ;;
+esac
 exit $fail

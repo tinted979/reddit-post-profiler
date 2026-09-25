@@ -1,5 +1,6 @@
 // test-integrity.sh compares a change with its base in a throwaway git repository: fewer
-// tests, or a new skip/only/todo marker, fails; more tests pass.
+// tests, or a new skip/only/todo marker, fails (exit 1); more tests pass; and a count it can't
+// make, because npm ci fails, is an error of its own (exit 2) rather than a drop.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -18,7 +19,8 @@ function git(dir, ...args) {
 const testFile = (bodies) => `import { test } from "node:test";\n${bodies.join("\n")}\n`;
 const ok = (name) => `test("${name}", () => {});`;
 
-// A repository whose base commit has two web tests; `change` edits it for the second commit.
+// A repository whose base commit has two web tests; `change(testFile, webDir)` edits it for the
+// second commit.
 function withRepo(change, check) {
   const dir = mkdtempSync(join(tmpdir(), "test-integrity-"));
   try {
@@ -31,7 +33,7 @@ function withRepo(change, check) {
     git(dir, "init", "-q");
     git(dir, "add", "-A");
     git(dir, "commit", "-qm", "base");
-    change(join(dir, "web", "tests", "a.test.js"));
+    change(join(dir, "web", "tests", "a.test.js"), join(dir, "web"));
     git(dir, "commit", "-qam", "change");
     const r = spawnSync("bash", [script, "HEAD^1"], { cwd: dir, encoding: "utf8" });
     check({ status: r.status, out: r.stdout + r.stderr });
@@ -58,5 +60,16 @@ test("a skipped test fails even though the count holds", () => {
   withRepo((f) => writeFileSync(f, testFile([ok("one"), 'test.skip("two", () => {});'])), (r) => {
     assert.equal(r.status, 1, r.out);
     assert.match(r.out, /marked skip\/only\/todo/);
+  });
+});
+
+test("npm ci failing is an error, not a drop in the count", () => {
+  // A dependency missing from the lockfile makes npm ci refuse, without touching the network.
+  const unsynced = (_, web) =>
+    writeFileSync(join(web, "package.json"), JSON.stringify({ name: "x", private: true, devDependencies: { "left-pad": "1.3.0" } }));
+  withRepo(unsynced, (r) => {
+    assert.equal(r.status, 2, r.out);
+    assert.match(r.out, /npm ci failed/);
+    assert.doesNotMatch(r.out, /count dropped/);
   });
 });
