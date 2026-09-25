@@ -90,7 +90,7 @@ unless *Only the N most active commenters* was set when the link was added.
 Every scan you run (or stop after some users are profiled) is listed under *Saved scans*,
 newest first, with its post, how many users were profiled, how many are regular, occasional
 or new to the subreddit, failures, the subreddits they're active in, and when it ran, how
-many requests it made and how long it took. Click a post to see its users again exactly as
+many requests it made (to Arctic Shift and to the archive files) and how long it took. Click a post to see its users again exactly as
 they were, with no requests; *Scan again* runs it again with the same options (reusing
 saved results where it can), and *Delete* removes it. A new scan of a post replaces its
 saved one.
@@ -233,6 +233,11 @@ The page spaces request starts by `delay` and caps how many are in flight, start
 `par`: the cap halves on a 429, slow-down or network error, and rises again after a run of
 successes.
 
+Archive file reads are byte-range requests to the R2 bucket, served through Cloudflare's
+cache, so they aren't paced like Arctic Shift's. The status line counts both kinds while a
+scan runs and when it ends ("… 120 Arctic Shift requests and 15 archive requests"), and
+saved scans keep both counts.
+
 ## Development
 
 ```sh
@@ -252,6 +257,11 @@ Pages only works for public repositories.
 
 Work happens on other branches and reaches `main` through pull requests, so the live site
 only changes when a pull request is merged.
+
+The archive files are built with `tools/build_dumps.py` and uploaded with
+`tools/upload_dumps.sh`, which also checks the public URL serves them correctly (range
+requests, CORS for the page's origin only, no compression). The bucket's Cloudflare
+settings are listed in [CLAUDE.md](CLAUDE.md#subreddit-dumps-in-progress).
 
 `.github/workflows/code-review.yml` has Claude review each pull request once when it's
 opened, reopened or marked ready for review (drafts wait), and post its findings as inline

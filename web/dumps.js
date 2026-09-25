@@ -19,12 +19,14 @@ export class DumpUnavailable extends Error {}
 
 // Reads a remote file with range requests, keeping what it has fetched. Each range read
 // (hyparquet's `slice`) gets its own timeout via a custom `fetch`, on top of the run's
-// Stop signal, so a stalled connection can't hang a read forever.
-async function urlFile(url, byteLength, signal, timeoutMs = 20000) {
+// Stop signal, so a stalled connection can't hang a read forever. `onRequest` is called
+// once per request sent, for the scan's request count.
+async function urlFile(url, byteLength, signal, timeoutMs = 20000, { fetchFn = (...a) => globalThis.fetch(...a), onRequest = null } = {}) {
   const fetchWithTimeout = (input, init) => {
     const timeout = AbortSignal.timeout(timeoutMs);
     const merged = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
-    return globalThis.fetch(input, { ...init, signal: merged });
+    onRequest?.();
+    return fetchFn(input, { ...init, signal: merged });
   };
   return cachedAsyncBuffer(await asyncBufferFromUrl({
     url, byteLength, requestInit: { signal: signal ?? undefined }, fetch: fetchWithTimeout,
@@ -60,7 +62,10 @@ export function parseManifest(data) {
 }
 
 export class DumpSource {
-  constructor(subs, { baseUrl = DUMPS_URL, openFile = urlFile, signal = null, readTimeoutMs = 20000 } = {}) {
+  constructor(subs, {
+    baseUrl = DUMPS_URL, openFile = urlFile, signal = null, readTimeoutMs = 20000,
+    fetchFn = (...a) => globalThis.fetch(...a), onRequest = null,
+  } = {}) {
     this.baseUrl = baseUrl;
     this.signal = signal;
     this.broken = false; // a read failed: leave the files alone for the rest of the scan
@@ -69,23 +74,28 @@ export class DumpSource {
     this.readTimeoutMs = readTimeoutMs;
     this._subs = subs;
     this._openFile = openFile;
+    this._fetchFn = fetchFn;
+    this._onRequest = onRequest; // called once per request sent to the archive server
     this._files = new Map(); // path -> Promise<{file, metadata}>
     this._lookups = new Map(); // "kind|sub|author" -> Promise<number[]>, for this scan
   }
 
   // The archive, or null if there's no usable manifest (missing, unreachable, slow,
   // malformed, or covering nothing). Throws Aborted only when `signal` aborts.
+  // `onRequest` is called once per request sent to the archive server, the manifest's
+  // included (even when it leads to null), so the page can count them.
   static async open({
     baseUrl = DUMPS_URL, fetchFn = (...a) => globalThis.fetch(...a), openFile = urlFile,
-    signal = null, timeoutMs = 5000, readTimeoutMs = 20000,
+    signal = null, timeoutMs = 5000, readTimeoutMs = 20000, onRequest = null,
   } = {}) {
     if (signal?.aborted) throw new Aborted("stopped");
     try {
       const timeout = AbortSignal.timeout(timeoutMs);
+      onRequest?.();
       const resp = await fetchFn(`${baseUrl}/manifest.json`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
       if (!resp.ok) return null;
       const subs = parseManifest(await resp.json());
-      return subs.size ? new DumpSource(subs, { baseUrl, openFile, signal, readTimeoutMs }) : null;
+      return subs.size ? new DumpSource(subs, { baseUrl, openFile, signal, readTimeoutMs, fetchFn, onRequest }) : null;
     } catch {
       if (signal?.aborted) throw new Aborted("stopped");
       return null;
@@ -154,7 +164,9 @@ export class DumpSource {
     let opened = this._files.get(f.path);
     if (!opened) {
       opened = (async () => {
-        const file = await this._openFile(`${this.baseUrl}/${f.path}`, f.bytes, this.signal, this.readTimeoutMs);
+        const file = await this._openFile(`${this.baseUrl}/${f.path}`, f.bytes, this.signal, this.readTimeoutMs, {
+          fetchFn: this._fetchFn, onRequest: this._onRequest,
+        });
         // The footer is a few KB; hyparquet's default first read is the last 512 KB.
         return { file, metadata: await parquetMetadataAsync(file, { initialFetchSize: 64 * 1024 }) };
       })();

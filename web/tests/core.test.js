@@ -1040,7 +1040,7 @@ const savedScan = () => {
   return {
     summary: {
       id: POST.id, post: { ...POST, numComments: 5 }, scannedAt: POST.createdUtc + 86400, complete: true, total: 3,
-      thread: { comments: 5, people: 3 }, requests: 9, seconds: 12.5, profilingSeconds: 10, fromSaved: 1, after: null,
+      thread: { comments: 5, people: 3 }, requests: 9, archiveRequests: 4, seconds: 12.5, profilingSeconds: 10, fromSaved: 1, after: null,
       beforeKnown: true, opts: { only: [], years: null, maxUsers: null, includeOp: false, exclude: [] },
       stats: { bogus: true }, facts: "bogus",
     },
@@ -1058,6 +1058,7 @@ test("saved scans round-trip through an export file, with stats worked out again
   assert.deepEqual(summary.stats, scanStats(sampleProfiles(), summary.post));
   assert.deepEqual(summary.facts, badgeFacts(sampleProfiles(), summary.post));
   assert.equal(summary.seconds, 12.5);
+  assert.deepEqual([summary.requests, summary.archiveRequests], [9, 4]);
   // Exports from before the rename still import.
   const old = text.replace('"kind":"rpp-saved-scans"', '"kind":"reddit-tool-saved-scans"');
   assert.notEqual(old, text);
@@ -1086,9 +1087,13 @@ test("imported scans are checked", () => {
   assert.deepEqual([scans.length, invalid], [1, 1]);
   // Odd optional fields are tidied, not trusted.
   const odd = savedScan();
-  Object.assign(odd.summary, { requests: "lots", total: 1, opts: { years: 3, only: ["ok", "no way"], maxUsers: -1 } });
+  Object.assign(odd.summary, { requests: "lots", archiveRequests: -2, total: 1, opts: { years: 3, only: ["ok", "no way"], maxUsers: -1 } });
   const { summary } = importScan(odd);
-  assert.deepEqual([summary.requests, summary.total, summary.opts.years, summary.opts.only, summary.opts.maxUsers], [0, 3, null, ["ok"], null]);
+  assert.deepEqual([summary.requests, summary.archiveRequests, summary.total, summary.opts.years, summary.opts.only, summary.opts.maxUsers], [0, null, 3, null, ["ok"], null]);
+  // Scans saved before archive requests were counted import with none.
+  const older = savedScan();
+  delete older.summary.archiveRequests;
+  assert.equal(importScan(older).summary.archiveRequests, null);
 });
 
 test("ScanStore exports every scan and imports only newer copies", async () => {
