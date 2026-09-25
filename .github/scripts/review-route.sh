@@ -25,8 +25,9 @@ roles='["pr-reviewer"'
 if grep -qE '^(\.github/|\.claude/|tools/.*\.sh$|tools/r2-cors\.json$|web/index\.html$)' <<<"$files"; then
   roles+=',"security-reviewer"'
 fi
-# Architecture: the grounding docs, a new module in web/, or a storage schema change.
-if grep -qE '^(CLAUDE\.md$|WORKFLOW\.md$|docs/adr/)' <<<"$files" ||
+# Architecture: the grounding docs (CLAUDE.md, the path-scoped rules, WORKFLOW.md, ADRs), a new
+# module in web/, or a storage schema change.
+if grep -qE '^(CLAUDE\.md$|\.claude/rules/|WORKFLOW\.md$|docs/adr/)' <<<"$files" ||
    grep -qE '^web/[^/]+$' <<<"$added" ||
    grep -qE '^[+-].*\b(DB_VERSION|STORES)\b' "$diff_file"; then
   roles+=',"architecture-reviewer"'

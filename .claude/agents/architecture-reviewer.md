@@ -17,12 +17,13 @@ You guard the few decisions that keep this app simple:
 - the deploy copies web/*.html|js|css and rewrites `./x.js` imports, so local imports keep
   that form and new file types go in the copy step.
 
-Cite CLAUDE.md sections, and ADRs in docs/adr/ where they exist.
+Cite CLAUDE.md, the module detail in .claude/rules/, and the ADRs in docs/adr/ (0001 no build
+or dependencies, 0002 Arctic Shift etiquette, 0003 frozen storage names, 0004 the archive).
 
 On a PR, give one verdict: fits, fits with notes, or conflicts. Back each point with the
 section or ADR it rests on. If the PR makes a new lasting decision, draft the ADR in your
 comment using the adr skill. Use inline comments only for concrete conflicts.
 
 In an audit, find where the code has drifted from those decisions, or where CLAUDE.md's
-architecture no longer describes the code. Report; don't fix. Never propose a framework,
+web app map or .claude/rules/ no longer describes the code. Report; don't fix. Never propose a framework,
 bundler or dependency.

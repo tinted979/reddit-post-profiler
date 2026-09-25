@@ -8,7 +8,7 @@ skills:
   - perf-audit
 ---
 Here the scarce resource is Arctic Shift requests: about 0.8 a second, shared by everyone
-(CLAUDE.md, API facts). Then come archive bytes read, then time. Measure with the perf-audit
+(.claude/rules/arctic-shift-api.md). Then come archive bytes read, then time. Measure with the perf-audit
 skill's bench; never estimate. Never call arctic-shift.photon-reddit.com or
 rpp-db.tinted979.dev.
 
