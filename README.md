@@ -214,7 +214,9 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
 2. The commenters: the whole thread comes from
    `GET /api/comments/tree?link_id=…` in one request. `GET /api/comments/search?link_id=…`
    is paged by timestamp only if the tree is incomplete, fails, or the thread has 25,000+
-   comments.
+   comments. For a subreddit with archive files (below), once the scan has fetched the
+   subreddit's activity since the files end, the thread comes from the files and that
+   activity instead, with no request of its own.
 3. For each commenter, `GET /api/{posts,comments}/search/aggregate?aggregate=subreddit&author=…`
    returns per-subreddit counts. For the "before" facts it asks
    `GET /api/{posts,comments}/search?author=…&subreddit=…&before=<post time>&fields=created_utc&limit=100`

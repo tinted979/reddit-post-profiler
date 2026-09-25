@@ -39,9 +39,9 @@ There is no linter or formatter for the code; CI lints only shell scripts (shell
 
 Detail for each module loads from `.claude/rules/` when you open its files. Every module but `app.js` has no DOM access.
 
-- **`core.js`:** `ArcticShiftClient` (pacing, AIMD backoff, `meta-app`), commenters, `buildProfile` (lifetime counts and "before" facts, from the API or the archive), badges, scan estimates, CSV and saved-scan files, `Eta`. No DOM. (`web-core.md`, and the verified API behaviour in `arctic-shift-api.md`.)
+- **`core.js`:** `ArcticShiftClient` (pacing, AIMD backoff, `meta-app`), commenters, a covered subreddit's tail (`fetchTails`, once per scan), `buildProfile` (lifetime counts and "before" facts, from the API or the archive), badges, scan estimates, CSV and saved-scan files, `Eta`. No DOM. (`web-core.md`, and the verified API behaviour in `arctic-shift-api.md`.)
 - **`cache.js`:** IndexedDB `reddit-tool` with the `counts` (`ProfileCache`) and `scans` (`ScanStore`) stores; **`queue.js`:** `LinkQueue` in localStorage, run by one tab at a time. (`web-storage.md`.)
-- **`dumps.js`:** `DumpSource`, the per-subreddit Parquet archive on R2, read with hyparquet range requests; **`hyparquet.js`:** a saved copy, never edited; **`tools/`:** builds, uploads and checks the archive. (`archive.md`.)
+- **`dumps.js`:** `DumpSource`, the per-subreddit Parquet archive on R2, read with hyparquet range requests, and `TailStore`, the tab's tails of activity after the files end; **`hyparquet.js`:** a saved copy, never edited; **`tools/`:** builds, uploads and checks the archive. (`archive.md`.)
 - **`options.js`** (scan options and share links), **`format.js`** (text helpers), **`app.js`** (the DOM only: runs, cards, the scheduler, saved scans). (`web-app.md`.)
 
 ## Rules for changes

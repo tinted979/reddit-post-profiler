@@ -12,6 +12,9 @@ export const DUMPS_URL = "https://rpp-db.tinted979.dev";
 export const DUMP_FORMAT = 1;
 // The file for each kind, as named in the manifest.
 const FILES = { posts: "posts_by_author", comments: "comments_by_author" };
+// Each thread's comments (link_id, author as written, time), sorted by thread. Optional: a
+// subreddit without it is still covered, and its threads come from the API.
+const LINK_FILE = "comments_by_link";
 // Where a manifest may point: r/<subreddit>/<version>/<name>.parquet under the base URL.
 const FILE_PATH = /^r\/\w{2,21}\/\w[\w.-]{0,39}\/\w+\.parquet$/;
 const isTime = (n) => Number.isSafeInteger(n) && n > 0;
@@ -65,6 +68,11 @@ export function parseManifest(data, now = Date.now() / 1000) {
       }
     }
     if (!files.posts || !files.comments) continue;
+    const link = s.files?.[LINK_FILE];
+    if (typeof link?.path === "string" && FILE_PATH.test(link.path) && link.path.startsWith(`r/${key}/`) &&
+      Number.isSafeInteger(link.bytes) && link.bytes > 0) {
+      files.link = { path: link.path, bytes: link.bytes };
+    }
     subs.set(key, {
       name: s.name,
       postsThrough: s.posts_to_utc - INGEST_LAG,
@@ -78,11 +86,11 @@ export function parseManifest(data, now = Date.now() / 1000) {
 // Activity in covered subreddits after their files end, fetched by core.js's fetchTails once
 // per scan rather than once per commenter, and kept for the tab so the next scan asks only
 // for what's new. Per subreddit and kind: the files' cutoff it follows (`base`; a new build
-// starts afresh), how far it's complete (`through`), the ids seen (to drop repeats), and each
-// author's times.
+// starts afresh), how far it's complete (`through`), the ids seen (to drop repeats), each
+// author's times, and for comments, each thread's ({author, created_utc}).
 export class TailStore {
   constructor() {
-    this._tails = new Map(); // "kind|sub" -> {base, through, ids, times}
+    this._tails = new Map(); // "kind|sub" -> {base, through, ids, times, links}
   }
 
   // The tail following files trusted to `base`, or null.
@@ -96,7 +104,7 @@ export class TailStore {
   open(kind, key, base) {
     let t = this.find(kind, key, base);
     if (!t) {
-      t = { base, through: base, ids: new Set(), times: new Map() };
+      t = { base, through: base, ids: new Set(), times: new Map(), links: new Map() };
       this._tails.set(`${kind}|${key}`, t);
     }
     return t;
@@ -112,6 +120,7 @@ export class DumpSource {
     this.signal = signal;
     this.broken = false; // a read failed: leave the files alone for the rest of the scan
     this.reads = 0; // successful timestamps() calls, for the end-of-scan note
+    this.threadReads = 0; // successful threadRows() calls, likewise
     this.lifetimeReads = 0; // times core.js's archiveLifetime answered, for the end-of-scan note
     this.readTimeoutMs = readTimeoutMs;
     this._subs = subs;
@@ -190,10 +199,11 @@ export class DumpSource {
     return t && t.through > base ? Math.max(base, t.through - INGEST_LAG) : base;
   }
 
-  // Adds a page of fetched rows ({id, author, created_utc}) to a subreddit's tail. The API's
-  // rows are untrusted: ones without an id, author or time, by the accounts the archive
-  // leaves out, from before the files end, or already seen are dropped.
-  addTail(kind, subreddit, rows) {
+  // Adds a page of fetched rows ({id, author, created_utc, link_id}) to a subreddit's tail.
+  // The API's rows are untrusted: ones without an id, author or time, by the accounts the
+  // archive leaves out, from before the files end, dated more than a day past `now` (epoch
+  // seconds, as a manifest's cutoffs are checked), or already seen are dropped.
+  addTail(kind, subreddit, rows, { now = Date.now() / 1000 } = {}) {
     const key = String(subreddit).toLowerCase();
     const t = this._tails.open(kind, key, filesThrough(this._subs.get(key), kind));
     for (const row of rows) {
@@ -201,11 +211,17 @@ export class DumpSource {
       const author = row?.author;
       const time = Math.trunc(Number(row?.created_utc));
       if (typeof id !== "string" || !id || t.ids.has(id) || typeof author !== "string" || !author) continue;
-      if (SKIPPED.has(author.toLowerCase()) || !isTime(time) || time <= t.base) continue;
+      if (SKIPPED.has(author.toLowerCase()) || !isTime(time) || time <= t.base || time > now + CLOCK_SLACK) continue;
       t.ids.add(id);
       const times = t.times.get(author.toLowerCase());
       if (times) times.push(time);
       else t.times.set(author.toLowerCase(), [time]);
+      if (kind === "comments" && typeof row.link_id === "string") {
+        const link = row.link_id.replace(/^t3_/, "");
+        const thread = t.links.get(link);
+        if (thread) thread.push({ author, created_utc: time });
+        else t.links.set(link, [{ author, created_utc: time }]);
+      }
     }
   }
 
@@ -253,6 +269,34 @@ export class DumpSource {
       if (!tail) return saved.sort((a, b) => a - b);
       const recent = tail.times.get(String(author).toLowerCase()) ?? [];
       return [...saved.filter((t) => t <= tail.base), ...recent].sort((a, b) => a - b);
+    } catch (err) {
+      if (this.signal?.aborted) throw new Aborted("stopped");
+      this.broken = true;
+      throw new DumpUnavailable(`archive file ${f.path}: ${err?.message ?? err}`);
+    }
+  }
+
+  // The comments under post `linkId` ({author, created_utc}, author as written): the thread's
+  // rows in the subreddit's comments_by_link file, and in its tail (once there's a tail, the
+  // file counts only up to where it's trusted, as in `timestamps`). Throws Aborted once
+  // stopped, else DumpUnavailable: when there's no such file, or when it can't be read, which
+  // switches the source off like any failed read.
+  async threadRows(subreddit, linkId) {
+    const key = String(subreddit).toLowerCase();
+    const s = this._subs.get(key);
+    const f = s?.files.link;
+    if (!f || this.broken) throw new DumpUnavailable(`no usable thread file for r/${subreddit}`);
+    const tail = this._tails.find("comments", key, s.commentsThrough);
+    try {
+      const { file, metadata } = await this._race(this._open(f));
+      const rows = await this._race(parquetQuery({
+        file, metadata, columns: ["link_id", "author", "created_utc"], filter: { link_id: { $eq: String(linkId) } },
+      }));
+      this.threadReads++;
+      const saved = rows
+        .map((r) => ({ author: r.author, created_utc: Number(r.created_utc) }))
+        .filter((r) => typeof r.author === "string" && r.author && isTime(r.created_utc) && (!tail || r.created_utc <= tail.base));
+      return [...saved, ...(tail?.links.get(String(linkId)) ?? [])];
     } catch (err) {
       if (this.signal?.aborted) throw new Aborted("stopped");
       this.broken = true;
