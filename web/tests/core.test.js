@@ -161,6 +161,25 @@ test("getPost rejects a post it can't use rather than scanning with NaN times", 
   }
 });
 
+test("getPost accepts a post on a user profile whose name has a hyphen or is 20 characters", async () => {
+  for (const subreddit of ["u_some-user", "u_abcdefghijklmnopqrst", "u_a-b_c-d-e-f-g-h-i-j"]) {
+    const { client } = makeClient(() =>
+      json({ data: [{ id: "abc123", author: subreddit.slice(2), subreddit, created_utc: 1700000000, title: "t", num_comments: 3 }] }),
+    );
+    const post = await client.getPost("abc123");
+    assert.equal(post.subreddit, subreddit);
+    assert.ok(importScan({ summary: { id: "abc123", post: { ...post }, scannedAt: 1700000100 }, profiles: [] }), subreddit);
+  }
+});
+
+test("getPost still rejects names that can't be a subreddit or a profile", async () => {
+  const good = { id: "abc123", author: "op", subreddit: "Python", created_utc: 1700000000, title: "Hi" };
+  for (const subreddit of ["some-sub", "u_abcdefghijklmnopqrstu", "u_a/b", "x_some-user", "u_-"]) {
+    const { client } = makeClient(() => json({ data: [{ ...good, subreddit }] }));
+    await assert.rejects(client.getPost("abc123"), ArcticShiftError, subreddit);
+  }
+});
+
 test("a reply with no data field is a bad response, not an empty answer", async () => {
   const { client, calls } = makeClient(() => json({}));
   await assert.rejects(client.getPost("abc123"), /bad response/);

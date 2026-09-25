@@ -410,9 +410,10 @@ export class ArcticShiftClient {
     const p = Array.isArray(data) ? data[0] : null;
     if (!p?.subreddit) return null;
     // Every later query is built from these, so a reply that doesn't fit fails here rather
-    // than sending before=NaN or links to the wrong place.
+    // than sending before=NaN or links to the wrong place. A post on a user's profile is in
+    // u_<username>, and usernames (3–20 characters) may contain "-".
     const createdUtc = Math.trunc(Number(p.created_utc));
-    if (p.id !== postId || !/^\w{2,21}$/.test(p.subreddit) || !(createdUtc > 0)) {
+    if (p.id !== postId || !/^(?:\w{2,21}|u_[\w-]{3,20})$/.test(p.subreddit) || !(createdUtc > 0)) {
       throw new ArcticShiftError(`unexpected post record for ${postId}`);
     }
     return {
