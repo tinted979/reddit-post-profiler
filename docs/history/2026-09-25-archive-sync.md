@@ -10,8 +10,8 @@
 >   - P4, the splice builder (#79);
 >   - P5, publishing one subreddit (#80);
 >   - P6, pruning (#81);
->   - P7a, the orchestrator and config (#82).
-> - **Next:** `upload_dumps.sh --only` (the manual path), then P7b, the workflow.
+>   - P7a, the orchestrator and config (#82), and `upload_dumps.sh --only`, the manual path (#83).
+> - **Next:** P7b, the workflow (the owner's).
 > - **Measured** (live, 2026-09-26): an "only" scan of a 53-commenter r/Hasan_Piker post older than the files went from 60 requests to 2 (the post, and one search for the thread's comments after the files), with no per-user requests.
 
 # Fewer Arctic Shift requests: shared subreddit tails, and a scheduled archive sync
@@ -197,7 +197,7 @@ This merges two proposals:
     1. `plan` read the live archive;
     2. `build` downloaded the real r/Hasan_Piker build (131k posts, 1.47M comments) and spliced onto it;
     3. `publish_build.sh` published the bundle to the fake bucket.
-  - `upload_dumps.sh --only` is its own small PR next.
+  - `upload_dumps.sh --only` came as its own small PR (#83). Its rclone, curl and `check_dumps.sh` can now be injected, and it has its first tests.
   - Plan as written:
   - `tools/archive.json`: `{subreddits: {<name>: {cadence}}, overlap: "2h", repair_days: 7, repair_every: "7d", budget}`.
   - `tools/archive_sync.py`: which subreddits are due or need a repair.

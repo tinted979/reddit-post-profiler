@@ -20,6 +20,7 @@ python3 -m http.server -d web             # serve the web app locally (ES module
 uv run tools/build_dumps.py --subreddit X --posts X_posts.jsonl --comments X_comments.jsonl   # build dump files into dumps/
 uv run tools/build_dumps.py --subreddit X --posts new_p.jsonl --comments new_c.jsonl --splice live --cut <epoch> --posts-through <epoch> --comments-through <epoch> --out live   # splice fetched rows onto a downloaded live build
 tools/upload_dumps.sh [dumps] [--drop KEY]   # check against what's live, upload dumps/ to R2 (rclone remote "r2"), check the public URL
+tools/upload_dumps.sh [dumps] --only KEY [--allow-older]   # just r/KEY's build, into the live manifest (merge-one, then publish_build.sh): other subreddits stay as they're live
 uv run tools/check_upload.py merge-one --key x --dumps dumps --live live.json --log published.json --out bundle   # one subreddit's build, merged into the live manifest and checked, ready to publish (no token)
 tools/publish_build.sh bundle   # publish that bundle to R2: the one step that holds the token (rclone, curl and sha256sum only)
 uv run tools/archive_sync.py plan   # which subreddits in tools/archive.json are due for the archive sync (reads the public archive only)
