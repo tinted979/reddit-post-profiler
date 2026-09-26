@@ -192,6 +192,7 @@ This merges two proposals:
     - Several bundles chain: each is merged onto the manifest the previous one leaves live. The publish job publishes them in order and stops at the first failure.
     - A busy server stops the fetching and keeps the bundles already made.
     - A refused splice or merge skips that subreddit.
+    - `run_budget` (600 pages) caps every fetch in a run together, as ADR 0005's "request budget per run" says; `budget` (300) caps each fetch.
   - **Checked offline end to end on real data** (a fake fetcher, a local bucket):
     1. `plan` read the live archive;
     2. `build` downloaded the real r/Hasan_Piker build (131k posts, 1.47M comments) and spliced onto it;

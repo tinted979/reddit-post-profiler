@@ -22,7 +22,7 @@ T = 1_790_000_000  # now
 PUBLIC = "https://dumps.test"
 CONFIG = {
     "subreddits": {"Hasan_Piker": {"cadence": "1h"}, "Python": {"cadence": "6h"}},
-    "overlap": "2h", "repair_days": 7, "repair_every": "7d", "budget": 300,
+    "overlap": "2h", "repair_days": 7, "repair_every": "7d", "budget": 300, "run_budget": 1000,
 }
 
 
@@ -55,7 +55,8 @@ def test_parse_config_turns_durations_into_seconds():
     config = archive_sync.parse_config({**CONFIG, "subreddits": {**CONFIG["subreddits"], "AskHistorians": {"cadence": "1d", "backfill": "api"}}})
     assert config["subreddits"]["hasan_piker"] == {"name": "Hasan_Piker", "cadence": HOUR, "backfill": False}
     assert config["subreddits"]["askhistorians"]["backfill"] is True
-    assert (config["overlap"], config["repair_days"], config["repair_every"], config["budget"]) == (2 * HOUR, 7, 7 * DAY, 300)
+    assert (config["overlap"], config["repair_days"], config["repair_every"], config["budget"], config["run_budget"]) == (
+        2 * HOUR, 7, 7 * DAY, 300, 1000)
 
 
 @pytest.mark.parametrize("change, expected", [
@@ -72,6 +73,8 @@ def test_parse_config_turns_durations_into_seconds():
     ({"repair_every": "1h"}, "repair_every"),
     ({"budget": 0}, "budget"),
     ({"budget": 20000}, "budget"),
+    ({"run_budget": 1}, "run_budget"),  # less than one page per kind
+    ({"run_budget": 100_000}, "run_budget"),
     ({"surprise": True}, "surprise"),
 ])
 def test_parse_config_refuses(change, expected):
@@ -141,6 +144,10 @@ def test_only_and_repair_force_a_subreddit():
     assert planned(subs, logs, repair="hasan_piker")[0] == [("hasan_piker", "repair", T - HOUR - 7 * DAY)]
     with pytest.raises(SystemExit, match="isn't in the config"):
         planned(subs, logs, only="AskHistorians")
+    # Both at once must name the same one: otherwise --repair's would be quietly dropped.
+    assert planned(subs, logs, only="Hasan_Piker", repair="hasan_piker")[0] == [("hasan_piker", "repair", T - HOUR - 7 * DAY)]
+    with pytest.raises(SystemExit, match="different subreddits"):
+        planned(subs, logs, only="Hasan_Piker", repair="Python")
 
 
 def test_a_publish_log_that_doesnt_check_out_skips_its_subreddit():
@@ -316,6 +323,42 @@ def test_nothing_due_makes_no_bundles(world):
     assert summary["built"] == []
     assert not (world["out"] / "bundles").exists()
     assert world["fetches"]() == []
+
+
+def test_the_run_budget_caps_every_fetch_together(world):
+    # 3 pages a run: posts may use what's left less a page kept for the comments, and the
+    # comments what's left after the posts (the fake takes one page a fetch). Then Python has
+    # too little left for a page of each.
+    config = {**CONFIG, "subreddits": {"Hasan_Piker": {"cadence": "1h"}, "Python": {"cadence": "1h"}}, "run_budget": 3}
+    summary = world["build"](config)
+    assert [(f["--subreddit"], f["--kind"], f["--budget"]) for f in world["fetches"]()] == [
+        ("Hasan_Piker", "posts", "2"), ("Hasan_Piker", "comments", "2")]
+    assert [s["name"] for s in summary["built"]] == ["Hasan_Piker"] and summary["pages"] == 2
+    assert any("r/Python" in s and "run budget" in s for s in summary["skipped"])
+
+
+def test_downloads_are_capped(monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Big(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"x" * 100)
+
+        def log_message(self, *_):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Big)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/manifest.json"
+        assert archive_sync.http_get(url) == (200, b"x" * 100)
+        monkeypatch.setattr(archive_sync, "MAX_DOWNLOAD", 99)
+        with pytest.raises(SystemExit, match="more than 99 bytes"):
+            archive_sync.http_get(url)
+    finally:
+        server.shutdown()
 
 
 def test_build_refuses_to_reuse_an_output_directory(world):

@@ -33,8 +33,9 @@ Caught-up subreddits go first, most overdue first, then those catching up, then 
 --only NAME builds just that one, due or not; --repair NAME repairs just that one.
 
 tools/archive.json: {"subreddits": {"<Name>": {"cadence": "1h"[, "backfill": "api"]}},
-"overlap": "2h", "repair_days": 7, "repair_every": "7d", "budget": <pages per fetch>}.
-Durations are a number and m, h or d; cadences run from 1h to 7d.
+"overlap": "2h", "repair_days": 7, "repair_every": "7d", "budget": <pages per fetch>,
+"run_budget": <pages per run, every fetch together>}. Durations are a number and m, h or d;
+cadences run from 1h to 7d. Once a run's pages are spent, the subreddits left wait for the next.
 """
 
 from __future__ import annotations
@@ -71,6 +72,9 @@ CAUGHT_UP = DAY
 # The fetcher's: rows have had this long to be archived before a fetch calls them complete.
 SETTLE = MINUTE
 MAX_BUDGET = 10_000
+MAX_RUN_BUDGET = 50_000
+# A download bigger than this isn't one of the archive's files.
+MAX_DOWNLOAD = 512 * 1024 * 1024
 
 
 class Skip(Exception):
@@ -94,10 +98,10 @@ def whole(value, what: str, lo: int, hi: int) -> int:
 
 def parse_config(raw) -> dict:
     """tools/archive.json, checked: {subreddits: {key: {name, cadence, backfill}}, overlap,
-    repair_days, repair_every, budget}, with durations in seconds."""
+    repair_days, repair_every, budget, run_budget}, with durations in seconds."""
     if not isinstance(raw, dict):
         raise SystemExit("archive config: not a JSON object")
-    unknown = set(raw) - {"subreddits", "overlap", "repair_days", "repair_every", "budget"}
+    unknown = set(raw) - {"subreddits", "overlap", "repair_days", "repair_every", "budget", "run_budget"}
     if unknown:
         raise SystemExit(f"archive config: unknown setting {', '.join(sorted(unknown))}")
     listed = raw.get("subreddits")
@@ -125,6 +129,8 @@ def parse_config(raw) -> dict:
         "repair_days": whole(raw.get("repair_days"), "repair_days", 1, 30),
         "repair_every": duration(raw.get("repair_every"), "repair_every", DAY, 30 * DAY),
         "budget": whole(raw.get("budget"), "budget (pages per fetch)", 1, MAX_BUDGET),
+        # At least a page of each kind.
+        "run_budget": whole(raw.get("run_budget"), "run_budget (pages per run)", 2, MAX_RUN_BUDGET),
     }
 
 
@@ -140,6 +146,8 @@ def plan(config: dict, manifest, logs: dict, now: int, only: str | None = None, 
     """(the due subreddits in order, as {name, key, mode, cut}; why each other one isn't).
     `logs` maps a key to its publish log, as downloaded (absent: none yet)."""
     subs = config["subreddits"]
+    if only is not None and repair is not None and only.lower() != repair.lower():
+        raise SystemExit(f"--only {only} and --repair {repair} name different subreddits")
     target = only or repair
     if target is not None and target.lower() not in subs:
         raise SystemExit(f"r/{target} isn't in the config")
@@ -189,7 +197,10 @@ def http_get(url: str) -> tuple[int, bytes]:
     """(HTTP status, body); status 0 when there was no answer."""
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}), timeout=120) as resp:
-            return resp.status, resp.read()
+            body = resp.read(MAX_DOWNLOAD + 1)
+            if len(body) > MAX_DOWNLOAD:
+                raise SystemExit(f"{url}: more than {MAX_DOWNLOAD} bytes, which no archive file is")
+            return resp.status, body
     except urllib.error.HTTPError as err:
         return err.code, b""
     except (urllib.error.URLError, OSError):
@@ -282,7 +293,7 @@ def build(config: dict, out: Path, now: int, get, fetch_cmd: list[str], public: 
     for key, body in raw_logs.items():
         (out / "logs" / f"{key}.json").write_bytes(body)
     dues, skipped = plan(config, manifest, parse_logs(raw_logs), now, only=only, repair=repair)
-    summary = {"now": now, "built": [], "skipped": skipped, "busy": False}
+    summary = {"now": now, "built": [], "skipped": skipped, "busy": False, "pages": 0}
     version = time.strftime("%Y-%m-%dT%H%M%SZ", time.gmtime(now))
     pages = budget or config["budget"]
     live = out / "live-manifest.json"
@@ -291,13 +302,19 @@ def build(config: dict, out: Path, now: int, get, fetch_cmd: list[str], public: 
         if summary["busy"]:
             summary["skipped"].append(f"r/{name}: not fetched: Arctic Shift was busy earlier in this run")
             continue
+        if config["run_budget"] - summary["pages"] < 2:
+            summary["skipped"].append(f"r/{name}: not fetched: the run budget ({config['run_budget']} pages) is spent")
+            continue
         bundle = out / "bundles" / f"{len(summary['built']) + 1:02d}-{key}"
         fetched = {}
         try:
             if mode != "first":
                 download_build(get, public, manifest["subreddits"][key], key, archive)
             for kind in ("posts", "comments"):
-                fetched[kind] = fetch(fetch_cmd, name, kind, cut, now - SETTLE, pages, out / "fetch" / key)
+                # What's left of the run's budget, keeping a page back for the comments.
+                left = config["run_budget"] - summary["pages"] - (1 if kind == "posts" else 0)
+                fetched[kind] = fetch(fetch_cmd, name, kind, cut, now - SETTLE, min(pages, left), out / "fetch" / key)
+                summary["pages"] += fetched[kind]["pages"]
                 if fetched[kind]["busy"]:
                     summary["busy"] = True
                     raise Skip(f"r/{name}: Arctic Shift was busy ({fetched[kind]['error']}), so this run stops fetching")
