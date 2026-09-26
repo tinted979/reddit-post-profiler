@@ -50,7 +50,11 @@ Arctic Shift's per-subreddit dumps are served as static Parquet on Cloudflare R2
       4. each file is range-checked through the public URL;
       5. the live manifest is checked again, then the new one goes up (5 minutes);
       6. the publish log (5 minutes);
-      7. last, it deletes the builds in `prune` (`rclone purge`). A build the replaced manifest named is kept, whatever the list says, and one already gone is fine.
+      7. last, it deletes the builds in `prune` (`rclone purge`). The list is only a request, so it keeps:
+         - a build the replaced manifest named;
+         - a build the publish log on R2 doesn't record as `"replaced": "<version>"`. That log is read at step 1, before this publish replaces it, so a bundle can't vouch for itself.
+
+         A build that's already gone is fine.
          - It then lists `r/<key>/` and reports builds that are neither live nor in the log; those are never deleted automatically.
          - A failed prune fails the script after the publish stands.
        - The `prune` list itself is checked before any rclone call: at most 5 lines, each a version, not the new build, and not named by the new manifest.

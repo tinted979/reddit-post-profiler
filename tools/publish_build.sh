@@ -22,7 +22,8 @@
 #  5. The live manifest is checked again, and only then replaced (cached 5 minutes).
 #  6. The publish log (cached 5 minutes), which pruning reads.
 #  7. Last, the builds in `prune` are deleted, except any the live manifest named until
-#     step 5. Then, if there were any, r/<key>/ is listed and builds that are neither live
+#     step 5, or that the publish log on R2 (read at step 1, before this publish's own) doesn't
+#     say was replaced. Then, if there were any, r/<key>/ is listed and builds that are neither live
 #     nor in the publish log are reported: they're never deleted automatically. A failed
 #     prune fails the script after the publish stands, so it shows.
 # A build uploaded in step 3 that goes no further is left unreferenced, never deleted here.
@@ -103,6 +104,11 @@ unchanged() {
 }
 echo "Publishing $BUILD/ to $REMOTE:$BUCKET ..."
 unchanged
+# With prunes: the publish log as R2 has it, before this publish replaces it. The bundle's list
+# is only a request; step 7 prunes a build only if this log says it was replaced.
+if [ "${#PRUNE[@]}" -gt 0 ]; then
+  "$RCLONE" cat "$REMOTE:$BUCKET/r/$KEY/published.json" > "$work/live-log.json" 2> /dev/null || : > "$work/live-log.json"
+fi
 
 # Step 2: never over an existing build. No directory there is fine; any other failure (auth,
 # network) stops here, since an empty answer would switch this check off.
@@ -150,6 +156,9 @@ unpruned=0
 for v in "${PRUNE[@]}"; do
   if grep -qF "\"r/$KEY/$v/" "$work/live.json"; then
     echo "  kept r/$KEY/$v/: the manifest named it until now" >&2
+    unpruned=$((unpruned + 1))
+  elif ! grep -qF "\"replaced\": \"$v\"" "$work/live-log.json"; then
+    echo "  kept r/$KEY/$v/: the publish log on R2 doesn't say it was replaced" >&2
     unpruned=$((unpruned + 1))
   elif "$RCLONE" purge "$REMOTE:$BUCKET/r/$KEY/$v" 2> "$work/purge.err" || grep -qi "directory not found" "$work/purge.err"; then
     echo "  pruned r/$KEY/$v/"

@@ -284,6 +284,27 @@ def test_never_prunes_a_build_the_live_manifest_names(world):
 
 
 @needs_bash
+def test_prunes_only_what_the_log_on_r2_says_was_replaced(world):
+    # The bundle comes from a job without the token, so its list isn't taken on trust: R2's own
+    # publish log, read before this publish replaces it, must say each build was replaced.
+    (world["bundle"] / "prune").write_text(f"{STRAY}\n{GONE_A}\n", encoding="utf-8", newline="")
+    result = run(world)
+    assert result.returncode != 0 and f"kept r/hasan_piker/{STRAY}/" in result.stderr
+    assert STRAY in builds(world) and GONE_A not in builds(world)
+    lines = calls(world)
+    read = next(i for i, c in enumerate(lines) if c.startswith("rclone cat") and "published.json" in c)
+    assert read < next(i for i, c in enumerate(lines) if c.startswith("rclone copy "))
+
+
+@needs_bash
+def test_with_no_log_on_r2_nothing_is_pruned(world):
+    (world["bucket"] / "r/hasan_piker/published.json").unlink()
+    result = run(world)
+    assert result.returncode != 0 and f"kept r/hasan_piker/{GONE_A}/" in result.stderr
+    assert GONE_A in builds(world) and GONE_B in builds(world)
+
+
+@needs_bash
 @pytest.mark.parametrize("prune", [
     "2026-09-21T000000Z\n",  # the build being published
     "../x\n",
