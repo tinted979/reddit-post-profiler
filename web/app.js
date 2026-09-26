@@ -38,7 +38,7 @@ import {
   wait,
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
-import { breakdownLines, describeRule, explain, formatDuration, formatEta, plural, requestsText, timelineText, tookText } from "./format.js";
+import { archiveNote, breakdownLines, describeRule, explain, formatDuration, formatEta, plural, requestsText, timelineText, tookText } from "./format.js";
 import { FIELD_IDS, mergeOptions, optionsSummary, parseMinCount, parseOptions, readShareParams, scanOptionNotes, shareParams } from "./options.js";
 import { DumpSource, TailStore, archiveFileName } from "./dumps.js";
 import { LinkQueue, MAX_WAITING, QUEUE_CONCURRENCY, QUEUE_KEY } from "./queue.js";
@@ -53,7 +53,9 @@ const state = {
   post: null,
   slots: [], // profiles by rank (thread activity); has gaps while a run is going
   shown: 0, // cards passing the filter
-  beforeKnown: true, // false when the post is older than the history window
+  // False only in a scan saved before counts stopped at the post (docs/adr/0006) whose post
+  // was older than its history window.
+  beforeKnown: true,
   after: null, // start of the history window (epoch seconds), null = all time
   savedId: null, // post id of the saved scan on show, if one was opened
   // "post" when the counts on show stop at the post (docs/adr/0006); null for a scan saved
@@ -197,7 +199,8 @@ function renderStatus() {
   $("status-text").textContent = status.text + wait + (eta ? ` · ${eta}` : "");
 }
 
-// Rounded so it doesn't flicker: 5 s steps under a minute, 10 s under 10 minutes.
+// A new Eta for `total` users, shown every second (format.js formatEta rounds it so it
+// doesn't flicker).
 function startEta(total) {
   stopEta();
   status.eta = new Eta(total);
@@ -391,7 +394,7 @@ function activity(profile, post) {
 
 const TIER_LABELS = { new: "new here", occasional: "occasional", regular: "regular" };
 
-// ", on 12 different days, the first 5 months before" (or why there's no timeline).
+// Each card's filter words: the username and its active subreddits, lowercased.
 const searchWords = new WeakMap();
 
 function userCard(profile, post) {
@@ -407,7 +410,7 @@ function userCard(profile, post) {
     const a = activity(profile, post);
     pills.append(
       el("span", { class: a.cls, title: a.title }, a.text),
-      el("span", { class: "pill", title: "Subreddits with archived posts or comments" }, plural(active.length, "subreddit")),
+      el("span", { class: "pill", title: "Subreddits with archived posts or comments before the post" }, plural(active.length, "subreddit")),
     );
     label = `u/${profile.username}: ${profile.threadComments} in thread, ${a.text}, ${plural(active.length, "subreddit")}`;
   }
@@ -532,12 +535,11 @@ function renderUsers() {
 
 // ---- A run ----
 
-// Scan the post in the box with the options in the form. Resolves with how it ended:
-// {kind: "done" | "empty" | "stopped" | "failed" | "invalid" | "offline" | "busy",
-//  message, post, profiled, total, failed}.
 // Scan a post. A manual run takes the post and options from the form (and puts the options
 // back as they'll be used); a queued run passes its own and leaves the form alone, so
-// whatever someone is typing there meanwhile stays put.
+// whatever someone is typing there meanwhile stays put. Resolves with how it ended:
+// {kind: "done" | "empty" | "stopped" | "failed" | "invalid" | "offline" | "busy",
+//  message, post, profiled, total, failed, seconds, saved, capped}.
 async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
   if (state.controller) return { kind: "busy", message: "A scan is already running." };
   if (!fromQueue) {
@@ -581,7 +583,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
   // the options too (Enter in an option field starts a scan):
   // keyboard focus on any of them moves to Stop once it shows (below), instead of being
   // dropped.
-  const refocus = ["post-card", "results", "saved-list", "run", "option-fields", "breakdown"].some((id) => $(id).contains(document.activeElement));
+  const refocus = ["post-card", "results", "saved-list", "scans-delete-all", "run", "option-fields", "breakdown"].some((id) => $(id).contains(document.activeElement));
   showBreakdown(null);
   $("post-card").hidden = true;
   $("results").hidden = true;
@@ -803,29 +805,10 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
     let text = `Done: profiled ${who}${notes.length ? ` (${notes.join(", ")})` : ""}` +
       ` with ${requestsText(client.requests, archiveRequests)}. Took ${took()}.`;
     if (archive) {
-      if (dumps.broken) {
-        text += ` The r/${archive.name} archive files stopped answering partway, so Arctic Shift answered for the rest.`;
-      } else {
-        if (dumps.reads > 0) {
-          const upTo = new Date(Math.min(archive.postsThrough, archive.commentsThrough) * 1000)
-            .toLocaleDateString(undefined, { dateStyle: "medium" });
-          text += ` Activity in r/${archive.name} before the post, up to ${upTo}, came from archive files.`;
-          const tailed = dumps.covers(post.subreddit);
-          if (tailRequests) {
-            text += ` Activity from then to the post came from ${plural(tailRequests, "request")} for the whole subreddit rather than for each user.`;
-          } else if (tailed && Math.min(tailed.postsThrough, tailed.commentsThrough) > Math.min(archive.postsThrough, archive.commentsThrough)) {
-            text += " Activity from then to the post came from what an earlier scan in this tab fetched for the whole subreddit.";
-          }
-        }
-        if (dumps.lifetimeReads > 0) {
-          text += dumps.lifetimeGaps
-            ? " Subreddit counts came from the archive files, plus Arctic Shift for anything between where they end and the post."
-            : " Subreddit counts came from the archive files.";
-        }
-        if (dumps.threadReads > 0) {
-          text += " The thread's comments came from the archive files, plus Arctic Shift for those made since.";
-        }
-      }
+      text += archiveNote({
+        post, archive, tailed: dumps.covers(post.subreddit), tailRequests, dumps,
+        date: (t) => new Date(t * 1000).toLocaleDateString(undefined, { dateStyle: "medium" }),
+      });
     }
     if (failed && failed < counts.total && opts.cacheDays > 0) {
       text += " Press Analyze to retry the failed ones; the rest are reused.";
@@ -866,10 +849,11 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
       setRunning(false);
       document.title = TITLE;
     }
+    // A queue waiting on a manual scan carries on, however the scan ended (so here, where the
+    // early returns above come too). A queued scan's own pump continues after its gap
+    // between scans; starting it here too would skip the gap.
+    if (!fromQueue) setTimeout(pumpQueue);
   }
-  // A queue waiting on a manual scan carries on. (A queued scan's own pump continues after
-  // its gap between scans; starting it here too would skip the gap.)
-  if (!fromQueue) setTimeout(pumpQueue);
   return outcome;
 }
 
@@ -1273,13 +1257,14 @@ async function importSaved() {
 async function deleteAllSaved() {
   if (state.controller) return;
   const n = (await openScans().list()).length;
+  if (state.controller) return; // a queued scan started meanwhile: Delete all is off during a scan
   if (!n || !window.confirm(`${n === 1 ? "Delete the saved scan" : `Delete all ${n} saved scans`}? This can't be undone. Export first to keep a copy.`)) return;
   await openScans().clear();
   state.savedId = null;
   savedNote(`Deleted ${plural(n, "saved scan")}.`);
   announce($("saved-note").textContent);
   await renderSaved();
-  $("saved-heading").focus();
+  if (!state.controller) $("saved-heading").focus(); // else a queued scan put focus on Stop
 }
 
 function scanItem(scan) {
@@ -1307,7 +1292,7 @@ function scanItem(scan) {
       pill("new", `${tiers.new} new here`, `Below the occasional badge ${where}`));
   }
   if (stats.failed) pills.append(pill("err", `${stats.failed} failed`, "Lookups that failed"));
-  pills.append(pill("", plural(stats.subreddits, "subreddit"), "Subreddits these users are active in"));
+  pills.append(pill("", plural(stats.subreddits, "subreddit"), "Subreddits these users were active in before the post"));
 
   const meta = [
     `Scanned ${formatDate(scan.scannedAt)}`,
@@ -1415,8 +1400,9 @@ async function deleteSaved(id) {
   if (state.savedId === id) state.savedId = null;
   announce("Saved scan deleted.");
   await renderSaved();
-  // The button is gone; keep keyboard focus nearby.
-  $("saved-heading").focus();
+  // The button is gone; keep keyboard focus nearby, unless a queued scan started meanwhile
+  // and put it on Stop.
+  if (!state.controller) $("saved-heading").focus();
 }
 
 // ---- Sharing, CSV, saved results ----
@@ -1470,7 +1456,9 @@ function offerDownload(blob, filename) {
 }
 
 async function clearCache() {
+  if (state.controller) return;
   const saved = (await openScans().list()).length;
+  if (state.controller) return; // a queued scan started meanwhile: don't clear what it's saving
   if (saved && !window.confirm(`This also deletes ${saved === 1 ? "your saved scan" : `all ${saved} saved scans`}. ` +
     "This can't be undone. Export them first to keep a copy. Clear everything?")) return;
   const [n, scans] = await Promise.all([openCache(0).clear(), openScans().clear()]);

@@ -12,7 +12,8 @@ name: Agent write
 # the owner's code-owner approval and green checks, and "branches: owner only" keeps it off the
 # owner's branches.
 # The path hook (.claude/hooks/guard-paths.mjs, restored from the base branch) blocks edits to
-# CLAUDE.md, .claude/ and .github/ when AGENT_ROLE is set, and existing tests for the refactorer.
+# CLAUDE.md, .claude/, .github/, web/hyparquet.js and tools/r2-cors.json when AGENT_ROLE is set,
+# and existing tests for the refactorer.
 on:
   issues:
     types: [labeled]
@@ -188,6 +189,14 @@ jobs:
       - name: Install the web tests' dev dependency
         working-directory: web
         run: npm ci
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false # no cache to poison: nothing restored, nothing saved
+      - name: Python for the dump tool tests (python -m pytest)
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/py"
+          uv pip install --python "$RUNNER_TEMP/py" "duckdb>=1.1,<2" pytest
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
       # No prompt: tag mode. The action reads the owner's comment, checks out the PR branch and
       # pushes follow-up commits to it. Only the owner's and the reviewers' (github-actions[bot])
       # comments are passed to Claude, so nobody else can steer it through the PR thread.
@@ -220,4 +229,4 @@ jobs:
           claude_args: >-
             --agent implementer
             --max-turns 40
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(node web/bench/scan-bench.mjs:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push),Bash(git push origin HEAD)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(npm --prefix web test),Bash(node --test:*),Bash(node web/bench/scan-bench.mjs:*),Bash(python -m pytest:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push),Bash(git push origin HEAD)"

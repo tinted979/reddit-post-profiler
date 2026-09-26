@@ -36,8 +36,11 @@ for kind in node py; do
   echo "$kind tests: base $b, this change $h"
   if [ "$h" -lt "$b" ]; then echo "::error::$kind test count dropped from $b to $h."; fail=1; fi
 done
+# Skip markers: test.skip(…) and pytest.skip/xfail/importorskip(…); node:test options that skip
+# ({ skip: "why" }, { timeout: 5, todo: true }, but not skip: false) or run only one test;
+# and pytest.mark.skip/skipif/xfail.
 if git diff "$base" HEAD -- web/tests tools/tests |
-   grep -E '^\+.*(\.(skip|only|todo)\(|\{ *(skip|only|todo): *true|pytest\.mark\.(skip|xfail))'; then
+   grep -E '^\+.*(\.(skip|only|todo|xfail|importorskip)\(|[{,] *(skip|todo): *[^f[:space:]]|[{,] *only: *true|pytest\.mark\.(skip|xfail))'; then
   echo "::error::A test was marked skip/only/todo."; fail=1
 fi
 exit $fail

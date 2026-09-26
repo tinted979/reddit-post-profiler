@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -316,3 +317,17 @@ def test_refuses_a_prune_list_that_doesnt_check_out_before_any_rclone_call(world
     result = run(world)
     assert result.returncode != 0 and result.stderr.startswith("error:"), result.stderr
     assert calls(world) == []
+
+
+@needs_bash
+@pytest.mark.parametrize("indent", [None, 2], ids=["compact", "as merge-one writes it"])
+def test_keeps_a_build_r2s_log_says_was_replaced_less_than_72_hours_ago(world, indent):
+    # The grace is checked here too, against R2's own log and the clock, not taken on trust
+    # from the bundle's list: a job without the token made that.
+    publishes = [dict(p) for p in BUCKET_LOG["publishes"]]
+    publishes[1]["utc"] = int(time.time()) - 10 * HOUR  # GONE_B's replacement
+    log = {**BUCKET_LOG, "publishes": publishes}
+    (world["bucket"] / "r/hasan_piker/published.json").write_text(json.dumps(log, indent=indent), encoding="utf-8")
+    result = run(world)
+    assert result.returncode != 0 and f"kept r/hasan_piker/{GONE_B}/" in result.stderr and "72 h" in result.stderr
+    assert GONE_B in builds(world) and GONE_A not in builds(world)

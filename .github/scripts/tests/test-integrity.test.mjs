@@ -73,3 +73,24 @@ test("npm ci failing is an error, not a drop in the count", () => {
     assert.doesNotMatch(r.out, /count dropped/);
   });
 });
+
+for (const marked of [
+  'test("two", { skip: "flaky" }, () => {});',
+  'test("two", { timeout: 5000, skip: true }, () => {});',
+  'test("two", { todo: "later" }, () => {});',
+]) {
+  test(`a skip in an options object fails too: ${marked}`, () => {
+    withRepo((f) => writeFileSync(f, testFile([ok("one"), marked])), (r) => {
+      assert.equal(r.status, 1, r.out);
+      assert.match(r.out, /marked skip\/only\/todo/);
+    });
+  });
+}
+
+test("options that don't skip anything pass", () => {
+  // `only` is also a scan option (a list of subreddits), and `skip: false` runs the test.
+  const fine = 'test("two", { skip: false }, () => { scan({ only: ["rust"] }); });';
+  withRepo((f) => writeFileSync(f, testFile([ok("one"), fine])), (r) => {
+    assert.equal(r.status, 0, r.out);
+  });
+});

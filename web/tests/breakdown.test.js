@@ -155,3 +155,15 @@ test("archiveFileName names the file an archive request is for", async () => {
   assert.equal(archiveFileName("https://rpp-db.tinted979.dev/r/python/2026-09-24/comments_by_link.parquet"), "comments_by_link");
   assert.equal(archiveFileName(new URL("https://x.test/r/a/v1/posts_by_author.parquet")), "posts_by_author");
 });
+
+test("a count before the post that's split up by year is labelled as before counts, not lifetime totals", async () => {
+  // Two years apart, so no year's part is the whole range (which times out).
+  const [after, before] = [1_690_000_000, 1_710_000_000];
+  const client = makeClient((u) => {
+    const whole = u.searchParams.get("after") === String(after) && u.searchParams.get("before") === String(before);
+    return whole ? json({ error: "Query timed out" }, 422) : json({ data: [{ key: "Python", count: 1 }] });
+  });
+  const counts = await client.subredditCounts("posts", "alice", { subreddit: "Python", after, before });
+  assert.equal(counts.get("Python"), 2);
+  assert.deepEqual(Object.fromEntries(client.byLabel), { "before posts, count": 4 });
+});

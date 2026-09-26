@@ -59,3 +59,12 @@ test("a review: label runs that one role; other labels run nothing", () => {
   assert.deepEqual(route({ action: "labeled", label: "ack:sensitive", files: ["web/app.js"] }), []);
   assert.deepEqual(route({ action: "labeled", label: "review:bogus" }), []);
 });
+
+test("the archive sync's scripts, config and runbook add the security reviewer; the builder doesn't", () => {
+  // They make what the token step publishes (the bundles, the prune list), call the API every
+  // hour, or tell the owner how to handle the token (docs/adr/0005).
+  for (const f of ["tools/archive_sync.py", "tools/check_upload.py", "tools/fetch_subreddit.mjs", "tools/archive.json", "docs/archive-runbook.md"]) {
+    assert.deepEqual(route({ files: [f] }), ["pr-reviewer", "security-reviewer"], f);
+  }
+  assert.deepEqual(route({ files: ["tools/lifetime_bench.mjs"] }), ["pr-reviewer"]);
+});
