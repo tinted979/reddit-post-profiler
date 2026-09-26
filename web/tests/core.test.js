@@ -318,7 +318,7 @@ test("collectCommenters counts and filters", async () => {
   const { client } = makeClient(() => json({ data: comments }));
   const commenters = await collectCommenters(client, POST, { exclude: ["u/spambot"], includeOp: true });
   assert.deepEqual(Object.fromEntries(commenters), {
-    alice: { count: 2, last: 1 }, bob: { count: 1, last: 2 }, op_user: { count: 0, last: null },
+    alice: { count: 2 }, bob: { count: 1 }, op_user: { count: 0 },
   });
 });
 
@@ -710,7 +710,7 @@ test("an incomplete or failed comment tree falls back to paging", async () => {
     const { client, calls } = makeClient((u) =>
       u.pathname === "/api/comments/tree" ? treeResponse() : json({ data: pages++ ? [] : page }),
     );
-    assert.deepEqual([...(await collectCommenters(client, POST))], [["dave", { count: 1, last: 5 }]]);
+    assert.deepEqual([...(await collectCommenters(client, POST))], [["dave", { count: 1 }]]);
     assert.equal(calls[1].searchParams.get("limit"), "auto");
     assert.equal(calls.length, 3); // tree, one page, one empty page
   }
@@ -794,10 +794,10 @@ test("saved counts fetched within an hour of the post don't justify skipping", a
 test("before counts saved within an hour of the post are fetched again", async () => {
   const { cache, clock } = makeCache(POST.createdUtc + 600);
   await buildProfile(makeClient(aggregates({ comments: [["Python", 3]], before: { posts: 0, comments: 1 } })).client,
-    "bob", 1, POST, { cache, lastCommentUtc: POST.createdUtc + 300 });
+    "bob", 1, POST, { cache});
   clock.t = POST.createdUtc + 3 * 86400;
   const later = makeClient(aggregates({ comments: [["Python", 3]], before: { posts: 0, comments: 2 } }));
-  const p = await buildProfile(later.client, "bob", 1, POST, { cache, lastCommentUtc: POST.createdUtc + 300 });
+  const p = await buildProfile(later.client, "bob", 1, POST, { cache});
   assert.equal(later.calls.length, 2);
   assert.equal(p.targetCommentsBefore, 2);
   assert.equal(p.cached, false);
@@ -810,7 +810,7 @@ test("broken or old-format saved records are ignored", async () => {
   map.set("v1|life|alice|all", { value: [[null, 1, 2]], fetchedAt: t });
   map.set(`v2|before|alice|python|${POST.createdUtc}|all`, { value: { posts: "x" }, fetchedAt: t });
   const { client, calls } = makeClient(aggregates({ comments: [["Python", 5]], before: { posts: 0, comments: 3 } }));
-  const p = await buildProfile(client, "alice", 1, POST, { cache, lastCommentUtc: POST.createdUtc + 60 });
+  const p = await buildProfile(client, "alice", 1, POST, { cache});
   assert.equal(calls.length, 3); // 2 lifetime + the comments-before query
   assert.equal(p.targetCommentsBefore, 3);
   assert.equal(p.cached, false);
@@ -826,7 +826,8 @@ test("partial lifetime counts from the only fallback aren't cached", async () =>
     return u.searchParams.get("subreddit") ? json({ data: [] }) : json({ error: "Query timed out" });
   };
   await buildProfile(makeClient(handler).client, "busy", 1, POST, { cache, only: ["rust"] });
-  assert.equal(await cache.get("v1|life|busy|all"), null);
+  // Whatever the key version: no lifetime record for the user, full or for the `only` set.
+  assert.deepEqual([...cache.backend.map.keys()].filter((k) => /\|life(only)?\|busy\|/.test(k)), []);
 });
 
 test("ProfileCache is off with 0 days and clears", async () => {
@@ -1903,7 +1904,7 @@ test("the lifeonly key ignores case and order in only", async () => {
     throw new Error("unexpected request");
   });
   const p = await buildProfile(client, "alice", 1, POST, {
-    only: ["RUST", "Python"], dumps: {}, cache, lastCommentUtc: POST.createdUtc,
+    only: ["RUST", "Python"], dumps: {}, cache,
   });
   assert.equal(calls.length, 0);
   assert.deepEqual(p.subreddits.get("rust"), { posts: 2, comments: 3 });

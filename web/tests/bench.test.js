@@ -92,11 +92,13 @@ test("the tail scenarios ask about the whole subreddit once, then little or noth
   assert.equal(by["archive-tail-only"].api.total, 2);
   assert.deepEqual(by["archive-tail-only"].result.subreddits, by["archive-only"].result.subreddits);
 
-  // A full scan: the tail, then only the user's two lifetime aggregates (no gap searches;
-  // core.js's default order, where the page asks one interactions query instead).
+  // A full scan, the page's way: the tail, then only the user's one interactions query (no
+  // gap searches, and no aggregates).
   assert.equal(tail("archive-tail-full"), 2);
   assert.equal(hits("archive-tail-full", "/api/comments/search"), 0);
-  assert.equal(hits("archive-tail-full", "/api/posts/search/aggregate"), 1);
+  assert.equal(hits("archive-tail-full", "/api/users/interactions/subreddits"), 1);
+  assert.equal(hits("archive-tail-full", "/api/posts/search/aggregate"), 0);
+  assert.equal(by["archive-tail-full"].api.total, 3);
   assert.equal(by["archive-tail-full"].result.commentsBefore, by["archive-before"].result.commentsBefore);
 
   // A build a week old: many tail pages, still one set per scan however many commenters.
