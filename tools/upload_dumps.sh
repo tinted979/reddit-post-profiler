@@ -3,7 +3,7 @@
 # public URL serves every file the way the page needs before the manifest points at it.
 #
 # Usage, from the repo root:
-#   tools/upload_dumps.sh [dumps-dir] [--drop KEY ...] [--allow-format-change]   everything in dumps-dir
+#   tools/upload_dumps.sh [dumps-dir] [--drop KEY ...] [--allow-format-change] [--allow-older]   everything in dumps-dir
 #   tools/upload_dumps.sh [dumps-dir] --only KEY [--allow-older]                 one subreddit
 #
 # --only KEY publishes just r/KEY's build from dumps-dir into the live manifest, the way the
@@ -25,7 +25,8 @@
 #  1. Preflight (tools/check_upload.py): the manifest about to go up replaces the live one
 #     whole, so it must keep every live subreddit (--drop KEY removes one on purpose), and
 #     a new build's r/<sub>/<version>/ mustn't already exist on R2 (its files wouldn't be
-#     replaced, so the manifest's byte sizes wouldn't match what's served).
+#     replaced, so the manifest's byte sizes wouldn't match what's served), and no live
+#     subreddit's cutoff may go backwards (--allow-older allows it).
 #  2. Build files go up (never replaced: --ignore-existing; immutable, cached a year), and
 #     each is checked through the public URL (tools/check_dumps.sh files): a byte range
 #     comes back as a range (206, with the full size), uncompressed, with CORS.

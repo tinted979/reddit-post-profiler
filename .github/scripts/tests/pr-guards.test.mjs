@@ -161,3 +161,13 @@ test("agent work needs ack:tests to change what decides which tests run", () => 
   }
   assert.equal(guards({ authors: agent, files: { "web/core.js": "export const x = 4;\n" } }).status, 0);
 });
+
+test("the archive sync's token script is a protected path", () => {
+  const script = { "tools/publish_build.sh": "#!/usr/bin/env bash\n" };
+  const r = guards({ authors: agent, files: script, labels: ["ack:sensitive"] });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /no label waives this/);
+  assert.equal(guards({ files: script }).status, 1, "the owner's own change needs ack:sensitive");
+  assert.equal(guards({ files: script, labels: ["ack:sensitive"] }).status, 0);
+  assert.equal(guards({ files: { "tools/upload_dumps.sh": "#!/usr/bin/env bash\n" } }).status, 0);
+});

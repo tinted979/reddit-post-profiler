@@ -23,7 +23,21 @@
       "PowerShell(gh pr merge *)",
       "PowerShell(git push origin main *)",
       "PowerShell(git push origin HEAD:main *)",
-      "PowerShell(git push --force *)"
+      "PowerShell(git push --force *)",
+      "Bash(uv run tools/archive_sync.py *)",
+      "Bash(node tools/fetch_subreddit.mjs *)",
+      "Bash(node tools/lifetime_bench.mjs *)",
+      "Bash(tools/publish_build.sh *)",
+      "Bash(bash tools/publish_build.sh *)",
+      "Bash(tools/upload_dumps.sh *)",
+      "Bash(bash tools/upload_dumps.sh *)",
+      "Bash(rclone *)",
+      "PowerShell(uv run tools/archive_sync.py *)",
+      "PowerShell(node tools/fetch_subreddit.mjs *)",
+      "PowerShell(node tools/lifetime_bench.mjs *)",
+      "PowerShell(bash tools/publish_build.sh *)",
+      "PowerShell(bash tools/upload_dumps.sh *)",
+      "PowerShell(rclone *)"
     ]
   },
   "hooks": {

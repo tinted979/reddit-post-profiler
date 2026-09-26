@@ -12,7 +12,8 @@ name: Agent write
 # the owner's code-owner approval and green checks, and "branches: owner only" keeps it off the
 # owner's branches.
 # The path hook (.claude/hooks/guard-paths.mjs, restored from the base branch) blocks edits to
-# CLAUDE.md, .claude/, .github/, web/hyparquet.js and tools/r2-cors.json when AGENT_ROLE is set,
+# CLAUDE.md, .claude/, .github/, web/hyparquet.js, tools/r2-cors.json and tools/publish_build.sh
+# when AGENT_ROLE is set,
 # and existing tests for the refactorer.
 on:
   issues:

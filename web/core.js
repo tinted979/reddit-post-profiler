@@ -670,9 +670,10 @@ export function yearlyRanges(before, nowSeconds, after = null) {
   return ranges;
 }
 
-// The thread's commenters: Map of author -> {count, last}, their comments in the thread
-// and when they made the newest one (epoch seconds). Deleted accounts, AutoModerator and
-// `exclude` are left out; with `includeOp` the post's author is added with no comments.
+// The thread's commenters: Map of author -> {count}, their comments in the thread (when
+// doesn't matter, since counts stop at the post: docs/adr/0006). Deleted accounts,
+// AutoModerator and `exclude` are left out; with `includeOp` the post's author is added with
+// no comments.
 // With `dumps` (a DumpSource) covering the post's subreddit and a post older than where its
 // files end, Arctic Shift is asked only for what the archive doesn't have: the thread's
 // comments_by_link rows up to that point, then the thread's comments after it (usually one
@@ -703,17 +704,12 @@ export async function collectCommenters(client, post, { exclude = [], includeOp 
   for await (const c of archived ?? tree ?? client.iterThreadComments(post.id)) {
     const author = c.author;
     if (typeof author !== "string" || !author || excluded.has(author.toLowerCase())) continue;
-    const at = Math.trunc(Number(c.created_utc)) || 0;
     const entry = commenters.get(author);
-    if (entry) {
-      entry.count++;
-      entry.last = Math.max(entry.last, at);
-    } else {
-      commenters.set(author, { count: 1, last: at });
-    }
+    if (entry) entry.count++;
+    else commenters.set(author, { count: 1 });
   }
   if (includeOp && !excluded.has(post.author.toLowerCase()) && !commenters.has(post.author)) {
-    commenters.set(post.author, { count: 0, last: null });
+    commenters.set(post.author, { count: 0 });
   }
   return commenters;
 }
@@ -1536,7 +1532,7 @@ export function arcticSearchUrl(kind, author, subreddit, after = null, before = 
   return `${BASE_URL}/search?${q}`;
 }
 
-export const CSV_COLUMNS = [
+const CSV_COLUMNS = [
   "username",
   "thread_comments",
   "target_subreddit",
@@ -1601,10 +1597,10 @@ export function toCsv(profiles, post, minCount = 0, { rules = DEFAULT_BADGES, be
 
 // ---- Saved scans as a file ----
 
-export const EXPORT_KIND = "rpp-saved-scans";
+const EXPORT_KIND = "rpp-saved-scans";
 // Files exported before the rename to Reddit Post Profiler still import.
 const OLD_EXPORT_KINDS = new Set(["reddit-tool-saved-scans"]);
-export const EXPORT_VERSION = 1;
+const EXPORT_VERSION = 1;
 
 // The JSON file "Export" downloads: every saved scan, as stored.
 export function exportScans(scans, now = Date.now() / 1000) {

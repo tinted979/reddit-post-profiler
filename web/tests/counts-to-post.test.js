@@ -211,9 +211,9 @@ test("a thread older than the files comes from comments_by_link plus one request
   assert.equal(calls[0].searchParams.get("link_id"), "p1");
   assert.equal(calls[0].searchParams.get("after"), String(COMMENTS_THROUGH));
   assert.deepEqual(Object.fromEntries(commenters), {
-    Alice: { count: 1, last: 1699000000 },
-    carol: { count: 1, last: 1699990000 },
-    dave: { count: 1, last: NOW - 100 },
+    Alice: { count: 1 },
+    carol: { count: 1 },
+    dave: { count: 1 },
   });
 });
 
@@ -221,7 +221,7 @@ test("a thread newer than the files comes from the comment tree", async () => {
   const { client, calls } = makeClient(arctic(ALICE));
   const commenters = await collectCommenters(client, NEW_POST, { dumps: await openFixtures() });
   assert.deepEqual(calls.map((u) => u.pathname), ["/api/comments/tree"]);
-  assert.deepEqual(Object.fromEntries(commenters), { alice: { count: 1, last: NEW_POST.createdUtc + 60 } });
+  assert.deepEqual(Object.fromEntries(commenters), { alice: { count: 1 } });
 });
 
 test("saved scans record that their counts stop at the post; older files don't claim it", () => {

@@ -87,9 +87,9 @@ test("a post older than the files: commenters from comments_by_link plus one req
   assert.ok(isThreadSearch(calls[0]));
   assert.equal(calls[0].searchParams.get("after"), String(COMMENTS_THROUGH));
   assert.deepEqual(asObject(commenters), {
-    Alice: { count: 1, last: 1699000000 },
-    carol: { count: 1, last: 1699990000 },
-    dave: { count: 1, last: NOW - 100 },
+    Alice: { count: 1 },
+    carol: { count: 1 },
+    dave: { count: 1 },
   });
 });
 
@@ -103,8 +103,8 @@ test("a post newer than the files takes its commenters from the comment tree, ta
   assert.equal(calls.filter(isTree).length, 1);
   assert.equal(calls.filter(isThreadSearch).length, 0);
   assert.deepEqual(asObject(commenters), {
-    alice: { count: 2, last: NEW_POST.createdUtc + 180 },
-    bob: { count: 1, last: NEW_POST.createdUtc + 120 },
+    alice: { count: 2 },
+    bob: { count: 1 },
   });
 });
 
@@ -119,9 +119,9 @@ test("skipped users and the OP apply to the archive's commenters as to the tree'
   const post = { ...P1, author: "op_user" }; // p1's thread, from the files, with an OP who didn't comment
   const commenters = await collectCommenters(client, post, { dumps: await openFixtures(), exclude: ["u/bob"], includeOp: true });
   assert.deepEqual(asObject(commenters), {
-    Alice: { count: 1, last: 1699000000 },
-    dave: { count: 1, last: NOW - 60 },
-    op_user: { count: 0, last: null },
+    Alice: { count: 1 },
+    dave: { count: 1 },
+    op_user: { count: 0 },
   });
 });
 
@@ -139,7 +139,7 @@ test("without the archive's files for the thread, the tree answers", async () =>
   await fetchTails(second.client, partial, NEW_POST, { now: () => NOW, budget: 1 });
   const commenters = await collectCommenters(second.client, NEW_POST, { dumps: partial });
   assert.equal(second.calls.filter(isTree).length, 1);
-  assert.deepEqual(asObject(commenters), { alice: { count: 1, last: NEW_POST.createdUtc + 60 } });
+  assert.deepEqual(asObject(commenters), { alice: { count: 1 } });
 });
 
 test("if comments_by_link can't be read, or isn't in the manifest, the tree answers", async () => {
@@ -151,7 +151,7 @@ test("if comments_by_link can't be read, or isn't in the manifest, the tree answ
   };
   const first = makeClient(api({ tree }));
   const dumps = await openFixtures({ openFile: failing });
-  assert.deepEqual(asObject(await collectCommenters(first.client, P1, { dumps })), { alice: { count: 1, last: P1.createdUtc + 60 } });
+  assert.deepEqual(asObject(await collectCommenters(first.client, P1, { dumps })), { alice: { count: 1 } });
   assert.equal(first.calls.filter(isTree).length, 1);
   assert.equal(first.calls.filter(isThreadSearch).length, 0);
 

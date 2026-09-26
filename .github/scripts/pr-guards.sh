@@ -38,7 +38,7 @@ fi
 
 owner_ack() { bash "$(dirname "$0")/owner-ack.sh" "$1"; }
 
-protected=$(grep -iE '^(\.github/|\.claude/|CLAUDE\.md$|web/hyparquet\.js$|tools/r2-cors\.json$)' <<<"$changed")
+protected=$(grep -iE '^(\.github/|\.claude/|CLAUDE\.md$|web/hyparquet\.js$|tools/r2-cors\.json$|tools/publish_build\.sh$)' <<<"$changed")
 if [ -n "$protected" ]; then
   if [ -n "$agents" ]; then
     echo "::error::Agent work changed files only a human may change; no label waives this. Close the PR, or make the change yourself on another branch:"

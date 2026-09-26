@@ -99,7 +99,9 @@ export function requestsText(arcticShift, archive) {
 // counters, and `date` formats a time (epoch seconds). "Before" facts are complete up to
 // the second before the post.
 export function archiveNote({ post, archive, tailed, tailRequests, dumps, date }) {
-  if (dumps.broken) return ` The r/${archive.name} archive files stopped answering partway, so Arctic Shift answered for the rest.`;
+  if (dumps.broken) {
+    return ` The archive stopped answering partway (reading r/${dumps.brokenSubreddit ?? archive.name}'s files), so Arctic Shift answered for the rest.`;
+  }
   let text = "";
   if (dumps.reads > 0) {
     const filesEnd = Math.min(archive.postsThrough, archive.commentsThrough);

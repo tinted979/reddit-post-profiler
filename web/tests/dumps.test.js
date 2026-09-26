@@ -138,13 +138,33 @@ test("a lookup is read once per source, whatever the case", async () => {
   assert.equal(opens, 1);
 });
 
-test("a failed lookup isn't remembered", async () => {
+test("a failed lookup isn't read again: the source stays off for the rest of the run", async () => {
+  // A source lives for one run, so nothing would retry it; the page's next scan opens a new one.
   let fail = true;
   const dumps = await openFixtures({ openFile: async (url) => { if (fail) throw new Error("boom"); return localFile(url); } });
   await assert.rejects(dumps.timestamps("comments", "Python", "alice"), DumpUnavailable);
   fail = false;
-  dumps.broken = false; // pretend a new scan's source; the lookup itself must not be cached
-  assert.deepEqual(await dumps.timestamps("comments", "Python", "alice"), [1698000000, 1699000000, 1699500000]);
+  await assert.rejects(dumps.timestamps("comments", "Python", "alice"), DumpUnavailable);
+  await assert.rejects(dumps.timestamps("posts", "Python", "bob"), DumpUnavailable);
+  assert.equal(dumps.reads, 0);
+});
+
+test("a read that fails switches the source off, cancels its other reads, and names the subreddit", async () => {
+  const signals = [];
+  const dumps = await openFixtures({
+    openFile: async (url, bytes, signal) => {
+      signals.push(signal);
+      if (url.includes("posts_by_author")) throw new TypeError("Failed to fetch");
+      // A slow read: it answers only when cancelled.
+      return new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("cancelled"))));
+    },
+  });
+  const slow = dumps.timestamps("comments", "Python", "carol");
+  await assert.rejects(dumps.timestamps("posts", "Python", "alice"), DumpUnavailable);
+  await assert.rejects(slow, DumpUnavailable);
+  assert.equal(signals.length, 2);
+  assert.ok(signals.every((signal) => signal?.aborted), "the other read was cancelled");
+  assert.equal(dumps.brokenSubreddit, "Python");
 });
 
 test("onRequest counts every request to the archive server: the manifest and each range read", async () => {

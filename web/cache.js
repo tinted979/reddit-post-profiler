@@ -62,7 +62,7 @@ const DB_NAME = "reddit-tool";
 const DB_VERSION = 3; // 1: counts; 2: + scans; 3: + a fetchedAt index on counts
 // When saved results were last pruned (epoch seconds), so it happens at most once a day.
 // Named like the page's other localStorage keys.
-export const PRUNE_KEY = "reddit-tool-pruned";
+const PRUNE_KEY = "reddit-tool-pruned";
 const STORES = ["counts", "scans"];
 
 // One connection per IndexedDB factory, shared by every store.

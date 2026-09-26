@@ -72,3 +72,13 @@ test("notebook_path is checked like file_path, and a call with neither is allowe
   assert.equal(run({ notebook_path: ".claude/x.ipynb" }, "implementer").status, 2);
   assert.equal(run({ command: "ls" }, "implementer").status, 0);
 });
+
+test("the script that holds the R2 token in the archive sync is protected; the other tools aren't", () => {
+  const r = run({ file_path: "tools/publish_build.sh" }, "implementer");
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /maintained by a human/);
+  assert.equal(run({ file_path: "tools/publish_build.sh" }).decision, "ask");
+  for (const p of ["tools/upload_dumps.sh", "tools/check_upload.py", "tools/archive_sync.py"]) {
+    assert.equal(run({ file_path: p }, "implementer").status, 0, p);
+  }
+});
