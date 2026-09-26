@@ -18,6 +18,7 @@ cd web && npm ci && npm test              # web tests: node --test (Node 22+, pi
 cd web && node --test --test-name-pattern="Eta" tests/core.test.js   # single web test
 python3 -m http.server -d web             # serve the web app locally (ES modules need http)
 uv run tools/build_dumps.py --subreddit X --posts X_posts.jsonl --comments X_comments.jsonl   # build dump files into dumps/
+uv run tools/build_dumps.py --subreddit X --posts new_p.jsonl --comments new_c.jsonl --splice live --cut <epoch> --posts-through <epoch> --comments-through <epoch> --out live   # splice fetched rows onto a downloaded live build
 tools/upload_dumps.sh [dumps] [--drop KEY]   # check against what's live, upload dumps/ to R2 (rclone remote "r2"), check the public URL
 tools/check_dumps.sh [all|manifest|cors|files]  # check the live archive serves the page right (no credentials; CI runs it weekly)
 node tools/fetch_subreddit.mjs --subreddit X --kind comments --after <epoch> --budget 50 --out c.jsonl --result c.json   # the sync's fetcher (calls the live API: never from tests or agents)

@@ -55,7 +55,8 @@ async function urlFile(url, byteLength, signal, timeoutMs = 20000, { fetchFn = (
 // The covered subreddits in a manifest, keyed by lowercase name. The manifest is fetched,
 // so it's checked like any other untrusted input; anything that doesn't check out is left
 // out. `postsThrough`/`commentsThrough` are where the files can be trusted to: an hour
-// before their newest item, in case the newest were archived late. A cutoff past `now`
+// before their cutoff (the time a synced build is complete up to, or a hand-made one's newest
+// item), in case the newest were archived late. A cutoff past `now`
 // (epoch seconds) is rejected: it would make the page skip the API for recent activity.
 export function parseManifest(data, now = Date.now() / 1000) {
   const subs = new Map();

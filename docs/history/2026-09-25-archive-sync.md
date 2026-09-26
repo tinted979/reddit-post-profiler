@@ -6,8 +6,9 @@
 >   - a request breakdown at the end of each scan (#75);
 >   - an adaptive tail budget (#76);
 >   - every count stopping at the post (#77, docs/adr/0006), which changed P1 and P2 as described below;
->   - P3, the fetcher (#78).
-> - **Next:** P4, the splice builder.
+>   - P3, the fetcher (#78);
+>   - P4, the splice builder (#79).
+> - **Next:** P5, publishing one subreddit.
 > - **Measured** (live, 2026-09-26): an "only" scan of a 53-commenter r/Hasan_Piker post older than the files went from 60 requests to 2 (the post, and one search for the thread's comments after the files), with no per-user requests.
 
 # Fewer Arctic Shift requests: shared subreddit tails, and a scheduled archive sync
@@ -144,8 +145,18 @@ This merges two proposals:
   - Docs: README, and the help text using `data-const`.
 - **P2: Thread from `comments_by_link`** (closes #55). `dumps.js` gets `threadRows(sub, linkId)`; `collectCommenters` takes a covered-post path and falls back to the tree. Tests and bench.
 - **P3: Fetcher** (#78). A `core.js` `appTag` option and `tools/fetch_subreddit.mjs`. Tests in a new `web/tests/fetch-subreddit.test.js`.
-  - For P4: the splice takes the fetcher's `complete_through` as each kind's cutoff. The manifest's `*_to_utc` are then cutoffs, not the newest item.
-- **P4: Splice builder.** `build_dumps.py --splice <prev build> --cut <utc>`, `--posts-through/--comments-through` and timestamp versions. The JSONL-only mode is unchanged. Tests in a new `tools/tests/test_splice.py`.
+- **P4: Splice builder** (#79). `build_dumps.py --splice <dir> --cut <utc>`, `--posts-through/--comments-through` and timestamp versions. The JSONL-only mode is unchanged. Tests in a new `tools/tests/test_splice.py`.
+  - `<dir>` is laid out like the archive: the live `manifest.json`, plus the subreddit's live build under `r/<key>/<version>/`. P7a downloads both through the public URL.
+    - The downloaded build is checked as untrusted before use: the version name, file paths rebuilt from key and version, sizes against the manifest, and columns.
+    - With `--out <dir>`, the new build lands next to the old one, and the manifest is the live one with this subreddit's entry replaced. That's the merged manifest P5 publishes.
+  - The build files have no ids, so each file is spliced separately: its rows up to the cut, plus the fetched rows after it, cleaned as `load()` cleans any JSONL. The two meet at the cut, so nothing appears twice.
+  - The cutoffs are the fetcher's `complete_through`, so the manifest's `*_to_utc` now mean "complete up to", not the newest item. The files' `from_utc`/`to_utc` stay the newest and oldest rows.
+  - It refuses:
+    - a cut after either live cutoff, since what's between would be in neither build;
+    - a new cutoff earlier than the live one;
+    - a cutoff in the future.
+  - `--posts-through/--comments-through` also work without `--splice`, for a subreddit's first build fetched from the API: rows after them are left out.
+  - Checked offline end to end: fetch, build, fetch more and splice gave the same rows, in file order, as one fresh build of everything, and the page's `DumpSource` read them back.
 - **P5: Publish one subreddit.**
   - `check_upload.py merge-one` needs no token. It refuses a cutoff that goes backwards or a version that's already live. It writes the merged manifest, the updated publish log, and the live manifest's sha256.
   - `tools/publish_build.sh` uses only curl, sha256sum and rclone. It checks KEY, VERSION and every path against strict patterns before any rclone call.
