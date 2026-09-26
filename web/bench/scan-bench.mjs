@@ -1,5 +1,5 @@
-// Offline scan benchmark: what buildProfile costs for a fixed set of users, from fixtures
-// only. Every scenario runs with an injected fetch that answers from an in-memory model of
+// Offline scan benchmark: what a scan's requests cost for a fixed set of users (buildProfile,
+// plus fetchTails and collectCommenters where a scenario uses them), from fixtures only. Every scenario runs with an injected fetch that answers from an in-memory model of
 // the Arctic Shift API (and, for the archive scenarios, from web/tests/fixtures/dumps
 // through DumpSource), on a virtual clock, so the counts are the same on every run and no
 // request leaves the process. Any URL the model doesn't expect is recorded and makes the
@@ -29,7 +29,7 @@ const FIXTURES = new URL("../tests/fixtures/dumps/", import.meta.url);
 // Where the bench's archive "lives". Never contacted: DumpSource gets a local fetch.
 const ARCHIVE_URL = "https://archive.bench.invalid";
 // Simulated time each API request takes to answer, in seconds (measured against the live
-// API with 2 or more users in parallel; see CLAUDE.md's API facts).
+// API with 2 or more users in parallel; see .claude/rules/arctic-shift-api.md).
 export const LATENCY = 1.3;
 // POST_WEIGHT in core.js: an interactions count of p * W + c is p posts, c comments.
 const W = 1_000_000;
@@ -232,7 +232,7 @@ const STALE_TAIL = {
   tail: { posts: [], comments: [...others(1_500, 1_699_990_000, 400), ...ARCHIVED_TAIL.tail.comments.slice(-2)] },
 };
 
-// The thread as the comment tree gives it: alice's comment, the one in ARCHIVED_TAIL's tail.
+// Post p1's thread (below) as the comment tree gives it: Alice's comment and carol's.
 const TREE = [["Alice", 1_699_000_000], ["carol", 1_699_990_000]];
 // Post p1 in the fixtures, older than where the files end: its thread is Alice's comment in
 // the files and carol's, in their last hour, which the thread search gets again.
@@ -244,7 +244,7 @@ const P1_THREAD = [{ id: "c4", author: "carol", created_utc: 1_699_990_000, link
 const CACHE_NOW = POST.createdUtc + 30 * DAY;
 
 export const SCENARIOS = Object.freeze([
-  { name: "light", about: "a light user: two lifetime aggregates and one timestamp search per kind", world: LIGHT },
+  { name: "light", about: "a light user, aggregates first (core.js's default): two lifetime aggregates and one timestamp search per kind", world: LIGHT },
   { name: "light-interactions", about: "the same, the page's way (docs/adr/0007): one interactions query for the lifetime counts", world: LIGHT, interactionsFirst: true },
   { name: "interactions-refused", about: "interactions refuses the user (as for huge accounts), so the two aggregates answer", world: { ...LIGHT, refuseInteractions: true }, interactionsFirst: true },
   { name: "before-over-100", about: "more than 100 \"before\" comments: search, then aggregate count + asc search", world: HEAVY_BEFORE },
@@ -253,7 +253,7 @@ export const SCENARIOS = Object.freeze([
   { name: "archive-before", about: "a subreddit the archive covers: \"before\" from the files, the gap from the API", world: ARCHIVED, archive: true },
   { name: "archive-only", about: "a scan limited to the covered subreddit: lifetime from the files + one interactions query", world: ARCHIVED, archive: true, only: ["Python"] },
   { name: "archive-tail-only", about: "the same scan after one fetch of the subreddit's activity since the files (per scan, not per user): nothing per user", world: ARCHIVED_TAIL, archive: true, tail: true, only: ["Python"] },
-  { name: "archive-tail-full", about: "a full scan of a covered post after that fetch: only the two lifetime aggregates per user", world: ARCHIVED_TAIL, archive: true, tail: true },
+  { name: "archive-tail-full", about: "a full scan of a covered post after that fetch: only the lifetime counts per user (two aggregates, core.js's default order)", world: ARCHIVED_TAIL, archive: true, tail: true },
   { name: "thread-tree", about: "collecting an older post's commenters without the archive: one comment tree request per scan", world: { ...ARCHIVED, tree: TREE }, thread: true, post: P1 },
   { name: "archive-thread", about: "the same with the archive: the thread's files plus one request for its comments after them, and nothing per user for a scan limited to it", world: { ...ARCHIVED, thread: P1_THREAD, tail: { posts: [], comments: [] } }, archive: true, tail: true, only: ["Python"], thread: true, post: P1 },
   { name: "archive-tail-stale", about: "a post a week after the files end (1,500 comments between): the tail's pages grow with the gap, but are still one set per scan", world: STALE_TAIL, archive: true, tail: true, only: ["Python"], post: { createdUtc: 1_699_990_000 + 7 * DAY, numComments: 1000 } },
@@ -293,7 +293,6 @@ async function profileOnce(scenario, { cache = null, unexpected }) {
   const profile = await buildProfile(client, scenario.world.user, threadComments, post, {
     only: scenario.only ?? null,
     interactionsFirst: scenario.interactionsFirst ?? false,
-    lastCommentUtc: POST.createdUtc + 600,
     cache,
     dumps,
   });

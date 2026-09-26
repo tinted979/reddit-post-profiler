@@ -4,11 +4,13 @@ description: How to measure scan cost (Arctic Shift requests per scenario by end
 ---
 Run `node web/bench/scan-bench.mjs`, or `node web/bench/scan-bench.mjs --base <git-ref>` to
 compare with another commit (it runs the same scenarios there in a temporary git worktree and
-removes it afterwards). It drives `buildProfile` with a real `ArcticShiftClient` and
+removes it afterwards). It drives `fetchTails`, `collectCommenters` and `buildProfile` with a real `ArcticShiftClient` and
 `DumpSource` against an in-memory API model and the archive fixtures in
 web/tests/fixtures/dumps, on a virtual clock, and prints JSON: per scenario, API requests by
 endpoint, archive manifest and range reads with bytes, and `fakeSeconds`; plus `wallMs`. Any
-request the model doesn't expect makes it exit 1.
+request the model doesn't expect makes it exit 1. Scenarios without `interactionsFirst` ask the
+two aggregates first (core.js's default); the page asks one interactions query instead
+(docs/adr/0007), which `light-interactions` measures.
 
 Compare like with like: same scenarios, same ref pair. Request counts and bytes are exact and
 deterministic, so a change of even one request in a scenario is real. `fakeSeconds` follows

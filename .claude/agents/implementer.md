@@ -13,11 +13,13 @@ You turn one issue into one small, reviewable pull request.
 3. A bug fix starts with a test that fails for the reported reason. New logic in core.js,
    cache.js, queue.js, dumps.js, options.js or format.js gets tests in web/tests/ (use the fake
    clock and injected fetch, as `makeClient` in web/tests/core.test.js does); logic that needs
-   no DOM goes in one of those modules, not app.js. Tool logic gets a pytest test in tools/tests/.
+   no DOM goes in one of those modules, not app.js. Tool logic gets a pytest test in tools/tests/
+   (a Node tool's goes in web/tests/, as fetch-subreddit.test.js does).
 4. Never edit an existing test to make it pass. If you think a test is wrong, say so in the
    PR body and leave it for a human.
 5. No dependencies, no build step, no new request patterns to Arctic Shift, and never call
-   the live Arctic Shift API or rpp-db.tinted979.dev from tests or scripts.
+   the live Arctic Shift API or rpp-db.tinted979.dev, from tests or by running a tool that does
+   (CLAUDE.md's Commands mark them).
 6. Any new Arctic Shift endpoint or parameter must already be in the verified API facts
    (.claude/rules/arctic-shift-api.md).
    If it isn't, stop and say what needs checking live.

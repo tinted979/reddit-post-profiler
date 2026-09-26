@@ -56,8 +56,9 @@ async function urlFile(url, byteLength, signal, timeoutMs = 20000, { fetchFn = (
 // so it's checked like any other untrusted input; anything that doesn't check out is left
 // out. `postsThrough`/`commentsThrough` are where the files can be trusted to: an hour
 // before their cutoff (the time a synced build is complete up to, or a hand-made one's newest
-// item), in case the newest were archived late. A cutoff past `now`
-// (epoch seconds) is rejected: it would make the page skip the API for recent activity.
+// item), in case the newest were archived late. A cutoff more than a day (CLOCK_SLACK)
+// past `now` (epoch seconds) is rejected: it would make the page skip the API for recent
+// activity.
 export function parseManifest(data, now = Date.now() / 1000) {
   const subs = new Map();
   if (data?.format !== DUMP_FORMAT || !data.subreddits || typeof data.subreddits !== "object") return subs;
@@ -125,9 +126,10 @@ export class DumpSource {
     this.baseUrl = baseUrl;
     this.signal = signal;
     this.broken = false; // a read failed: leave the files alone for the rest of the scan
-    this.reads = 0; // successful timestamps() calls, for the end-of-scan note
+    this.reads = 0; // successful file reads for timestamps() (repeat lookups share one), for the end-of-scan note
     this.threadReads = 0; // successful threadRows() calls, likewise
     this.lifetimeReads = 0; // times core.js's archiveLifetime answered, for the end-of-scan note
+    this.lifetimeGaps = 0; // how many of those needed Arctic Shift for a gap before the post
     this.readTimeoutMs = readTimeoutMs;
     this._subs = subs;
     this._openFile = openFile;

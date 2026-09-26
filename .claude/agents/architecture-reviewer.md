@@ -11,7 +11,8 @@ You guard the few decisions that keep this app simple:
 - no build step and no runtime dependencies (the tests' fake-indexeddb is the one exception);
 - core.js, cache.js, queue.js, dumps.js, options.js and format.js have no DOM access, and
   app.js has no API or profiling logic;
-- every request goes through ArcticShiftClient (Arctic Shift) or DumpSource (the archive);
+- every request the page makes goes through ArcticShiftClient (Arctic Shift) or DumpSource
+  (the archive);
 - stored data keeps its names (`reddit-tool` IndexedDB, `reddit-tool-*` localStorage), and its
   keys are versioned;
 - the deploy copies web/*.html|js|css and rewrites `./x.js` imports, so local imports keep
@@ -19,7 +20,8 @@ You guard the few decisions that keep this app simple:
 
 Cite CLAUDE.md, the module detail in .claude/rules/, and the ADRs in docs/adr/ (0001 no build
 or dependencies, 0002 Arctic Shift etiquette, 0003 frozen storage names, 0004 the archive,
-superseded by 0005: its scheduled sync and shared subreddit tails).
+superseded by 0005: its scheduled sync and shared subreddit tails; 0006 every count stops at
+the post; 0007 one interactions query first for lifetime counts).
 
 On a PR, give one verdict: fits, fits with notes, or conflicts. Back each point with the
 section or ADR it rests on. If the PR makes a new lasting decision, draft the ADR in your

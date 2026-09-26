@@ -5,8 +5,8 @@
 """The archive sync's build job (docs/adr/0005): bring the subreddits in tools/archive.json up
 to date, and leave bundles for tools/publish_build.sh. It needs no token.
 
-  uv run tools/archive_sync.py plan  [--config tools/archive.json]
-  uv run tools/archive_sync.py build --out DIR [--config ...] [--only NAME] [--repair NAME] [--budget PAGES]
+  uv run tools/archive_sync.py [--config tools/archive.json] plan
+  uv run tools/archive_sync.py [--config ...] build --out DIR [--only NAME] [--repair NAME] [--budget PAGES]
 
 `plan` says which subreddits are due, and why. `build` does the same, then, for each in turn:
   1. downloads its live build through the public URL (and, past the edge cache, the live
@@ -28,7 +28,7 @@ A subreddit is due:
     (its cutoff within CAUGHT_UP of now) repairs; one still catching up syncs;
   - for a first build from its start, when it isn't live yet and its config says
     "backfill": "api". Otherwise it's skipped: import it instead (build_dumps.py from the
-    download tool's JSONL, then upload_dumps.sh).
+    download tool's JSONL, then upload_dumps.sh --only KEY).
 Caught-up subreddits go first, most overdue first, then those catching up, then first builds.
 --only NAME builds just that one, due or not; --repair NAME repairs just that one.
 
@@ -169,7 +169,7 @@ def plan(config: dict, manifest, logs: dict, now: int, only: str | None = None, 
                 dues.append({"name": name, "key": key, "mode": "first", "cut": None, "rank": 2, "overdue": 0})
             else:
                 skipped.append(f"r/{name} isn't in the archive yet: import it (build_dumps.py from the download tool's "
-                               "JSONL, then upload_dumps.sh), or set \"backfill\": \"api\" in tools/archive.json")
+                               "JSONL, then upload_dumps.sh --only KEY), or set \"backfill\": \"api\" in tools/archive.json")
             continue
         built, *cutoffs = (entry.get(f) for f in ("built_utc", "posts_to_utc", "comments_to_utc"))
         if not all(check_upload.is_time(v) for v in (built, *cutoffs)):

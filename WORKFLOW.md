@@ -72,7 +72,7 @@ Ten decisions drive everything else. When a later section seems arbitrary, it fo
 
 2. **Permissions come from tokens, rulesets and hooks, never from prompts.** A reviewer runs on a `GITHUB_TOKEN` scoped to `contents: read, pull-requests: write`, so a fully prompt-injected reviewer can still only comment. Anthropic's docs are blunt that instructions are "a request, not a guarantee", and that Bash allow rules are not a security boundary [A6][A4].
 
-3. **Every run starts from something you did, or from a schedule that can only file capped issues.**
+3. **Every agent run starts from something you did, or from a schedule that can only file capped issues.**
    - Every agent workflow checks `github.actor == github.repository_owner`.
    - Agents can't start other agents. Events from `GITHUB_TOKEN` don't trigger workflows [G16], and the action refuses bot actors by default [A18].
    - Agents only act on text you wrote (or that an audit filed and you then labelled). This closes the "untrusted issue → privileged agent" path behind PromptPwnd and Clinejection [R1][R5].
@@ -100,7 +100,7 @@ Ten decisions drive everything else. When a later section seems arbitrary, it fo
    - One repository variable, `AGENTS_ENABLED`, switches every agent off.
    - All of this runs on your Claude subscription, so it draws on the same usage limits as your interactive sessions [A21].
 
-10. **This repository is public, and so are its Actions logs and artifacts.** No secret other than the Claude token ever reaches an agent job, and it's scrubbed from subprocess environments. Findings are written as if published, because they are.
+10. **This repository is public, and so are its Actions logs and artifacts.** No secret other than the Claude token ever reaches an agent's step, and it's scrubbed from subprocess environments. Writer jobs also hold the writer app's key, passed only to the step that mints their token. Findings are written as if published, because they are.
 
 ---
 
@@ -113,8 +113,8 @@ Ten decisions drive everything else. When a later section seems arbitrary, it fo
 | **implementer** (senior developer) | CI and interactive | `agent:implement` label on an issue; `@claude` on a PR; you, locally | Your writer app (push `claude/<issue>-*`, open draft PRs) | Code and tests on its own branch | A draft PR with green tests and evidence, or a comment explaining why it stopped |
 | **refactorer** | CI and interactive | `agent:refactor` label | Writer app | Code only; existing tests are locked | A draft PR, behaviour unchanged, ≤ ~300 lines |
 | **pr-reviewer** | CI | You mark a PR ready (or open it ready); `review:pr-reviewer` | `GITHUB_TOKEN`: comment only | Nothing | ≤ 5 inline comments and one summary |
-| **architecture-reviewer** | CI and interactive | PR touches CLAUDE.md/ADRs, adds a module or changes storage schema; label; monthly | Comment-only on PRs; none in audits | Nothing | A verdict (fits / notes / conflicts) with sources; an ADR draft if needed |
-| **security-reviewer** | CI | PR touches `.github/`, `.claude/`, deploy scripts, CORS or `index.html`; label | Comment only | Nothing | Inline comments and a summary; never quotes a secret |
+| **architecture-reviewer** | CI and interactive | PR touches CLAUDE.md, rules, WORKFLOW.md or ADRs, adds a module or changes storage schema; label; monthly | Comment-only on PRs; none in audits | Nothing | A verdict (fits / notes / conflicts) with sources; an ADR draft if needed |
+| **security-reviewer** | CI | PR touches `.github/`, `.claude/`, deploy scripts, the archive sync's scripts, config or runbook, CORS or `index.html`; label | Comment only | Nothing | Inline comments and a summary; never quotes a secret |
 | **bug-hunter** | CI and interactive | Weekly; manual dispatch | None (findings → JSON) | Nothing (scratch tests on the runner) | ≤ 3 issues, each with a failing reproduction test |
 | **perf-auditor** | CI and interactive | Monthly; `review:perf-auditor` on a PR | None, or comment only on a PR | Nothing | Issues or a PR comment with measured before/after numbers |
 | **context-steward** | CI | Monthly; dispatch | None | Nothing | Issues listing wrong or dead lines in CLAUDE.md and the agent files, with exact replacement text |
@@ -172,7 +172,7 @@ Everything that isn't in this table is either you or a script.
 ### 3.5 Architecture reviewer
 
 - **Trigger on PRs:**
-  - The diff touches `CLAUDE.md` or `docs/adr/`, adds a top-level file in `web/`, or changes `DB_VERSION` or `STORES`.
+  - The diff touches `CLAUDE.md`, `.claude/rules/`, `WORKFLOW.md` or `docs/adr/`, adds a top-level file in `web/`, or changes `DB_VERSION` or `STORES`.
   - Or you add `review:architecture-reviewer`.
 - **Trigger in audits:** monthly drift audit.
 - **Context:** CLAUDE.md, `docs/adr/*`, and the `adr` skill.
@@ -222,7 +222,7 @@ This role isn't on your list. It covers the one area where a mistake is both lik
 
 - **Trigger:** the 1st of the month, dispatch, or `review:perf-auditor` on a PR.
 - **What "performance" means here:** Arctic Shift requests first, because it's a free, shared, rate-limited service (about 0.8 req/s). Then archive bytes read, then main-thread time.
-- **How it measures:** with the `perf-audit` skill's script, using fixtures, the fake clock and an injected fetch. It never calls the live API or R2 bucket; its file and prompt forbid it, and CI has no reason to.
+- **How it measures:** with the `perf-audit` skill's script, using fixtures, the fake clock and an injected fetch. It never calls the live API or R2 bucket; its file and prompt forbid it. Only `archive-sync.yml` calls the live API from CI, and it runs no agent.
 - **Done:** findings only with numbers (metric, baseline, current value, responsible code). On a PR it posts one comment with a before/after table.
 - **Bootstrap:** the bench script is the first `agent:implement` issue to file.
 
@@ -231,7 +231,7 @@ This role isn't on your list. It covers the one area where a mistake is both lik
 Your CLAUDE.md is unusually precise. It names functions, keys, constants, endpoints and measured numbers, so it drifts. Every other role trusts it, so drift here turns into wrong code everywhere.
 
 - **Trigger:** monthly, or dispatch.
-- **Work:** checks every factual claim in CLAUDE.md, `.claude/rules/`, the agent files and the skills against the code, using `grep` and `git log -S`.
+- **Work:** checks every factual claim in CLAUDE.md, WORKFLOW.md's corrections, `.claude/rules/`, the agent files and the skills against the code, using `grep` and `git log -S`.
 - **Done:** up to three issues, each with the current text, the correct text and the evidence. It also flags lines that no longer earn their place, to hold CLAUDE.md under about 200 lines [A2].
 - **It can't edit CLAUDE.md, and neither can the CI writers.** You apply its proposed text yourself; it's usually a one-line edit.
 
@@ -269,11 +269,13 @@ Don't run an interactive session on a branch a CI writer owns, or the reverse. W
 
 | Workflow | Triggers | Jobs → roles | Token and permissions |
 |---|---|---|---|
-| `checks.yml` (reusable) | `workflow_call` from `ci.yml` and `agent-review.yml` | `test`: web tests, Python tests, rule guards. `guards` (PRs only): test integrity, sensitive paths, PR size, actionlint and zizmor | `contents: read` (+ `issues/pull-requests: read` for label checks) |
+| `checks.yml` (reusable) | `workflow_call` from `ci.yml` and `agent-review.yml` | `test`: web tests, Python tests, rule guards, the CI scripts' tests, shellcheck. `guards` (PRs only): test integrity, sensitive paths, PR size, actionlint and zizmor | `contents: read` (+ `issues/pull-requests: read` for label checks) |
 | `ci.yml` (replaces `pages.yml`) | `push` to `main`; `pull_request` (incl. `labeled`); dispatch | `checks` → `deploy` (main only) → live-site check | `pages: write`, `id-token: write` in deploy only |
-| `agent-review.yml` (replaces `code-review.yml`) | `pull_request`: opened, reopened, ready_for_review, labeled `review:*` | `gate` (= checks) → `route` (picks roles from paths/labels) → `review` matrix | `GITHUB_TOKEN`: `contents: read`, `pull-requests: write`. No Claude App, no `id-token` |
+| `agent-review.yml` (replaces `code-review.yml`) | `pull_request`: opened, reopened, ready_for_review, labeled `review:*` | `gate` (= checks, tests only) → `route` (the base branch's router picks roles from paths/labels) → `bench` (perf-auditor only: runs the PR's code with a read-only token) → `review` matrix | `GITHUB_TOKEN`: `contents: read`, `pull-requests: write`. No Claude App, no `id-token` |
 | `agent-write.yml` | `issues: labeled` (`agent:implement`, `agent:refactor`); `issue_comment` with `@claude` on a PR; dispatch | `from-issue` (agent mode) and `follow-up` (tag mode), both in concurrency group `agent-write` with `queue: max` | `GITHUB_TOKEN` read-only; the **writer app** token (minted per job by `actions/create-github-app-token`; no `id-token`) pushes `claude/<issue>-*` and opens draft PRs |
 | `agent-audit.yml` | Two crons + dispatch (role choice + focus) | `plan` → `audit` matrix (one at a time) → `file-issues` | Audit job: `contents/issues: read`, nothing else. Filing job: `issues: write`, no Claude |
+| `archive-check.yml` (no agent) | Mondays 06:17 UTC; dispatch | `check`: `tools/check_dumps.sh` against the live archive | `contents: read`; no secrets |
+| `archive-sync.yml` (no agent) | Hourly at :23 while `vars.ARCHIVE_SYNC_ENABLED` is `true`; dispatch (`mode`: sync, dry-run, plan) | `build` (`tools/archive_sync.py`) → `publish` (`tools/publish_build.sh` per bundle) → `verify` (`tools/check_dumps.sh`) | `contents: read` in every job; the R2 secrets reach one step of `publish`, from the `archive` environment (`main` only) |
 
 Every agent job:
 
@@ -518,8 +520,8 @@ The mitigations are layered: **prevent** (the attempt can't happen), **detect** 
 
 | Failure mode | What happened elsewhere | Mitigation here |
 |---|---|---|
-| **Prompt injection via issues, PRs or comments** reaching a privileged agent | PromptPwnd: untrusted issue and PR text in AI-action prompts led to leaked secrets, including in Claude Code Action workflows; `allowed_non_write_users: "*"` "should be considered extremely dangerous" [R1]. **Clinejection**: Cline's issue-triage workflow on claude-code-action interpolated issue titles into the prompt with broad tools. Researchers link it to the stolen npm token behind a malicious `cline@2.3.0`, live for about 8 hours; Cline's advisory confirms the release but not the route [R5][R6][R37] | **Prevent:** only the owner can trigger (actor checks). Never `allowed_non_write_users` or `allowed_bots`. No event text is interpolated into prompts, only numbers. Writers only act on issues you (or the audit bot) wrote, read with the exact `gh issue view N` (no comments). `include_comments_by_actor` on follow-ups. **Contain:** readers can only comment, auditors can't write at all, and no secret other than the scrubbed Claude token is present |
-| **Over-privileged or stolen tokens** | A prompt-injected run could leak the credentials for requesting its OIDC token, which an attacker could exchange for the Claude App's write token (fixed Jan 2026, published June) [R7]. Wiz found credential files from cloud-auth actions exfiltrated by AI actions in the same workflow [R9] | Reviewers and auditors use `GITHUB_TOKEN` with job-scoped permissions and no `id-token`. `permissions: {}` at workflow level. No cloud credentials in any agent workflow. The R2 token reaches GitHub only as the `archive` environment's secrets (`main` only). One step of `archive-sync.yml`'s `publish` job reads them, and that job runs no agent, no Node and no Python (docs/adr/0005). Your own copy stays in your local rclone config |
+| **Prompt injection via issues, PRs or comments** reaching a privileged agent | PromptPwnd: untrusted issue and PR text in AI-action prompts led to leaked secrets, including in Claude Code Action workflows; `allowed_non_write_users: "*"` "should be considered extremely dangerous" [R1]. **Clinejection**: Cline's issue-triage workflow on claude-code-action interpolated issue titles into the prompt with broad tools. Researchers link it to the stolen npm token behind a malicious `cline@2.3.0`, live for about 8 hours; Cline's advisory confirms the release but not the route [R5][R6][R37] | **Prevent:** only the owner can trigger (actor checks). Never `allowed_non_write_users` or `allowed_bots`. No event text is interpolated into prompts, only numbers. Writers only act on issues you (or the audit bot) wrote, read with the exact `gh issue view N` (no comments). `include_comments_by_actor` on follow-ups. **Contain:** readers can only comment, auditors can't write at all, and no secret other than the scrubbed Claude token reaches an agent's step |
+| **Over-privileged or stolen tokens** | A prompt-injected run could leak the credentials for requesting its OIDC token, which an attacker could exchange for the Claude App's write token (fixed Jan 2026, published June) [R7]. Wiz found credential files from cloud-auth actions exfiltrated by AI actions in the same workflow [R9] | Reviewers and auditors use `GITHUB_TOKEN` with job-scoped permissions and no `id-token`. `permissions: {}` at workflow level. No cloud credentials in any agent workflow. The R2 token reaches GitHub only as the `archive` environment's secrets (`main` only). One step of `archive-sync.yml`'s `publish` job reads them, and that job runs no agent and no Node or Python of ours, only the checkout and download actions before that step (docs/adr/0005). Your own copy stays in your local rclone config |
 | **Compromised or mutable third-party actions** | tj-actions: release tags repointed to malicious code; GitHub says a full SHA is "the only way to use an action as an immutable release" [R12][G17] | Every `uses:` is a full SHA with a version comment. Dependabot bumps them weekly in one grouped PR. `zizmor` and `actionlint` run in `guards` on every PR |
 | **`pull_request_target` / "pwn requests"** | Nx s1ngularity started from a `pull_request_target` workflow and PR-title injection [R11]. GitHub's guidance: never check out untrusted code in one [G19]. GitHub will block `pull_request_target` by default in public repos from 2 Nov 2026 [G21] | Never used. Fork PRs need approval to run workflows, and agents skip forks (`head.repo.full_name == github.repository`) |
 | **Cache poisoning** | Clinejection flooded the Actions cache so the nightly publish restored attacker-controlled entries [R5] | No `actions/cache` and no `setup-node` caching in agent or deploy jobs. The deploy job restores nothing |
@@ -532,9 +534,9 @@ The mitigations are layered: **prevent** (the attempt can't happen), **detect** 
 | **Evaluator bias** (praising its own work, or inventing problems) | Agents grading their own work tend to be "confidently praising"; a separate evaluator tuned to be skeptical was "far more tractable" [A25]. Conversely, a reviewer told to find gaps finds some [A1] | Reviewers are separate runs with fresh context [A1]. The evidence bar requires a line reference and a reason, and zero findings is allowed |
 | **Stale or bloated grounding** | Performance drops as context grows, even on simple tasks [R31]. Instruction-following degrades with instruction count [R30] | Context steward monthly. CLAUDE.md under 200 lines; module detail in path-scoped rules; procedures in skills |
 | **Scope creep and giant PRs** | In 567 Claude Code PRs, 83.8% were merged; rejections cited alternative solutions and PR size [R18]. Acceptance varies most by task type [R19] | One issue per PR, acceptance criteria in the issue form, a 600-line guard, and a "what I didn't do" section |
-| **Secrets in public logs** | Actions logs and artifacts of public repos are public | No `show_full_output`, which the action warns can expose file contents that include secrets [A18]. The subprocess env scrub is on. Role files forbid quoting secrets or exploits. Only the Claude token exists as a secret |
-| **Hammering Arctic Shift from CI** | Project-specific: it's a free, shared, rate-limited service (CLAUDE.md) | No WebFetch or curl in any agent's tools; tests and the perf bench use fixtures and fake fetch; role files forbid live calls |
-| **Schedules silently stopping** | GitHub disables scheduled workflows in public repos after 60 days without repository activity [G14] | Acceptable (an idle repo needs no audits), but re-enable *Agent audits* in the Actions tab when you come back |
+| **Secrets in public logs** | Actions logs and artifacts of public repos are public | No `show_full_output`, which the action warns can expose file contents that include secrets [A18]. The subprocess env scrub is on. Role files forbid quoting secrets or exploits. The repository's secrets are the Claude token and the writer app's key; the R2 token is only in the `archive` environment (see the tokens row) |
+| **Hammering Arctic Shift from CI** | Project-specific: it's a free, shared, rate-limited service (CLAUDE.md) | No WebFetch or curl in any agent's tools; tests and the perf bench use fixtures and fake fetch; role files forbid live calls. One workflow calls the API on purpose: `archive-sync.yml` runs no agent, fetches through `ArcticShiftClient` one request at a time within a page budget, and tags its requests `meta-app=reddit-post-profiler-archive` (docs/adr/0005) |
+| **Schedules silently stopping** | GitHub disables scheduled workflows in public repos after 60 days without repository activity [G14] | Acceptable for audits (an idle repo needs no audits), but re-enable *Agent audits* in the Actions tab when you come back. *Sync the archive* stops too, since publishing to R2 isn't repository activity, and the archive then falls behind: re-enable it as well (docs/archive-runbook.md) |
 
 **Optional extra hardening**, if you want defence in depth later:
 
@@ -590,10 +592,11 @@ Other rules:
 │   │   ├── web-storage.md             # paths: web/cache.js, web/queue.js
 │   │   ├── web-app.md                 # paths: web/app.js
 │   │   ├── archive.md                 # paths: web/dumps.js, tools/**
-│   │   └── arctic-shift-api.md        # paths: web/core.js, web/dumps.js, tools/** (verified API facts)
+│   │   ├── arctic-shift-api.md        # paths: web/core.js, web/dumps.js, tools/** (verified API facts)
+│   │   └── ci-and-agents.md           # paths: .github/**, .claude/**, WORKFLOW.md
 │   └── skills/
 │       ├── finding-format/            # Severity scale, evidence bar, findings.schema.json (all reporting roles)
-│       ├── perf-audit/                # Procedure + scripts/scan-bench.mjs (first agent task: write it)
+│       ├── perf-audit/                # Procedure for web/bench/scan-bench.mjs
 │       ├── adr/                       # ADR template and rules
 │       └── live-browser-test/         # Moved from CLAUDE.md's "Sandbox testing notes"
 ├── .github/
@@ -605,16 +608,23 @@ Other rules:
 │   ├── scripts/
 │   │   ├── rule-guards.sh             # Grep-able CLAUDE.md rules (innerHTML, fetch, imports, no deps)
 │   │   ├── test-integrity.sh          # Test count and skip/only/todo markers vs base
-│   │   ├── pr-guards.sh               # Agent-branch guards + owner-ack label check
-│   │   └── file-findings.mjs          # Audit JSON → ≤ 3 de-duplicated issues
+│   │   ├── pr-guards.sh               # Protected paths, agent work by authorship, ack:tests, PR size
+│   │   ├── owner-ack.sh               # Did the owner add this ack: label?
+│   │   ├── tests-guard.sh             # ack:tests first, then test-integrity.sh (runs PR code; last)
+│   │   ├── review-route.sh            # Picks the reviewers for agent-review.yml
+│   │   ├── file-findings.mjs          # Audit JSON → ≤ 3 de-duplicated issues
+│   │   └── tests/                     # Tests of the scripts and the path hook
 │   └── workflows/
 │       ├── checks.yml                 # Reusable: tests + rule guards; PR guards + workflow lint
 │       ├── ci.yml                     # Checks → deploy to Pages → live check (replaces pages.yml)
 │       ├── agent-review.yml           # Checks → route by path/label → read-only reviewers (replaces code-review.yml)
 │       ├── agent-write.yml            # Label/@claude → implementer or refactorer; serialized
-│       └── agent-audit.yml            # Schedules → read-only audits → capped issue filing
+│       ├── agent-audit.yml            # Schedules → read-only audits → capped issue filing
+│       ├── archive-check.yml          # Weekly: the live archive serves the page right
+│       └── archive-sync.yml           # Hourly: build → publish to R2 → verify; no agent
 └── docs/
-    ├── adr/                           # 0001-no-build-no-deps.md, 0002-arctic-shift-etiquette.md, …
+    ├── adr/                           # 0001-no-build-no-dependencies.md, 0002-arctic-shift-etiquette.md, …
+    ├── archive-runbook.md             # Running, pausing and repairing the archive sync
     └── history/                       # (existing) plans for multi-step work, kept after they ship
 ```
 
@@ -804,11 +814,12 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 > - **actionlint** is a pinned release binary with a checksum, not `go run`.
 > - **The perf-auditor** joins the monthly schedule only once `scan-bench.mjs` exists.
 > - **`archive-check.yml`** (not covered here) is hardened the same way: pinned, with `persist-credentials: false`.
+> - **`archive-sync.yml`** (not covered here, and not an agent workflow) keeps the R2 archive current (docs/adr/0005, `docs/archive-runbook.md`). It runs hourly at :23 while the variable `ARCHIVE_SYNC_ENABLED` is `true`, and on dispatch, from `main` only. Its `build` job has no secrets. One step of its `publish` job gets the R2 token as the `archive` environment's secrets, and that environment allows only `main`. So there are seven workflows, and §4.5's settings also need the `archive` environment, its `R2_*` secrets and the variable.
 > - **Tests.** The hook, the rule guards and the issue filer have tests in `.github/scripts/tests/`.
 > - **The review gate runs the tests only** (`checks.yml` with `guards: false`). With the full checks in front of it, the security reviewer could never run before `ack:sensitive`, though §3.6 says you read it before adding that label. `ci.yml` still enforces the guards at merge.
-> - **The review router is a script,** `.github/scripts/review-route.sh`, with tests. Before running a role, `agent-review.yml` checks that its `.claude/agents/<role>.md` exists on the base branch. The action removes base-restored paths that the base lacks, so a new role can't run until it's merged (including on the PR that adds it). This also makes later stages' roles switch on without editing the workflow.
+> - **The review router is a script,** `.github/scripts/review-route.sh`, with tests, run from the base branch so a PR can't pick its own reviewers. Before running a role, `agent-review.yml` checks that its `.claude/agents/<role>.md` exists on the base branch. The action removes base-restored paths that the base lacks, so a new role can't run until it's merged (including on the PR that adds it). This also makes later stages' roles switch on without editing the workflow.
 > - **Reviewers may only add comments.** `--disallowedTools` refuses `gh pr comment --edit-last` and `--delete-last`, because every reviewer posts as `github-actions[bot]`, and a reviewer steered by a diff could otherwise rewrite another's findings. The deny pattern was tested with the Claude Code CLI before use.
-> - **Stage 6 as built:** CLAUDE.md went from 140 lines and 36 KB to 66 lines and 9 KB. "Rules for changes" stays word for word. The detail moved verbatim, checked line by line, into six path-scoped rules: `web-core`, `web-storage`, `web-app` (with options.js and format.js), `archive` (with hyparquet.js and tools/), `arctic-shift-api`, and `ci-and-agents` (the CI, rulesets and agent setup, which the plan had kept in CLAUDE.md). The sandbox notes became the `live-browser-test` skill. There are ADRs 0001–0004 in `docs/adr/`. The Debt Ledger's 14 open items became `debt` issues #52–#65, `action-pinning` was marked done (#34), and the ledger is frozen.
+> - **Stage 6 as built:** CLAUDE.md went from 140 lines and 36 KB to 66 lines and 9 KB. "Rules for changes" stays word for word. The detail moved verbatim, checked line by line, into six path-scoped rules: `web-core`, `web-storage`, `web-app` (with options.js and format.js), `archive` (with hyparquet.js and tools/), `arctic-shift-api`, and `ci-and-agents` (the CI, rulesets and agent setup, which the plan had kept in CLAUDE.md). The sandbox notes became the `live-browser-test` skill. It added ADRs 0001–0004 in `docs/adr/`; there are now 0001–0007, and 0005 superseded 0004. The Debt Ledger's 14 open items became `debt` issues #52–#65, `action-pinning` was marked done (#34), and the ledger is frozen.
 > - **An agent run with `--json-schema` needs `StructuredOutput` in its role file's `tools:`.** Claude Code delivers structured output through that tool. An agent whose `tools:` list omits it returns nothing, whatever `--allowedTools` says (checked with the CLI: `tools: Read` gave no output; `tools: Read, StructuredOutput` did). The first audit run (context-steward) did its work and then failed with "--json-schema was provided but Claude did not return structured_output". So all four audit roles list it.
 > - **The bench lives at `web/bench/scan-bench.mjs`**, not `.claude/skills/perf-audit/scripts/`. A writer built it (#40 → #41), and writers may not touch `.claude/`. The `perf-audit` skill points at it. On a PR (only when asked with the label), a separate `bench` job runs it with a read-only token and no agent, and passes its JSON to the perf-auditor. Otherwise the PR's code would run with the reviewer's token, which can edit or delete other reviewers' comments (security review of #49).
 > - **`file-findings.mjs` exports `fileFindings(files, { gh })`, and its tests pass a fake `gh` in memory.** A PATH-shadowed fake once ran the real `gh` on Windows and filed six junk issues (since deleted). It also defuses @mentions and keeps a repro test from closing its code fence. It HTML-escapes finding prose, because GitHub's rendered page hides `<!-- … -->` and folds `<details>` while a writer reads the raw text, and it trusts a `<!-- finding-id: … -->` marker only as an issue's last line, where agent text never is, not even the unescaped repro test (security review of #49). The bug hunter's cron moved to 06:47, clear of `archive-check` at 06:17.

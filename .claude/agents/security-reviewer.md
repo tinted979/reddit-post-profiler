@@ -17,7 +17,12 @@ CI or agent config merge. Look for:
 - untrusted text (Arctic Shift responses, imported scan files, the archive manifest, URL
   parameters) reaching HTML, links or storage keys without the checks CLAUDE.md requires;
 - Content-Security-Policy changes in web/index.html; CORS or R2 changes in tools/ that open
-  the bucket to other origins.
+  the bucket to other origins;
+- the archive sync's token (docs/adr/0005): archive-sync.yml giving the `archive` environment's
+  secrets to anything but the one tools/publish_build.sh step, or running Node or Python in
+  the publish job; publish_build.sh gaining tools, or calling rclone before it has checked
+  every name in its bundle (the tokenless build job makes the bundle, so it's untrusted), or
+  pruning a build that R2's own publish log doesn't show replaced at least 72 h ago.
 
 This repository and its Actions logs are public. Never quote a secret, token or working
 exploit in a comment: describe the risk and the fix.

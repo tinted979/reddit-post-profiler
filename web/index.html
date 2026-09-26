@@ -73,7 +73,7 @@
               <input id="concurrency" type="number" min="1" max="5" step="1" inputmode="numeric" value="2">
             </div>
           </div>
-          <p class="hint">AutoModerator and deleted accounts are always skipped. Most commenters take 2 requests to the free Arctic Shift API, 3–4 if they're active in the post's subreddit outside this thread, and none when saved results can be reused. Threads with more than <span data-const="LARGE_SCAN">300</span> commenters ask before profiling them all. If Arctic Shift rate-limits, every request pauses; if it asks us to slow down, fewer requests run at once.</p>
+          <p class="hint">AutoModerator and deleted accounts are always skipped. A commenter usually takes 1 request to the free Arctic Shift API, 2–3 if they'd been active in the post's subreddit before the post and it has no archive files, and none when saved results can be reused. Threads with more than <span data-const="LARGE_SCAN">300</span> commenters ask before profiling them all. If Arctic Shift rate-limits, every request pauses; if it asks us to slow down, fewer requests run at once.</p>
         </fieldset>
         <!-- Outside #option-fields so it stays editable during a run: badges are worked out
              from saved facts, so changing them never needs new requests. -->
@@ -164,7 +164,7 @@
 
     <section id="saved" aria-labelledby="saved-heading">
       <h2 id="saved-heading" tabindex="-1">Saved scans <span id="saved-count" class="count"></span></h2>
-      <p id="saved-legend" class="legend">Scans you've run in this browser. Open one to see its users again straight away, with no requests; <b>Scan again</b> checks for new comments and activity.</p>
+      <p id="saved-legend" class="legend">Scans you've run in this browser. Open one to see its users again straight away, with no requests; <b>Scan again</b> checks the thread for new commenters and reuses saved results for the rest.</p>
       <p id="saved-empty" class="legend" hidden>No saved scans yet. Scans you run are saved here, in this browser only.</p>
       <ul id="saved-list" class="saved-list"></ul>
       <div class="saved-tools">
@@ -180,7 +180,7 @@
     <details id="about" class="about">
       <summary>About and responsible use</summary>
       <div class="about-body">
-        <p>Everything shown is public Reddit activity, archived by <a href="https://github.com/ArthurHeitmann/arctic_shift" target="_blank" rel="noopener">Arctic Shift</a>, a free archive run by a volunteer. This page only counts that activity. Your scans go straight from your browser to Arctic Shift and, for subreddits with archive files, to the project's file host on Cloudflare; results are kept only in your browser.</p>
+        <p>Everything shown is public Reddit activity, archived by <a href="https://github.com/ArthurHeitmann/arctic_shift" target="_blank" rel="noopener">Arctic Shift</a>, a free archive run by a volunteer. This page only counts that activity. Your scans go straight from your browser to Arctic Shift and to the project's file host on Cloudflare, which lists the subreddits with archive files and serves those files; results are kept only in your browser.</p>
         <ul>
           <li><b>Use it to understand a discussion,</b> such as whether a thread's commenters are regulars in the subreddit. Don't use it to single out, harass or brigade people, and remember a count isn't the whole story about anyone.</li>
           <li><b>Counts can be incomplete:</b> the archive can miss posts and comments, and anything removed before it was archived isn't there. Deleted accounts and AutoModerator are skipped.</li>

@@ -1,4 +1,4 @@
-> **History.** This plan was implemented in PR #17 and is kept for the record; it is not current work. For how the code works now, see CLAUDE.md.
+> **History.** This plan was implemented in PR #17 and is kept for the record; it is not current work. Its decision is docs/adr/0004, since superseded by 0005 (a scheduled sync and shared tails) and 0006 (every count stops at the post). For how the code works now, see CLAUDE.md and `.claude/rules/archive.md`.
 
 # Archive "before" facts: implementation plan
 

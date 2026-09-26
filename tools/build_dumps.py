@@ -35,8 +35,8 @@ Then upload the output directory (default dumps/, which git ignores) as it is.
 To bring a build up to date with rows fetched since (tools/fetch_subreddit.mjs, for the
 archive sync, docs/adr/0005), splice them onto it:
 
-  uv run tools/build_dumps.py --subreddit Hasan_Piker \
-      --posts new_posts.jsonl --comments new_comments.jsonl --splice live --cut 1790000000 \
+  uv run tools/build_dumps.py --subreddit Hasan_Piker \\
+      --posts new_posts.jsonl --comments new_comments.jsonl --splice live --cut 1790000000 \\
       --posts-through 1790100000 --comments-through 1790100000 --out live
 
 live/ is laid out like the archive: its manifest.json, and the subreddit's current build under

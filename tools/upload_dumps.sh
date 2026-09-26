@@ -32,8 +32,9 @@
 #  3. Only then the manifest goes up (cached 5 minutes) and is checked (check_dumps.sh
 #     manifest and cors), so a browser never reads a manifest naming files that aren't
 #     there or aren't served right.
-# Nothing is deleted: a browser holding the previous manifest still needs the previous
-# build. Old builds can be removed by hand once no manifest names them.
+# A whole upload deletes nothing: a browser holding the previous manifest still needs the
+# previous build. Old builds can be removed by hand once no manifest names them. (--only goes
+# through publish_build.sh, which prunes r/KEY's builds replaced at least 72 h ago.)
 #
 # RCLONE, CURL and CHECK_DUMPS name the programs (the tests pass fakes).
 

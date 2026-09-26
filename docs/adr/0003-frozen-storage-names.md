@@ -1,6 +1,6 @@
 # 0003. Frozen storage names and versioned keys
 
-**Status:** Accepted (recorded 2026-09-25).
+**Status:** Accepted (recorded 2026-09-25). The lifetime keys are now `v2|life|…` and `v2|lifeonly|…`, bumped by 0006 as this decision asks.
 
 ## Context
 

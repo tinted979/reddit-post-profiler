@@ -1,6 +1,14 @@
 *_activity.csv
+*_activity_partial.csv
 node_modules/
 dumps/
 !web/tests/fixtures/dumps/
 __pycache__/
 .tmp/
+# Local archive work and benchmark output at the top level (CLAUDE.md's Commands,
+# docs/archive-runbook.md): fetched JSONL, results, downloaded and new builds, bundles.
+/*.jsonl
+/*.json
+/dumps-*/
+/live/
+/bundle/
