@@ -54,7 +54,7 @@ KEY_NAME = re.compile(r"^[a-z0-9_]{2,21}$")
 VERSION_NAME = re.compile(r"^\w[\w.-]{0,39}$", re.ASCII)
 # The files of a build.
 BUILD_FILES = ("posts_by_author", "comments_by_author", "comments_by_link")
-# r/<key>/published.json: {format, subreddit, publishes: [{version, replaced, utc}], pruned:
+# r/<key>/published.json: {format, subreddit, publishes: [{version, replaced, utc[, repair]}], pruned:
 # [version]}, one publish entry per publish, oldest first (`pruned` only once there are any).
 # A replaced build is deleted PRUNE_AFTER after the publish that replaced it, long after any
 # page could still hold a manifest naming it (they're cached 5 minutes), so the log keeps its
@@ -121,7 +121,7 @@ def log_problem(log, key: str) -> str | None:
         return "has no list of publishes"
     for e in entries:
         ok = (isinstance(e, dict) and isinstance(e.get("version"), str) and VERSION_NAME.match(e["version"])
-              and is_time(e.get("utc"))
+              and is_time(e.get("utc")) and isinstance(e.get("repair", False), bool)
               and (e.get("replaced") is None or (isinstance(e["replaced"], str) and VERSION_NAME.match(e["replaced"]))))
         if not ok:
             return f"has an entry that doesn't check out: {e!r}"
@@ -152,7 +152,7 @@ def newly_pruned(old_log: dict | None, new_log: dict) -> list[str]:
 
 
 def merge_one(local: dict, live: dict | None, key: str, sizes: dict[str, int], log, now: int,
-              allow_older: bool = False) -> tuple[dict | None, dict | None, list[str]]:
+              allow_older: bool = False, repair: bool = False) -> tuple[dict | None, dict | None, list[str]]:
     """Merge r/<key>'s entry from `local` into `live`. `sizes` maps each file path found in the
     local build to its size, and `log` is the live publish log (None if there's none).
     Returns (the merged manifest, the log with this publish added, problems); the first two
@@ -208,7 +208,10 @@ def merge_one(local: dict, live: dict | None, key: str, sizes: dict[str, int], l
         return None, None, found
     merged = {**live, "subreddits": dict(sorted({**live.get("subreddits", {}), key: entry}.items()))}
     live_version = was.get("version") if was else None
-    publishes = (log["publishes"] if log is not None else []) + [{"version": version, "replaced": live_version, "utc": now}]
+    publish = {"version": version, "replaced": live_version, "utc": now}
+    if repair:
+        publish["repair"] = True  # the archive sync schedules the next repair from the last
+    publishes = (log["publishes"] if log is not None else []) + [publish]
     new_log = {"format": LOG_FORMAT, "subreddit": key, "publishes": publishes[-LOG_KEEP:]}
     pruned = (log.get("pruned", []) if log is not None else []) + due_for_pruning(log, {live_version, version}, now)
     if pruned:
@@ -239,6 +242,7 @@ def merge_one_main(argv: list[str], now: int | None) -> None:
     parser.add_argument("--log", required=True, type=Path, help="the live r/KEY/published.json (missing or empty: none)")
     parser.add_argument("--out", required=True, type=Path, help="the bundle directory to write (must not exist)")
     parser.add_argument("--allow-older", action="store_true", help="publish even if a cutoff goes backwards")
+    parser.add_argument("--repair", action="store_true", help="mark this publish as a repair in the log (tools/archive_sync.py)")
     args = parser.parse_args(argv)
     if args.out.exists():
         raise SystemExit(f"{args.out} already exists: a bundle is written afresh")
@@ -261,7 +265,7 @@ def merge_one_main(argv: list[str], now: int | None) -> None:
             if (args.dumps / rel).is_file():
                 sizes[rel] = (args.dumps / rel).stat().st_size
     merged, log, found = merge_one(local, live, args.key, sizes, old_log, int(now if now is not None else time.time()),
-                                   args.allow_older)
+                                   args.allow_older, args.repair)
     for problem in found:
         print(f"error: {problem}", file=sys.stderr)
     if found:

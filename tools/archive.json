@@ -1,0 +1,10 @@
+{
+  "subreddits": {
+    "Hasan_Piker": {"cadence": "1h"}
+  },
+  "overlap": "2h",
+  "repair_days": 7,
+  "repair_every": "7d",
+  "budget": 300,
+  "run_budget": 600
+}

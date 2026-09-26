@@ -22,6 +22,8 @@ uv run tools/build_dumps.py --subreddit X --posts new_p.jsonl --comments new_c.j
 tools/upload_dumps.sh [dumps] [--drop KEY]   # check against what's live, upload dumps/ to R2 (rclone remote "r2"), check the public URL
 uv run tools/check_upload.py merge-one --key x --dumps dumps --live live.json --log published.json --out bundle   # one subreddit's build, merged into the live manifest and checked, ready to publish (no token)
 tools/publish_build.sh bundle   # publish that bundle to R2: the one step that holds the token (rclone, curl and sha256sum only)
+uv run tools/archive_sync.py plan   # which subreddits in tools/archive.json are due for the archive sync (reads the public archive only)
+uv run tools/archive_sync.py build --out DIR [--only X]   # the sync's build job: fetch, splice, and bundles in DIR/bundles for publish_build.sh (fetches call the live API: not from tests or agents)
 tools/check_dumps.sh [all|manifest|cors|files]  # check the live archive serves the page right (no credentials; CI runs it weekly)
 node tools/fetch_subreddit.mjs --subreddit X --kind comments --after <epoch> --budget 50 --out c.jsonl --result c.json   # the sync's fetcher (calls the live API: never from tests or agents)
 uv run --with duckdb --with pytest pytest tools   # dump tool tests (CI runs them too)
