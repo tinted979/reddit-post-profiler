@@ -1,6 +1,7 @@
 {
   "subreddits": {
-    "Hasan_Piker": {"cadence": "1h"}
+    "Hasan_Piker": {"cadence": "1h"},
+    "Socialism_101": {"cadence": "6h"}
   },
   "overlap": "2h",
   "repair_days": 7,
