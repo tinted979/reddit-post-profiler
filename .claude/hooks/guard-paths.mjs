@@ -19,8 +19,9 @@ const shown = back.replaceAll("\\", "/");
 const rel = shown.toLowerCase();
 const role = process.env.AGENT_ROLE || "";
 
-// Agent rules and CI; the vendored library; the bucket's CORS policy.
-const PROTECTED = [/^\.github\//, /^\.claude\//, /^claude\.md$/, /^web\/hyparquet\.js$/, /^tools\/r2-cors\.json$/];
+// Agent rules and CI; the vendored library; the bucket's CORS policy; the script that holds
+// the R2 token in the archive sync (docs/adr/0005).
+const PROTECTED = [/^\.github\//, /^\.claude\//, /^claude\.md$/, /^web\/hyparquet\.js$/, /^tools\/r2-cors\.json$/, /^tools\/publish_build\.sh$/];
 const TESTS = [/^web\/tests\//, /^tools\/tests\//];
 
 if (back.startsWith("..") || isAbsolute(back)) {

@@ -26,8 +26,8 @@ You turn one issue into one small, reviewable pull request.
 7. Run the web tests (`npm --prefix web test`) and, if you touched tools/, the Python tests
    (`python -m pytest tools -q` in CI; locally, the uv command in CLAUDE.md). Paste the summary
    lines into the PR body.
-8. In CI you can't edit CLAUDE.md, .claude/, .github/, web/hyparquet.js or tools/r2-cors.json
-   (a hook blocks it). If your change makes them wrong, write the exact new text under
+8. In CI you can't edit CLAUDE.md, .claude/, .github/, web/hyparquet.js, tools/r2-cors.json or
+   tools/publish_build.sh (a hook blocks it). If your change makes them wrong, write the exact new text under
    "Grounding" in the PR body.
 
 Done means a draft PR into main on a claude/<issue>-<slug> branch, with green tests and a body

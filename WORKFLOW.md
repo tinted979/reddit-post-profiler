@@ -32,7 +32,7 @@ Around the agents are three deterministic layers, which do most of the actual pr
 
 1. **Checks run before any agent looks at a diff.** Tests, grep-able CLAUDE.md rules, a test-count guard and a workflow linter.
 2. **Repository rules make merging something only you can do.** A ruleset requires your code-owner approval; for your own PRs you merge through a logged bypass.
-3. **A hook keeps agents out of the files that define their own rules.** These are CLAUDE.md, `.claude/` and `.github/`, plus `hyparquet.js` and `r2-cors.json` (the vendored library and the bucket's CORS policy).
+3. **A hook keeps agents out of the files that define their own rules.** These are CLAUDE.md, `.claude/` and `.github/`, plus `hyparquet.js`, `r2-cors.json` and `publish_build.sh` (the vendored library, the bucket's CORS policy, and the script that holds the R2 token in the archive sync).
 
 You touch the loop three times per change: **authorise** it (write the issue, add the label), **vouch** for it (mark the draft ready, which triggers AI review) and **accept** it (approve and merge, which deploys).
 
@@ -138,7 +138,7 @@ Everything that isn't in this table is either you or a script.
   - `git switch -c claude/*`, `add`, `commit`, `push -u origin claude/*`.
   - `gh pr create`, `gh pr list`, `gh issue comment <N>`.
   - No web access, no `gh pr merge`, and no edits to CLAUDE.md, `.claude/` or `.github/` (the hook blocks them in CI).
-- **May change:** `web/**` (except `hyparquet.js`), `tools/**` (except `r2-cors.json`), `docs/**`, and new tests. It may add tests but never edit an existing one to make it pass.
+- **May change:** `web/**` (except `hyparquet.js`), `tools/**` (except `r2-cors.json` and `publish_build.sh`), `docs/**`, and new tests. It may add tests but never edit an existing one to make it pass.
 - **Done:**
   - A **draft** PR into `main` with green tests. The body has *Summary · Closes #N · How I verified it* (test summary lines pasted) *· Risks and what I didn't do · Grounding* (the exact CLAUDE.md text that should change, if any).
   - Or one comment on the issue saying what's missing, if the acceptance criteria are unclear.
@@ -189,7 +189,7 @@ Everything that isn't in this table is either you or a script.
 
 This role isn't on your list. It covers the one area where a mistake is both likely with agents and expensive: the workflows and config that give agents their power.
 
-- **Trigger:** the diff touches `.github/`, `.claude/`, `tools/*.sh`, `tools/r2-cors.json` or `web/index.html`; or the `review:security-reviewer` label.
+- **Trigger:** the diff touches `.github/`, `.claude/`, `tools/*.sh`, the archive sync's scripts, config or runbook, `tools/r2-cors.json` or `web/index.html`; or the `review:security-reviewer` label.
 - **Looks for:**
   - Widened triggers or permissions, `pull_request_target`, secrets in agent jobs, unpinned actions.
   - Event text interpolated into `run:`.
@@ -827,6 +827,7 @@ Revisit `gh aw` when it's GA or if you move to API billing.
 > - **Reviewers don't get `node --test`.** `checks / test` has already run the tests, and the reviewers skip anything the checks enforce.
 > - **`test-integrity.sh` exits 2 when it can't count tests** (a checkout, `npm ci` or uv failure), so a setup failure doesn't pass as a lower count. `pr-guards.sh` reports exit 2 as its own error, and `ack:tests` doesn't waive it.
 > - **Writers get Python from a uv venv** put on `PATH` (so `python -m pytest` works), and `npm ci` runs in a workflow step before Claude starts. They run web tests with `npm --prefix web test`. Checked in Claude Code 2.1.281: the env scrub removes the Claude token, the Actions OIDC request token and cloud credentials, but not `GH_TOKEN`, so `git push` (through the action's credential helper) and `gh` still work.
+> - **`tools/publish_build.sh` is protected too,** in the hook and in `pr-guards.sh`: it's the one script that holds the R2 token in the archive sync (docs/adr/0005), so agent work may not change it, and the owner's changes need `ack:sensitive`.
 > - **The path hook matches case-insensitively** and turns backslashes into slashes, so `claude.md` or `.github\x` don't get past it on Windows. Tests: `.github/scripts/tests/guard-paths.test.mjs`.
 > - **The path hook is a guardrail, not a boundary** (found by the security reviewer on the Stage 4 PR, #39). A writer can run a test file it wrote, and that code can change any file. So:
 >   - CI runs the base branch's `pr-guards.sh` and `test-integrity.sh`, not the PR's.
