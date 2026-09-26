@@ -27,6 +27,7 @@ uv run tools/archive_sync.py plan   # which subreddits in tools/archive.json are
 uv run tools/archive_sync.py build --out DIR [--only X]   # the sync's build job: fetch, splice, and bundles in DIR/bundles for publish_build.sh (fetches call the live API: not from tests or agents)
 tools/check_dumps.sh [all|manifest|cors|files]  # check the live archive serves the page right (no credentials; CI runs it weekly)
 node tools/fetch_subreddit.mjs --subreddit X --kind comments --after <epoch> --budget 50 --out c.jsonl --result c.json   # the sync's fetcher (calls the live API: never from tests or agents)
+node tools/lifetime_bench.mjs --post <url> [--out bench.json]   # P8: one interactions query vs the two aggregates, per commenter (calls the live API: the owner runs it)
 uv run --with duckdb --with pytest pytest tools   # dump tool tests (CI runs them too)
 bash .github/scripts/rule-guards.sh              # the Rules for changes a grep can decide (CI runs it)
 node --test .github/scripts/tests/*.test.mjs      # tests of the CI scripts
