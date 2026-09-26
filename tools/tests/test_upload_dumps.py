@@ -204,6 +204,17 @@ def test_only_needs_a_live_manifest(world):
     assert not any(c.startswith("rclone copy") for c in calls(world))
 
 
+def test_every_tool_script_is_executable_in_git():
+    # upload_dumps.sh runs publish_build.sh directly, as the sync's workflow will; a script
+    # committed from Windows loses its executable bit and fails only on Linux.
+    listed = subprocess.run(["git", "ls-files", "-s", "tools/*.sh"], cwd=ROOT, capture_output=True, text=True)
+    if listed.returncode != 0 or not listed.stdout:
+        pytest.skip("not a git checkout")
+    modes = {line.split()[3]: line.split()[0] for line in listed.stdout.splitlines()}
+    assert "tools/publish_build.sh" in modes
+    assert {path: mode for path, mode in modes.items() if mode != "100755"} == {}
+
+
 def test_a_whole_upload_still_works_as_before(world):
     # The default path, with its tools now passed in too: every subreddit in dumps/ goes up and
     # the manifest replaces the live one whole (here, dropping Other on purpose).
