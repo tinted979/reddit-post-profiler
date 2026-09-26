@@ -22,8 +22,7 @@ import build_dumps  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "tools" / "upload_dumps.sh"
 BASH = shutil.which("bash")
-pytestmark = pytest.mark.skipif(BASH is None or shutil.which("node") is None or shutil.which("uv") is None,
-                                reason="needs bash, node and uv")
+# These need bash, node and uv, as CI has: a missing one fails the test rather than skipping it.
 PUBLIC = "https://dumps.test"
 T = 1_790_000_000
 
@@ -208,8 +207,7 @@ def test_every_tool_script_is_executable_in_git():
     # upload_dumps.sh runs publish_build.sh directly, as the sync's workflow will; a script
     # committed from Windows loses its executable bit and fails only on Linux.
     listed = subprocess.run(["git", "ls-files", "-s", "tools/*.sh"], cwd=ROOT, capture_output=True, text=True)
-    if listed.returncode != 0 or not listed.stdout:
-        pytest.skip("not a git checkout")
+    assert listed.returncode == 0 and listed.stdout, "run from a git checkout"
     modes = {line.split()[3]: line.split()[0] for line in listed.stdout.splitlines()}
     assert "tools/publish_build.sh" in modes
     assert {path: mode for path, mode in modes.items() if mode != "100755"} == {}
