@@ -7,8 +7,9 @@
 >   - an adaptive tail budget (#76);
 >   - every count stopping at the post (#77, docs/adr/0006), which changed P1 and P2 as described below;
 >   - P3, the fetcher (#78);
->   - P4, the splice builder (#79).
-> - **Next:** P5, publishing one subreddit.
+>   - P4, the splice builder (#79);
+>   - P5, publishing one subreddit (#80).
+> - **Next:** P6, the pruner.
 > - **Measured** (live, 2026-09-26): an "only" scan of a 53-commenter r/Hasan_Piker post older than the files went from 60 requests to 2 (the post, and one search for the thread's comments after the files), with no per-user requests.
 
 # Fewer Arctic Shift requests: shared subreddit tails, and a scheduled archive sync
@@ -157,8 +158,11 @@ This merges two proposals:
     - a cutoff in the future.
   - `--posts-through/--comments-through` also work without `--splice`, for a subreddit's first build fetched from the API: rows after them are left out.
   - Checked offline end to end: fetch, build, fetch more and splice gave the same rows, in file order, as one fresh build of everything, and the page's `DumpSource` read them back.
-- **P5: Publish one subreddit.**
-  - `check_upload.py merge-one` needs no token. It refuses a cutoff that goes backwards or a version that's already live. It writes the merged manifest, the updated publish log, and the live manifest's sha256.
+- **P5: Publish one subreddit** (#80).
+  - `check_upload.py merge-one` needs no token. It takes this subreddit's entry into the live manifest, so the other entries stay as they are live, and writes the bundle `publish_build.sh` uploads (`key`, `version`, `live.sha256`, `manifest.json`, the build's files, and the log). The log's entries are `{version, replaced, utc}`, so P6 can tell when each build was replaced.
+  - `publish_build.sh` reads the live manifest's sha256 through rclone, not the public URL, whose edge cache can lag. It checks it again just before replacing the manifest.
+  - `upload_dumps.sh --only KEY` moved to P7a. It calls rclone and curl directly, so testing it needs them injectable, as P7a's scripts will be. Until then, the manual path is `merge-one` followed by `publish_build.sh`.
+  - Plan as written: It refuses a cutoff that goes backwards or a version that's already live. It writes the merged manifest, the updated publish log, and the live manifest's sha256.
   - `tools/publish_build.sh` uses only curl, sha256sum and rclone. It checks KEY, VERSION and every path against strict patterns before any rclone call.
   - `upload_dumps.sh --only KEY` covers the manual path.
   - Tests: `test_publish_one.py`. The shell script is tested with rclone and curl injected through `RCLONE`/`CURL` variables, never PATH-shadowed.
@@ -171,6 +175,7 @@ This merges two proposals:
   - `tools/archive.json`: `{subreddits: {<name>: {cadence}}, overlap: "2h", repair_days: 7, repair_every: "7d", budget}`.
   - `tools/archive_sync.py`: which subreddits are due or need a repair.
   - `tools/archive_sync.sh`: the `build` job's work. For each due subreddit it downloads the live build over the public URL, fetches, splices, merges the manifest and plans prunes, then writes the artifact.
+  - `upload_dumps.sh --only KEY` (moved from P5): the owner's manual path. It runs `merge-one` on a local build, then `publish_build.sh`, with rclone and curl injectable for its tests.
 - **P7b: Workflow and docs** (owner, `ack:sensitive`).
   - `archive-sync.yml`:
     - hourly cron plus dispatch;
