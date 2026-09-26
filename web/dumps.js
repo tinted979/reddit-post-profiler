@@ -192,6 +192,12 @@ export class DumpSource {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
 
+  // The covered subreddits' names, as the manifest spells them, in alphabetical order (for
+  // "Only subreddits in the archive").
+  subreddits() {
+    return [...this._subs.values()].map((s) => s.name).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  }
+
   // {name, postsThrough, commentsThrough} for a covered subreddit (any case), else null.
   // Each kind is covered to where its files end, or further if its tail got further (unless
   // `withTail` is false).

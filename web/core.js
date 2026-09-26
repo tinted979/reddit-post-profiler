@@ -1712,6 +1712,7 @@ export function importScan(rec) {
     beforeKnown,
     opts: {
       only: list(o.only, parseSubreddits),
+      onlyArchived: o.onlyArchived === true,
       years,
       maxUsers: Number.isInteger(o.maxUsers) && o.maxUsers > 0 ? o.maxUsers : null,
       includeOp: Boolean(o.includeOp),
