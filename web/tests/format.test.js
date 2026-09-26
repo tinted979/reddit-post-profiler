@@ -105,6 +105,10 @@ test("archiveNote: counts and threads from the files, a broken archive, and noth
   assert.equal(noteFor(post, { reads: 0, lifetimeReads: 2, lifetimeGaps: 1 }),
     " Subreddit counts came from the archive files, plus Arctic Shift for anything between where they end and the post.");
   assert.equal(noteFor(post, { reads: 0, threadReads: 1 }), " The thread's comments came from the archive files, plus Arctic Shift for those made since.");
-  assert.equal(noteFor(post, { broken: true }), " The r/Python archive files stopped answering partway, so Arctic Shift answered for the rest.");
+  // It names the subreddit whose files failed, which may not be the post's (a scan limited to others).
+  assert.equal(noteFor(post, { broken: true, brokenSubreddit: "Python" }),
+    " The archive stopped answering partway (reading r/Python's files), so Arctic Shift answered for the rest.");
+  assert.equal(noteFor(post, { broken: true, brokenSubreddit: "rust" }),
+    " The archive stopped answering partway (reading r/rust's files), so Arctic Shift answered for the rest.");
   assert.equal(noteFor(post, { reads: 0 }), "");
 });

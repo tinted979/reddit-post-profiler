@@ -4,7 +4,7 @@
 // core.js's fetchTails gets once per scan for the whole subreddit (TailStore below).
 // See .claude/rules/archive.md and docs/adr/0005.
 
-import { Aborted, INGEST_LAG } from "./core.js";
+import { Aborted } from "./core.js";
 import { asyncBufferFromUrl, cachedAsyncBuffer, parquetMetadataAsync, parquetQuery } from "./hyparquet.js";
 
 export const DUMPS_URL = "https://rpp-db.tinted979.dev";
@@ -26,6 +26,15 @@ const SUBREDDIT = /^\w{2,21}$/;
 const CLOCK_SLACK = 86400;
 // Accounts the archive leaves out, as tools/build_dumps.py does.
 const SKIPPED = new Set(["[deleted]", "[removed]", "automoderator"]);
+// How long an archive read may take, in ms: each range request, and each stage of a lookup
+// (opening a file, then querying it, which can take several requests). A stage that runs
+// over switches the source off, which also cancels the requests still under way.
+const READ_TIMEOUT_MS = 20000;
+// Items Arctic Shift archived late can land just before a build's cutoff, or before where a
+// tail was complete. So the files are trusted only up to this long before their cutoff, and
+// a later tail fetch restarts this long before where the last one ended. (Its own policy:
+// core.js's INGEST_LAG, also an hour, is how long after a moment saved counts are trusted.)
+const DUMP_TAIL_MARGIN = 3600;
 
 // The file an archive request (`onRequest`'s URL) is for, for the request breakdown:
 // "manifest", or a Parquet file's name without its extension.
@@ -37,10 +46,10 @@ export function archiveFileName(url) {
 export class DumpUnavailable extends Error {}
 
 // Reads a remote file with range requests, keeping what it has fetched. Each range read
-// (hyparquet's `slice`) gets its own timeout via a custom `fetch`, on top of the run's
-// Stop signal, so a stalled connection can't hang a read forever. `onRequest` is called
-// once per request sent, for the scan's request count.
-async function urlFile(url, byteLength, signal, timeoutMs = 20000, { fetchFn = (...a) => globalThis.fetch(...a), onRequest = null } = {}) {
+// (hyparquet's `slice`) gets its own timeout via a custom `fetch`, on top of `signal` (the
+// run's Stop, and the source switching off), so a stalled connection can't hang a read
+// forever. `onRequest` is called once per request sent, for the scan's request count.
+async function urlFile(url, byteLength, signal, timeoutMs = READ_TIMEOUT_MS, { fetchFn = (...a) => globalThis.fetch(...a), onRequest = null } = {}) {
   const fetchWithTimeout = (input, init) => {
     const timeout = AbortSignal.timeout(timeoutMs);
     const merged = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
@@ -54,9 +63,9 @@ async function urlFile(url, byteLength, signal, timeoutMs = 20000, { fetchFn = (
 
 // The covered subreddits in a manifest, keyed by lowercase name. The manifest is fetched,
 // so it's checked like any other untrusted input; anything that doesn't check out is left
-// out. `postsThrough`/`commentsThrough` are where the files can be trusted to: an hour
-// before their cutoff (the time a synced build is complete up to, or a hand-made one's newest
-// item), in case the newest were archived late. A cutoff more than a day (CLOCK_SLACK)
+// out. `postsThrough`/`commentsThrough` are where the files can be trusted to:
+// DUMP_TAIL_MARGIN before their cutoff (the time a synced build is complete up to, or a
+// hand-made one's newest item), in case the newest were archived late. A cutoff more than a day (CLOCK_SLACK)
 // past `now` (epoch seconds) is rejected: it would make the page skip the API for recent
 // activity.
 export function parseManifest(data, now = Date.now() / 1000) {
@@ -82,8 +91,8 @@ export function parseManifest(data, now = Date.now() / 1000) {
     }
     subs.set(key, {
       name: s.name,
-      postsThrough: s.posts_to_utc - INGEST_LAG,
-      commentsThrough: s.comments_to_utc - INGEST_LAG,
+      postsThrough: s.posts_to_utc - DUMP_TAIL_MARGIN,
+      commentsThrough: s.comments_to_utc - DUMP_TAIL_MARGIN,
       files,
     });
   }
@@ -120,12 +129,16 @@ export class TailStore {
 
 export class DumpSource {
   constructor(subs, {
-    baseUrl = DUMPS_URL, openFile = urlFile, signal = null, readTimeoutMs = 20000,
+    baseUrl = DUMPS_URL, openFile = urlFile, signal = null, readTimeoutMs = READ_TIMEOUT_MS,
     fetchFn = (...a) => globalThis.fetch(...a), onRequest = null, tails = new TailStore(),
   } = {}) {
     this.baseUrl = baseUrl;
     this.signal = signal;
     this.broken = false; // a read failed: leave the files alone for the rest of the scan
+    this.brokenSubreddit = null; // whose file it was, for the end-of-scan note
+    // Aborted when the source switches off, so the reads still under way stop too.
+    this._off = new AbortController();
+    this._readSignal = signal ? AbortSignal.any([signal, this._off.signal]) : this._off.signal;
     this.reads = 0; // successful file reads for timestamps() (repeat lookups share one), for the end-of-scan note
     this.threadReads = 0; // successful threadRows() calls, likewise
     this.lifetimeReads = 0; // times core.js's archiveLifetime answered, for the end-of-scan note
@@ -148,7 +161,7 @@ export class DumpSource {
   // `onRequest` gets each request's URL.
   static async open({
     baseUrl = DUMPS_URL, fetchFn = (...a) => globalThis.fetch(...a), openFile = urlFile,
-    signal = null, timeoutMs = 5000, readTimeoutMs = 20000, onRequest = null, tails = new TailStore(),
+    signal = null, timeoutMs = 5000, readTimeoutMs = READ_TIMEOUT_MS, onRequest = null, tails = new TailStore(),
   } = {}) {
     if (signal?.aborted) throw new Aborted("stopped");
     try {
@@ -164,10 +177,11 @@ export class DumpSource {
     }
   }
 
-  // Races `promise` against `readTimeoutMs` (never resolving early on success). Used
-  // around each range read so a stalled or never-settling read can't stall a caller
-  // forever; a swallow-handler keeps a late rejection from the loser from surfacing as an
-  // unhandled rejection.
+  // Races `promise` against `readTimeoutMs` (never resolving early on success). Used around
+  // each stage of a read (opening a file, then its query), so a stage that stalls or never
+  // settles can't hold up a caller: the caller then switches the source off, which cancels
+  // the requests underneath. A swallow-handler keeps a late rejection from the loser from
+  // surfacing as an unhandled rejection.
   _race(promise) {
     promise.catch(() => {});
     if (!this.readTimeoutMs) return promise;
@@ -197,7 +211,7 @@ export class DumpSource {
     const key = String(subreddit).toLowerCase();
     const base = filesThrough(this._subs.get(key), kind);
     const t = this._tails.find(kind, key, base);
-    return t && t.through > base ? Math.max(base, t.through - INGEST_LAG) : base;
+    return t && t.through > base ? Math.max(base, t.through - DUMP_TAIL_MARGIN) : base;
   }
 
   // Adds a page of fetched rows ({id, author, created_utc}) to a subreddit's tail.
@@ -232,16 +246,25 @@ export class DumpSource {
   // the subreddit's files, and in its tail: once there's a tail, the files count only up to
   // where they're trusted, since the tail fetched what's after that again. Throws Aborted
   // once stopped, else DumpUnavailable. A lookup is read once per source (one scan) and
-  // shared; callers must not change the array.
+  // shared, its failure too (a failed read switches the source off for the rest of the run);
+  // callers must not change the array.
   timestamps(kind, subreddit, author) {
     const key = `${kind}|${String(subreddit).toLowerCase()}|${String(author).toLowerCase()}`;
     let lookup = this._lookups.get(key);
     if (!lookup) {
       lookup = this._read(kind, subreddit, author);
-      lookup.catch(() => this._lookups.delete(key));
+      lookup.catch(() => {}); // a caller that stops waiting mustn't leave it unhandled
       this._lookups.set(key, lookup);
     }
     return lookup;
+  }
+
+  // A read failed or ran over: leave the files alone for the rest of the scan, and cancel the
+  // reads still under way.
+  _switchOff(subreddit) {
+    if (!this.broken) this.brokenSubreddit = subreddit;
+    this.broken = true;
+    this._off.abort();
   }
 
   // Internal method that actually reads from the archive.
@@ -265,7 +288,7 @@ export class DumpSource {
       return [...saved.filter((t) => t <= tail.base), ...recent].sort((a, b) => a - b);
     } catch (err) {
       if (this.signal?.aborted) throw new Aborted("stopped");
-      this.broken = true;
+      this._switchOff(s.name);
       throw new DumpUnavailable(`archive file ${f.path}: ${err?.message ?? err}`);
     }
   }
@@ -292,25 +315,25 @@ export class DumpSource {
       return saved;
     } catch (err) {
       if (this.signal?.aborted) throw new Aborted("stopped");
-      this.broken = true;
+      this._switchOff(s.name);
       throw new DumpUnavailable(`archive file ${f.path}: ${err?.message ?? err}`);
     }
   }
 
-  // A file and its footer, fetched once per source. A failed open here is retried next
-  // time, but `timestamps` only calls this again after a Stop (Aborted): any other
-  // failure, including a read timing out, sets `broken` first and shuts the source off.
+  // A file and its footer, fetched once per source and shared. It isn't retried: a failed
+  // open switches the source off (or the run was stopped), and the next scan opens a new
+  // source.
   _open(f) {
     let opened = this._files.get(f.path);
     if (!opened) {
       opened = (async () => {
-        const file = await this._openFile(`${this.baseUrl}/${f.path}`, f.bytes, this.signal, this.readTimeoutMs, {
+        const file = await this._openFile(`${this.baseUrl}/${f.path}`, f.bytes, this._readSignal, this.readTimeoutMs, {
           fetchFn: this._fetchFn, onRequest: this._onRequest,
         });
         // The footer is a few KB; hyparquet's default first read is the last 512 KB.
         return { file, metadata: await parquetMetadataAsync(file, { initialFetchSize: 64 * 1024 }) };
       })();
-      opened.catch(() => this._files.delete(f.path));
+      opened.catch(() => {}); // each caller handles it
       this._files.set(f.path, opened);
     }
     return opened;
