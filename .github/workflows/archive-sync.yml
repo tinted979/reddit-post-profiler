@@ -10,8 +10,10 @@ name: Sync the archive
 #            bundles, which go to the next job as an artifact.
 #   publish  environment `archive` (its deployment-branch rule allows only main), which holds
 #            the token: a pinned, checksummed rclone, then tools/publish_build.sh on each bundle
-#            in order. No Node, no Python: processes in one job can read each other's
-#            environment, so only a job boundary keeps the token from the build's code.
+#            in order. The secrets reach that one step only, and the job runs no Node or
+#            Python of ours (only the checkout and download actions, before that step):
+#            processes in one job can read each other's environment, so only a job
+#            boundary keeps the token from the build's code.
 #   verify   no secrets: tools/check_dumps.sh, as the page sees the archive.
 #
 # Scheduled runs happen only while the repository variable ARCHIVE_SYNC_ENABLED is "true";
@@ -111,7 +113,9 @@ jobs:
 
   publish:
     needs: build
-    if: needs.build.outputs.bundles != '0' && (github.event_name == 'schedule' || inputs.mode == 'sync')
+    # `build` succeeded (it's skipped while the schedule is off), made bundles, and this isn't a
+    # dry run or a plan.
+    if: needs.build.result == 'success' && needs.build.outputs.bundles != '0' && (github.event_name == 'schedule' || inputs.mode == 'sync')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: archive

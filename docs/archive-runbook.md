@@ -12,7 +12,7 @@ This is how the R2 archive (bucket `rpp-db`, served at https://rpp-db.tinted979.
     2. splices that onto the live build and publishes a new build;
     3. deletes builds that were replaced at least 72 h ago.
   - **Each week,** each subreddit re-fetches its last 7 days, to catch items Arctic Shift archived late.
-  - **The token:** only one job, `publish`, sees it, and that job runs shell with rclone and curl only.
+  - **The token:** only one step of one job, `publish`, sees it. That step runs shell with rclone and curl only.
 - **Weekly, `.github/workflows/archive-check.yml`:** checks the archive serves the page what it needs (the manifest, CORS, range reads).
 - **By hand:** first imports of big subreddits, and the jobs below.
 
@@ -23,7 +23,8 @@ This is how the R2 archive (bucket `rpp-db`, served at https://rpp-db.tinted979.
    - Keep three things: the access key id, the secret, and the account's S3 endpoint, `https://<account-id>.r2.cloudflarestorage.com`.
 2. **Make the `archive` environment.** On GitHub, go to Settings → Environments → New environment, and call it `archive`.
    - **Deployment branches and tags:** choose "Selected branches and tags" and add `main`, so no other branch can run with the token.
-   - **Environment secrets:** add `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT`.
+   - **Environment secrets:** add `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT`, only after the branch rule above is saved.
+   - **Never add them as repository secrets.** Secrets with the same names at the repository level would reach any branch, where the `main`-only rule wouldn't cover them.
    - **Required reviewers:** none, since it runs hourly.
 3. **Do a dry run.** Go to Actions → Sync the archive → Run workflow, on `main`, with mode `dry-run`.
    - It calls Arctic Shift, fetches and builds, but publishes nothing.

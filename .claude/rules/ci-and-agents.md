@@ -28,7 +28,7 @@ Both are required checks in the **main: integrity** ruleset (reported by the Git
     - it installs a pinned, checksummed rclone;
     - one step runs `tools/publish_build.sh` on each bundle in order, stopping at the first failure.
 
-    Only that step gets the environment secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT`, as `RCLONE_CONFIG_R2_*`. There's no Node or Python in the job.
+    Only that step gets the environment secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_ENDPOINT`, as `RCLONE_CONFIG_R2_*`. The job runs no Node or Python of ours; the checkout and download actions run before that step and never see the secrets.
   - **`verify`** (no secrets): `tools/check_dumps.sh`.
 - **Hardening:** no caches, pinned actions, and `persist-credentials: false`.
 
