@@ -39,7 +39,7 @@ Arctic Shift's per-subreddit dumps are served as static Parquet on Cloudflare R2
   - **`tools/check_upload.py merge-one`** (no token) merges `r/<key>`'s entry from a build's `manifest.json` into the live manifest, downloaded byte for byte. Every other entry stays as it is live, so a stale or partial `dumps/` can't change them.
     - It refuses: a version that's live or already in the publish log; a missing file, or a size that differs; a cutoff in the future, or earlier than the live one (unless `--allow-older`); a format change; and a publish log that doesn't check out.
     - It writes a bundle: `key`, `version`, `live.sha256`, the merged `manifest.json`, the build's three files, and `r/<key>/published.json`.
-    - The publish log is `{format, subreddit, publishes: [{version, replaced, utc}], pruned: [version]}`, oldest first, keeping its newest `LOG_KEEP` (1000); `pruned` appears once there are any.
+    - The publish log is `{format, subreddit, publishes: [{version, replaced, utc[, repair]}], pruned: [version]}`, oldest first, keeping its newest `LOG_KEEP` (1000); `pruned` appears once there are any.
     - **Pruning is planned here, per subreddit, at each publish:** the builds the log says were replaced at least `PRUNE_AFTER` (72 h) ago, never the live one or the new one, at most `PRUNE_MAX` (5), oldest first. They go into the log's `pruned`, so none is planned twice, and into the bundle's `prune` file.
   - **`tools/publish_build.sh BUNDLE`** uses rclone, curl, sha256sum and coreutils only. `RCLONE`/`CURL` can name fakes, which the tests use.
     - It treats the bundle as untrusted: regular files only, exactly the expected names, a key, a version and a sha256 matching strict patterns, and a manifest that names the new build, all checked before any rclone call.
@@ -59,6 +59,23 @@ Arctic Shift's per-subreddit dumps are served as static Parquet on Cloudflare R2
          - A failed prune fails the script after the publish stands.
        - The `prune` list itself is checked before any rclone call: at most 5 lines, each a version, not the new build, and not named by the new manifest.
     - Tests: `tools/tests/test_publish_one.py` and `test_publish_build.py`.
+- **`tools/archive_sync.py`** is the sync's build job, with no token. Its config is `tools/archive.json`: each subreddit's `cadence` (1h–7d) and optional `"backfill": "api"`, plus `overlap`, `repair_days`, `repair_every` and `budget` (pages per fetch).
+  - **`plan`** says what's due:
+    - a sync once the cadence has passed since the live build (less 15 min of slack), cut at the older cutoff less `overlap`;
+    - a repair once `repair_every` has passed since the last repair the publish log marks (`merge-one --repair`), cut `repair_days` further back, for caught-up subreddits only;
+    - a first build from the start, for a subreddit not live yet that opts into `backfill`; others are skipped, to be imported.
+
+    Caught-up subreddits go first, most overdue first.
+  - **`build --out DIR`,** for each due subreddit in turn:
+    1. downloads the live build through the public URL (the manifest and logs with `?check=`);
+    2. runs `fetch_subreddit.mjs` for posts, then comments;
+    3. splices;
+    4. runs `merge-one` into `DIR/bundles/NN-<key>/`.
+
+    It then writes `DIR/summary.json`.
+    - Bundles chain: each is merged onto the manifest the one before leaves live, so they publish in order.
+    - A busy server stops the fetching and keeps the bundles made; a failed fetch, splice or merge skips that subreddit.
+    - Tests: `tools/tests/test_archive_sync.py`, with a fake public URL and a fake fetcher.
 - Hosting: R2 bucket `rpp-db`, served at `https://rpp-db.tinted979.dev` (custom domain, proxied, with a Cache Rule making it eligible for cache). Its CORS policy is `tools/r2-cors.json`: GET/HEAD from the Pages origin and `localhost:8000`, `Range` allowed, `Content-Range`/`Content-Length`/`Accept-Ranges`/`ETag` exposed. If the page moves origin, add the new one there and in the bucket settings. R2 applies CORS after the edge cache (checked live): a cache HIT still gets `Access-Control-Allow-Origin` for the requesting origin only, with `Vary: Origin`. The bucket's `r2.dev` URL stays disabled so all reads go through the cache.
 - Zone settings for this host: Smart Tiered Cache on (misses fill from an upper-tier colo rather than R2); minimum TLS 1.2 on the zone and the R2 custom domain; a Configuration Rule for `http.host eq "rpp-db.tinted979.dev"` turning off Browser Integrity Check (the new security dashboard has no threat-score Security Level left to lower), because a challenge page on a cross-origin `fetch` shows up as a CORS error, switches `DumpSource` off and sends the scan back to the API. For the same reason Bot Fight Mode is off (zone-wide on the Free plan; the zone serves only this host): it gave GitHub's runners a managed challenge, so the weekly `archive-check` workflow got 403s, and it could do the same to a visitor on a VPN or cloud network. The managed WAF rules, which block scanners, stay on. Before changing a zone security setting, check that a scheduled `archive-check` run still passes.
 - `tools/upload_dumps.sh` first runs `tools/check_upload.py` against the live manifest and R2's build list: the uploaded manifest replaces the live one whole, so it refuses one that drops a live subreddit (unless `--drop KEY`), a new build whose `r/<sub>/<version>/` already exists on R2, the live version rebuilt with different files, or a format change (unless `--allow-format-change`). Then it uploads build files (`immutable`, a year, never replaced) and checks them with `tools/check_dumps.sh files`; only then does it upload the manifest (5 minutes) and run `check_dumps.sh manifest` and `cors`. It never deletes: old builds stay until removed by hand (the sync's `publish_build.sh` prunes its own, as above). The rclone token is limited to Object Read & Write on the bucket and stays out of the repo.

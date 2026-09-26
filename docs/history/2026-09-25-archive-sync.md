@@ -9,8 +9,9 @@
 >   - P3, the fetcher (#78);
 >   - P4, the splice builder (#79);
 >   - P5, publishing one subreddit (#80);
->   - P6, pruning (#81).
-> - **Next:** P7a, the orchestrator and config.
+>   - P6, pruning (#81);
+>   - P7a, the orchestrator and config (#82).
+> - **Next:** `upload_dumps.sh --only` (the manual path), then P7b, the workflow.
 > - **Measured** (live, 2026-09-26): an "only" scan of a 53-commenter r/Hasan_Piker post older than the files went from 60 requests to 2 (the post, and one search for the thread's comments after the files), with no per-user requests.
 
 # Fewer Arctic Shift requests: shared subreddit tails, and a scheduled archive sync
@@ -182,7 +183,21 @@ This merges two proposals:
   - `publish_build.sh` applies the plan. It deletes at most N builds per run, and only paths shaped `r/<key>/<version>/` that neither the old nor the new manifest mentions (checked with `grep -F`).
   - Tests: `test_prune_dumps.py`.
   - The PR's Grounding proposes the prune rule for CLAUDE.md's "Dump tools" rule and `archive.md` (builds are never overwritten, and are deleted only as 0005 says).
-- **P7a: Orchestrator and config.**
+- **P7a: Orchestrator and config** (#82). Built in Python rather than shell: the build job holds no token, and Python is much easier to test.
+  - `tools/archive_sync.py plan|build` decides what's due and makes the bundles:
+    - **sync:** after the subreddit's cadence (less 15 min of slack for cron), from the older cutoff less `overlap`;
+    - **repair:** once `repair_every` has passed since the last repair, from `repair_days` before the older cutoff. Repairs are marked in the publish log (`merge-one --repair`), and only a caught-up subreddit repairs;
+    - **first build:** from the API only with `"backfill": "api"`; otherwise it's skipped and needs an import.
+  - **For each due subreddit,** `build` downloads the live build, runs the fetcher for each kind, splices, and runs `merge-one` into `bundles/NN-<key>/`.
+    - Several bundles chain: each is merged onto the manifest the previous one leaves live. The publish job publishes them in order and stops at the first failure.
+    - A busy server stops the fetching and keeps the bundles already made.
+    - A refused splice or merge skips that subreddit.
+  - **Checked offline end to end on real data** (a fake fetcher, a local bucket):
+    1. `plan` read the live archive;
+    2. `build` downloaded the real r/Hasan_Piker build (131k posts, 1.47M comments) and spliced onto it;
+    3. `publish_build.sh` published the bundle to the fake bucket.
+  - `upload_dumps.sh --only` is its own small PR next.
+  - Plan as written:
   - `tools/archive.json`: `{subreddits: {<name>: {cadence}}, overlap: "2h", repair_days: 7, repair_every: "7d", budget}`.
   - `tools/archive_sync.py`: which subreddits are due or need a repair.
   - `tools/archive_sync.sh`: the `build` job's work. For each due subreddit it downloads the live build over the public URL, fetches, splices, merges the manifest and plans prunes, then writes the artifact.
