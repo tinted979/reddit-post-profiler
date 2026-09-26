@@ -67,7 +67,7 @@ The build job's summary has:
   The download tool starts each page at the last item's time. So an item that shares its second with the end of a page can go missing, and the weekly repair only reaches 7 days back. That's a handful of items, too few to change counts.
 - **Stopping one:** take it out of `tools/archive.json`.
   - Its live build then stays in the manifest, still correct up to its cutoff, and the page still uses it for scans before that.
-  - To drop it from the manifest too, make a whole upload with `--drop key`, from a directory that holds the live `manifest.json` and every other subreddit's live build. A whole upload doesn't check cutoffs, so an older local build would move that subreddit back.
+  - To drop it from the manifest too, make a whole upload with `--drop key`, from a directory that holds the live `manifest.json` and every other subreddit's live build. A whole upload refuses a stale build whose cutoff is older than the live one's ("is earlier than the live build's"); `--allow-older` overrides that.
 
 ## Forcing a run
 

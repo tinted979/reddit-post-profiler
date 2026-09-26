@@ -12,9 +12,11 @@ whole and build files are never replaced:
 - a new build whose r/<subreddit>/<version>/ already exists on R2 would publish a
   manifest whose byte sizes don't match the files served, breaking every read;
 - the live version rebuilt locally with different files has the same problem;
+- a live subreddit's cutoff going backwards (a stale local build) would send scans back to
+  the API for what was covered, unless --allow-older;
 - a manifest format change needs the page to understand it first.
 
-Usage: check_upload.py LOCAL_MANIFEST LIVE_MANIFEST BUILDS [--drop KEY ...] [--allow-format-change]
+Usage: check_upload.py LOCAL_MANIFEST LIVE_MANIFEST BUILDS [--drop KEY ...] [--allow-format-change] [--allow-older]
 
 LIVE_MANIFEST is the live manifest.json (an empty file if there is none yet), and BUILDS
 the output of `rclone lsf -R --dirs-only --max-depth 2 <remote>:<bucket>/r`.
@@ -77,7 +79,7 @@ def parse_builds(listing: str) -> set[str]:
 
 
 def problems(local: dict, live: dict | None, builds: set[str], allow_drop: set[str] = frozenset(),
-             allow_format_change: bool = False) -> list[str]:
+             allow_format_change: bool = False, allow_older: bool = False) -> list[str]:
     """Why uploading `local` over `live` would break the archive; empty if it's safe."""
     found = []
     if live is None:
@@ -102,6 +104,11 @@ def problems(local: dict, live: dict | None, builds: set[str], allow_drop: set[s
         elif f"{key}/{version}" in builds:
             found.append(f"r/{key}/{version}/ already exists on R2, and its files wouldn't be replaced: "
                          "rebuild with a new --version")
+        for field in ("posts_to_utc", "comments_to_utc"):
+            new, old = sub.get(field), (was or {}).get(field)
+            if is_time(new) and is_time(old) and new < old and not allow_older:
+                found.append(f"r/{key}'s {field} {new} is earlier than the live build's {old}, so uploading "
+                             "would move it back: pass --allow-older to upload it anyway")
     return found
 
 
@@ -300,12 +307,13 @@ def main(argv: list[str] | None = None, now: int | None = None) -> None:
     parser.add_argument("builds", type=Path, help="rclone lsf -R --dirs-only --max-depth 2 listing of r/")
     parser.add_argument("--drop", action="append", default=[], help="a subreddit key to remove on purpose")
     parser.add_argument("--allow-format-change", action="store_true")
+    parser.add_argument("--allow-older", action="store_true", help="upload even if a live cutoff goes backwards")
     args = parser.parse_args(argv)
     local = json.loads(args.local.read_text(encoding="utf-8"))
     text = args.live.read_text(encoding="utf-8").strip()
     live = json.loads(text) if text else None
     builds = parse_builds(args.builds.read_text(encoding="utf-8"))
-    found = problems(local, live, builds, set(args.drop), args.allow_format_change)
+    found = problems(local, live, builds, set(args.drop), args.allow_format_change, args.allow_older)
     for problem in found:
         print(f"error: {problem}", file=sys.stderr)
     if found:
