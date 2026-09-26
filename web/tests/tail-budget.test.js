@@ -107,3 +107,47 @@ test("the breakdown says when a fetch stopped because finishing would cost more"
   });
   assert.equal(line, "r/Python comments since the archive files: 2 of 4 pages, stopped: finishing would take about 11 pages, more than asking per user; complete up to 2023-11-14 18:26 UTC");
 });
+
+// Ten archived subreddits whose files end before the post, and a client whose subreddit-wide
+// searches find nothing new (one short page per kind ends each tail). Records the searches.
+function archived(n = 10) {
+  const names = ["Python", ...Array.from({ length: n - 1 }, (_, i) => `sub${i}`)];
+  const subs = new Map(names.map((name) => [name.toLowerCase(), { name, postsThrough: COMMENTS_THROUGH, commentsThrough: COMMENTS_THROUGH, files: {} }]));
+  const searched = [];
+  const client = new ArcticShiftClient({
+    delay: 0,
+    fetchFn: async (url) => {
+      searched.push(new URL(url).searchParams.get("subreddit"));
+      return json({ data: [] });
+    },
+    sleep: async () => {},
+    now: () => NOW,
+    random: () => 0.5,
+  });
+  return { names, dumps: new DumpSource(subs), client, searched };
+}
+
+test("with many archived subreddits and a small thread, only the post's subreddit gets a tail", async () => {
+  // Nine other subreddits would cost at least 18 pages; asking each of a 6-comment thread's
+  // commenters one interactions query costs about 6. So the other tails are skipped.
+  const { names, dumps, client, searched } = archived();
+  const report = await fetchTails(client, dumps, post(6), { only: names, now: () => NOW });
+  assert.deepEqual([...new Set(searched)], ["Python"]);
+  assert.equal(searched.length, 2);
+  assert.deepEqual(report.map((r) => r.subreddit), ["Python", "Python"]);
+});
+
+test("with a big enough thread, every archived subreddit gets its tail once", async () => {
+  const { names, dumps, client, searched } = archived();
+  await fetchTails(client, dumps, post(100), { only: names, now: () => NOW });
+  assert.equal(new Set(searched).size, 10);
+  assert.equal(searched.length, 20);
+});
+
+test("the other tails are fetched while their floor, a page per kind each, is at most one per thread comment", async () => {
+  for (const [numComments, others] of [[18, 9], [17, 0]]) {
+    const { names, dumps, client, searched } = archived();
+    await fetchTails(client, dumps, post(numComments), { only: names, now: () => NOW });
+    assert.equal(new Set(searched).size - 1, others, `${numComments} comments`);
+  }
+});
