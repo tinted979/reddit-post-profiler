@@ -11,7 +11,8 @@
 >   - P5, publishing one subreddit (#80);
 >   - P6, pruning (#81);
 >   - P7a, the orchestrator and config (#82), and `upload_dumps.sh --only`, the manual path (#83).
-> - **Next:** P7b, the workflow (the owner's).
+>   - P7b, the workflow, runbook and docs (#84).
+> - **Next:** the go-live steps in `docs/archive-runbook.md`, "Setting up the sync": the token, the `archive` environment, a dry run, one real run, then `ARCHIVE_SYNC_ENABLED`. After that, P8 (`interactions` first).
 > - **Measured** (live, 2026-09-26): an "only" scan of a 53-commenter r/Hasan_Piker post older than the files went from 60 requests to 2 (the post, and one search for the thread's comments after the files), with no per-user requests.
 
 # Fewer Arctic Shift requests: shared subreddit tails, and a scheduled archive sync
@@ -203,7 +204,14 @@ This merges two proposals:
   - `tools/archive_sync.py`: which subreddits are due or need a repair.
   - `tools/archive_sync.sh`: the `build` job's work. For each due subreddit it downloads the live build over the public URL, fetches, splices, merges the manifest and plans prunes, then writes the artifact.
   - `upload_dumps.sh --only KEY` (moved from P5): the owner's manual path. It runs `merge-one` on a local build, then `publish_build.sh`, with rclone and curl injectable for its tests.
-- **P7b: Workflow and docs** (owner, `ack:sensitive`).
+- **P7b: Workflow and docs** (owner, `ack:sensitive`; #84).
+  - **As built:** `archive-sync.yml` has the three jobs below; dispatch defaults to `dry-run`, and it adds a `plan` mode.
+  - **Pinned:** rclone 1.75.1 (checksum from the release's SHA256SUMS, checked by downloading) and duckdb 1.5.5.
+  - **ADR 0005 is unchanged** (the `adr` skill: accepted ADRs aren't rewritten). The two refinements the architecture review suggested adding to it are already consistent with 0005, and are documented in `.claude/rules/archive.md`:
+    - pruning also keeps any build a manifest names;
+    - the run budget is `run_budget`.
+  - **The runbook** closes #57, including the hyparquet source check.
+  - Plan as written:
   - `archive-sync.yml`:
     - hourly cron plus dispatch;
     - `permissions: {}`, and `contents: read` per job;
