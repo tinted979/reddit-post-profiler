@@ -237,7 +237,7 @@ This merges two proposals:
     3. run hasan_piker;
     4. enable the sync.
 - **P8a: Lifetime benchmark** (#85). `tools/lifetime_bench.mjs`, which the owner runs. Gate: at least 99% agreement, no slower, and no more slow-downs.
-  - **What it asks, per user:** the two aggregates (`split: false`, one attempt, as a scan's first try) and `interactions`. All three carry `before`, since every count now stops at the post (docs/adr/0006). The order alternates between users.
+  - **What it asks, per user:** the two aggregates, asked as a scan asks first (`split: false`, and a timed-out one sent once more) and `interactions`. All three carry `before`, since every count now stops at the post (docs/adr/0006). The order alternates between users.
   - **How latency is compared:** over the users where both answered. `interactions` also answers for heavy users whose aggregates time out, and those would otherwise count against it.
   - **What it reports:** how many of those heavy users `interactions` answered, which is the extra gain beyond halving the requests.
 - **P8b: Interactions first** (gated).

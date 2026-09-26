@@ -97,8 +97,26 @@ test("a timeout or a refusal is recorded, and leaves agreement unknown", async (
   assert.deepEqual([records[0].aggregates.error, records[0].interactions.error, records[0].agree], ["timeout", null, null]);
   assert.equal(records[0].interactions.subreddits, 1);
   assert.deepEqual([records[1].aggregates.error, records[1].interactions.error, records[1].agree], [null, "unsupported", null]);
-  // Timed out once, not retried: the benchmark measures a scan's first try.
-  assert.equal(api.requests.filter((r) => r.q.author === "carol" && r.path.includes("comments")).length, 1);
+  // Asked as a scan asks first: a timed-out aggregate once more, then no split.
+  assert.equal(api.requests.filter((r) => r.q.author === "carol" && r.path.includes("comments")).length, 2);
+});
+
+test("a busy reply stops the run even when the other aggregate had timed out", async () => {
+  // carol's posts aggregate times out (aggregates go first for the first user), then the server
+  // answers only "slow down": the busy reply must win over the timeout, and stop the run.
+  const api = fakeApi({ busyAfter: 2 });
+  const heavy = { ...USERS.carol, posts: "timeout" };
+  const saved = USERS.carol;
+  USERS.carol = heavy;
+  try {
+    const { records, stopped } = await runBench(client(api), ["carol", "alice"], { before: POST.created_utc });
+    assert.match(stopped, /busy/);
+    assert.equal(records[0].aggregates.error, "busy");
+    assert.ok(!api.requests.some((r) => r.q.author === "alice"));
+    assert.ok(!api.requests.some((r) => r.path.includes("interactions")));
+  } finally {
+    USERS.carol = saved;
+  }
 });
 
 test("a busy server stops the run with what it has", async () => {

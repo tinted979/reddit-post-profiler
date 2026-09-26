@@ -153,10 +153,13 @@ async function measure(bench, call) {
 
 async function askAggregates(bench, user, bounds) {
   const r = await measure(bench, async () => {
+    // As a scan asks first (core.js lifetimeCounts): a timed-out aggregate once more, no split.
     const settled = await Promise.allSettled(KINDS.map((kind) =>
-      bench.client.subredditCounts(kind, user, { ...bounds, split: false, attempts: 1 })));
-    const failed = settled.find((s) => s.status === "rejected");
-    if (failed) throw failed.reason;
+      bench.client.subredditCounts(kind, user, { ...bounds, split: false })));
+    // A busy or rate-limiting reply wins over the other's timeout, so the run stops.
+    const rejected = settled.filter((s) => s.status === "rejected").map((s) => s.reason);
+    const failed = rejected.find((err) => err instanceof ArcticShiftError && refusesMore(err)) ?? rejected[0];
+    if (failed) throw failed;
     const counts = new Map();
     for (const [i, kind] of KINDS.entries()) {
       for (const [sub, n] of settled[i].value) {
