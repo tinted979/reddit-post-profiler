@@ -8,8 +8,9 @@
 >   - every count stopping at the post (#77, docs/adr/0006), which changed P1 and P2 as described below;
 >   - P3, the fetcher (#78);
 >   - P4, the splice builder (#79);
->   - P5, publishing one subreddit (#80).
-> - **Next:** P6, the pruner.
+>   - P5, publishing one subreddit (#80);
+>   - P6, pruning (#81).
+> - **Next:** P7a, the orchestrator and config.
 > - **Measured** (live, 2026-09-26): an "only" scan of a 53-commenter r/Hasan_Piker post older than the files went from 60 requests to 2 (the post, and one search for the thread's comments after the files), with no per-user requests.
 
 # Fewer Arctic Shift requests: shared subreddit tails, and a scheduled archive sync
@@ -166,7 +167,17 @@ This merges two proposals:
   - `tools/publish_build.sh` uses only curl, sha256sum and rclone. It checks KEY, VERSION and every path against strict patterns before any rclone call.
   - `upload_dumps.sh --only KEY` covers the manual path.
   - Tests: `test_publish_one.py`. The shell script is tested with rclone and curl injected through `RCLONE`/`CURL` variables, never PATH-shadowed.
-- **P6: Pruner.**
+- **P6: Pruner** (#81). Built more simply than planned, with no `prune_dumps.py`.
+  - Each publish prunes its own subreddit's replaced builds, planned by `merge-one` from the publish log it already reads:
+    - replaced at least 72 h ago;
+    - not the live or new build;
+    - at most 5, oldest first;
+    - recorded in the log's `pruned`, so none is planned twice.
+
+    Every subreddit publishes on its cadence, so its old builds go at the next publish after 72 h.
+  - `publish_build.sh` deletes them after the manifest and log are up, keeping any build the replaced manifest named. When it prunes, it also lists `r/<key>/` and reports builds the log doesn't know, for deleting by hand.
+  - Tests: `tools/tests/test_prune.py`.
+  - Plan as written:
   - `tools/prune_dumps.py` plans deletions from the live manifest and the public publish logs. It needs no token and no listing.
   - `publish_build.sh` applies the plan. It deletes at most N builds per run, and only paths shaped `r/<key>/<version>/` that neither the old nor the new manifest mentions (checked with `grep -F`).
   - Tests: `test_prune_dumps.py`.
