@@ -13,6 +13,12 @@ paths:
 - `/api/comments/tree` accepts `limit` up to 25000 and does not support `fields`.
 - `aggregate=created_utc&frequency=…` answers all-zero counts (even with only a subreddit filter), so it can't give a timeline; search with `fields=created_utc` can.
 - `interactions` has no `subreddit` parameter. It returns 400 "not supported" for huge accounts such as AutoModerator.
+- `interactions` with `before` gives the same per-subreddit post and comment counts as the two aggregates (checked 2026-09-26 by the owner with `tools/lifetime_bench.mjs`).
+  - **Sample:** 50 commenters of an r/Hasan_Piker post, with a median of 170 subreddits each and up to 1,032.
+  - **Agreement:** 50 of 50 identical.
+  - **Latency:** a median of 1.35 s (p90 3.0 s), against 3.7 s (p90 6.3 s) for the two aggregates together, or 2.3 s for the slower one alone.
+  - **Retries:** 0, against 14 for the aggregates.
+  - **Not covered:** no user in that sample was heavy enough to make the aggregates time out.
 - `/api/users/interactions/subreddits`'s `after` is exclusive, like search's (an item at exactly `after` isn't counted).
 - The search website (`/search?fun=posts_search|comments_search&author=&subreddit=&after=`) is a front end over the same API, so scraping it saves nothing.
 - Subreddit-wide search (no `author` or `link_id`) works for a whole subreddit's recent activity (checked 2026-09-25: 10 requests, 3 s apart, no 422 or 429).

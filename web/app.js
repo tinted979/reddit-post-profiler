@@ -723,7 +723,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
     // requests. A queued scan has nobody to ask, so it takes the top ones.
     else if (ranked.length > LARGE_SCAN) {
       setStatus("Checking saved results…");
-      const est = await estimateScan(cache, ranked.map(([u]) => u), { after, before: post.createdUtc, delay: opts.delay, concurrency });
+      const est = await estimateScan(cache, ranked.map(([u]) => u), { after, before: post.createdUtc, delay: opts.delay, concurrency, interactionsFirst: true });
       if (!fromQueue) setStatus(`Found ${plural(ranked.length, "commenter")}.`);
       const choice = fromQueue ? "top" : await askLargeScan(est, controller.signal);
       if (choice === "cancel") {
@@ -776,8 +776,9 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
       progress();
       let profile;
       try {
+        // One interactions query per user for the lifetime counts (docs/adr/0007).
         profile = await buildProfile(client, username, count, post, {
-          only: opts.only, after, cache, dumps,
+          only: opts.only, after, cache, dumps, interactionsFirst: true,
         });
       } catch (err) {
         if (err instanceof Aborted) throw err;

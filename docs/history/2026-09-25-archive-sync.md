@@ -1,4 +1,4 @@
-> **Status.** Current plan, being built in phases; the decisions are in docs/adr/0005 and 0006. Update this note as phases land.
+> **Status.** Done: every phase has landed. The decisions are in docs/adr/0005, 0006 and 0007.
 >
 > - **Landed:**
 >   - P0 (#72);
@@ -15,7 +15,7 @@
 >     - the first publish, `2026-09-26T122954Z`, caught up about 44 hours of r/Hasan_Piker in 30 requests;
 >     - the hourly schedule is on.
 >   - P8a, the lifetime benchmark (#85).
-> - **Next:** the owner runs `tools/lifetime_bench.mjs` live. If it passes the gate, P8b (`interactions` first for full scans).
+>   - P8b, `interactions` first for full scans (#86, docs/adr/0007). The owner's benchmark passed the gate: 50 of 50 agreed, a median 1.35 s against 3.7 s, and 0 retries against 14.
 > - **Measured** (live, 2026-09-26): an "only" scan of a 53-commenter r/Hasan_Piker post older than the files went from 60 requests to 2 (the post, and one search for the thread's comments after the files), with no per-user requests.
 
 # Fewer Arctic Shift requests: shared subreddit tails, and a scheduled archive sync
@@ -240,7 +240,13 @@ This merges two proposals:
   - **What it asks, per user:** the two aggregates, asked as a scan asks first (`split: false`, and a timed-out one sent once more) and `interactions`. All three carry `before`, since every count now stops at the post (docs/adr/0006). The order alternates between users.
   - **How latency is compared:** over the users where both answered. `interactions` also answers for heavy users whose aggregates time out, and those would otherwise count against it.
   - **What it reports:** how many of those heavy users `interactions` answered, which is the extra gain beyond halving the requests.
-- **P8b: Interactions first** (gated).
+- **P8b: Interactions first** (gated; #86, docs/adr/0007).
+  - **The gate:** the owner's run of `tools/lifetime_bench.mjs` on 2026-09-26, on 50 commenters of an r/Hasan_Piker post, passed it:
+    - 100% agreement;
+    - `interactions` a median 1.35 s (p90 3.0 s), against 3.7 s (p90 6.3 s) for both aggregates;
+    - 0 retries against 14.
+  - **As built:** `buildProfile`'s `interactionsFirst`, which `app.js` sets. A refusal or timeout hands over to the aggregates without asking `interactions` again, and a busy server still fails the user. `estimateScan` has the same option (3 requests per new user instead of 4). The bench adds the `light-interactions` and `interactions-refused` scenarios.
+  - Plan as written:
   - `lifetimeCounts` tries `interactionCounts` first, behind a `buildProfile` option that `app.js` turns on.
   - `estimateScan` takes per-user costs.
 
