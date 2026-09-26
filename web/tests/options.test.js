@@ -16,7 +16,7 @@ import {
 } from "../options.js";
 
 const DEFAULT_OPTS = {
-  includeOp: false, exclude: [], only: [], years: null, maxUsers: null,
+  includeOp: false, exclude: [], only: [], onlyArchived: false, years: null, maxUsers: null,
   delay: SCAN_DEFAULTS.delay, concurrency: SCAN_DEFAULTS.concurrency, cacheDays: SCAN_DEFAULTS.cacheDays,
 };
 
@@ -30,7 +30,7 @@ test("fields are parsed and clamped like the form's", () => {
     maxUsers: "50.7", delay: "0.01", concurrency: "9", cacheDays: "Infinity",
   });
   assert.deepEqual(opts, {
-    includeOp: true, exclude: ["Alice", "bob", "carol"], only: ["Python", "rust"], years: 5, maxUsers: 50,
+    includeOp: true, exclude: ["Alice", "bob", "carol"], only: ["Python", "rust"], onlyArchived: false, years: 5, maxUsers: 50,
     delay: SCAN_LIMITS.delay.min, concurrency: SCAN_LIMITS.concurrency.max, cacheDays: SCAN_DEFAULTS.cacheDays,
   });
   assert.equal(parseOptions({ years: "3" }).years, null); // not an offered window
@@ -73,7 +73,7 @@ test("every share param is both written and read", () => {
   // Setting every option to something non-default must write every param, and reading the
   // link back must find each of them: an option added on one side only fails here.
   const opts = {
-    includeOp: true, exclude: ["alice"], only: ["Python"], years: 5, maxUsers: 10,
+    includeOp: true, exclude: ["alice"], only: ["Python"], onlyArchived: true, years: 5, maxUsers: 10,
     delay: 2, concurrency: 3, cacheDays: 1,
   };
   const rules = { ...DEFAULT_BADGES, occasional: { ...DEFAULT_BADGES.occasional, count: 1 } };
@@ -101,7 +101,7 @@ test("optionsSummary lists what differs from the defaults", () => {
 test("mergeOptions lays stored options over the base, keeping only valid fields", () => {
   const base = { ...DEFAULT_OPTS, exclude: ["me"], only: ["Base"], years: 5, maxUsers: 50, delay: 2 };
   // A queued item's options: all fields set.
-  const item = { includeOp: true, exclude: ["alice"], only: ["Python"], years: null, maxUsers: null, delay: 1, concurrency: 1, cacheDays: 0 };
+  const item = { includeOp: true, exclude: ["alice"], only: ["Python"], onlyArchived: true, years: null, maxUsers: null, delay: 1, concurrency: 1, cacheDays: 0 };
   assert.deepEqual(mergeOptions(base, item), item);
   // Missing fields (an older page's item) come from the base.
   assert.deepEqual(mergeOptions(base, { only: ["Python"] }), { ...base, only: ["Python"] });
@@ -118,6 +118,7 @@ test("mergeOptions cleans odd stored values instead of passing them to a scan", 
     includeOp: false, // not a boolean: the base's
     exclude: [], // not a list: the base's
     only: ["ok"], // non-strings dropped, names cleaned like the form's
+    onlyArchived: false, // not given: the base's
     years: null, // not an offered window
     maxUsers: null, // below 1: no cap
     delay: SCAN_DEFAULTS.delay,

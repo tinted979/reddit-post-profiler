@@ -131,6 +131,8 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .field { display: flex; flex-direction: column; gap: 4px; font-size: .9rem; }
 .field > label { color: var(--muted); }
 .field small { color: var(--muted); font-size: .8rem; }
+.field small:empty { display: none; }
+.field > label.inline-check { display: flex; align-items: center; gap: 8px; color: var(--text); }
 .field.check { justify-content: flex-end; }
 .field.check label { display: flex; align-items: center; gap: 8px; min-height: 42px; color: var(--text); }
 .hint { font-size: .85rem; color: var(--muted); margin: 14px 0 0; }

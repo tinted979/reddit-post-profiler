@@ -127,6 +127,7 @@ https://tinted979.github.io/reddit-post-profiler/?post=https://redd.it/1l7d1e4&m
 | `op=1` | also profile the post's author |
 | `exclude` | comma-separated usernames to skip |
 | `subs` | comma-separated subreddits to limit results to; the post's subreddit is always included, and listed ones are shown even with no activity. For very active users it also means far fewer requests |
+| `archived=1` | also limit results to every subreddit the project's archive covers when the scan starts (*Only subreddits in the archive*), with any in `subs`. For a post in a covered subreddit that's the fewest requests; Arctic Shift still answers for what the archive doesn't cover |
 | `years` | only count activity from the 1, 5 or 10 years before the post (default: all of it) |
 | `min` | hide subreddits with fewer than N posts + comments, on the page and in the CSV (the post's subreddit is always kept) |
 | `delay` | seconds between request starts (default 0.75, minimum 0.25) |
@@ -243,8 +244,9 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    finishing costs fewer requests than asking per commenter would (about one per thread
    comment for Only check subreddits, half that otherwise, at most 100 pages). The tab keeps
    what it fetched, so the next scan asks only for what's new since.
-   If you limit a scan to subreddits the archive covers (Only check subreddits), each
-   user's counts there also come from the files and those pages, with no requests per user.
+   If you limit a scan to subreddits the archive covers (Only check subreddits, or tick
+   Only subreddits in the archive), each user's counts there also come from the files and
+   those pages, with no requests per user.
    If the pages run out before the post, Arctic Shift is asked per user about the rest. A
    post older than the files needs none of this: everything before it is in the files.
 
