@@ -92,8 +92,9 @@ const within = (t, u) => {
 // as [{id, author, created_utc, link_id}, …]) is everyone's activity in the post's
 // subreddit, for subreddit-wide searches; `tree` ([[author, created_utc], …]) is the post's
 // comment tree, and `thread` (rows like `tail`'s) its comments for a search by `link_id`.
+// `refuseInteractions` makes interactions answer 400 "not supported", as for huge accounts.
 // Anything else is unexpected: it's recorded in `unexpected` and answered with a 400.
-export function apiModel({ user, lifetime = {}, before = {}, recent = [], timeouts = false, tail = null, tree = null, thread = null }, unexpected) {
+export function apiModel({ user, lifetime = {}, before = {}, recent = [], timeouts = false, tail = null, tree = null, thread = null, refuseInteractions = false }, unexpected) {
   const refuse = (u) => {
     unexpected.push(u.toString());
     return json({ error: "unexpected request in the bench" }, 400);
@@ -137,6 +138,7 @@ export function apiModel({ user, lifetime = {}, before = {}, recent = [], timeou
     }
     if (u.pathname === "/api/users/interactions/subreddits") {
       if (u.searchParams.get("weight_posts") !== String(W)) return refuse(u);
+      if (refuseInteractions) return json({ error: "not supported" }, 400);
       let rows = recent;
       if (!u.searchParams.has("after")) {
         const merged = new Map();
@@ -243,6 +245,8 @@ const CACHE_NOW = POST.createdUtc + 30 * DAY;
 
 export const SCENARIOS = Object.freeze([
   { name: "light", about: "a light user: two lifetime aggregates and one timestamp search per kind", world: LIGHT },
+  { name: "light-interactions", about: "the same, the page's way (docs/adr/0007): one interactions query for the lifetime counts", world: LIGHT, interactionsFirst: true },
+  { name: "interactions-refused", about: "interactions refuses the user (as for huge accounts), so the two aggregates answer", world: { ...LIGHT, refuseInteractions: true }, interactionsFirst: true },
   { name: "before-over-100", about: "more than 100 \"before\" comments: search, then aggregate count + asc search", world: HEAVY_BEFORE },
   { name: "lifetime-timeout", about: "lifetime aggregates time out (twice each) and interactions answers", world: TIMEOUTS },
   { name: "lifetime-timeout-warm", about: "the same user again with a warm MemoryBackend cache", world: TIMEOUTS, warm: true },
@@ -288,6 +292,7 @@ async function profileOnce(scenario, { cache = null, unexpected }) {
   const threadComments = 1;
   const profile = await buildProfile(client, scenario.world.user, threadComments, post, {
     only: scenario.only ?? null,
+    interactionsFirst: scenario.interactionsFirst ?? false,
     lastCommentUtc: POST.createdUtc + 600,
     cache,
     dumps,

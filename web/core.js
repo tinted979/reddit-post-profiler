@@ -880,12 +880,24 @@ async function settleAll(promises) {
   return results.map((r) => r.value);
 }
 
-// Lifetime counts as Map<subreddit, {posts, comments}> (since `after`, when given). The
-// per-kind aggregates are the quickest answer for most users. When one times out (a very
-// active user), a single interactions query usually still answers; failing that, only
-// the kind that timed out is split up (per subreddit in `wanted`, else per year).
+// Lifetime counts as Map<subreddit, {posts, comments}> (since `after`, when given).
+// With `interactionsFirst` (the page's way, docs/adr/0007), one interactions query answers
+// posts and comments together: in the owner's benchmark it agreed with the two aggregates for
+// every user, faster and with fewer retries. If it can't answer (refused for a huge account,
+// or timed out), the aggregates answer instead, without asking it again. Without it, the
+// per-kind aggregates go first, and interactions only when one times out. Either way, a kind
+// whose aggregate times out is then split up (per subreddit in `wanted`, else per year), and
+// a busy or rate-limiting server fails the user rather than being sent anything heavier.
 // `partial` marks a result limited to `wanted`, which mustn't be saved as a profile.
-async function lifetimeCounts(client, username, { wanted, after, before, skipInteractions = false }) {
+async function lifetimeCounts(client, username, { wanted, after, before, skipInteractions = false, interactionsFirst = false }) {
+  if (interactionsFirst && !skipInteractions) {
+    try {
+      return { counts: await client.interactionCounts(username, { after, before }), partial: false };
+    } catch (err) {
+      if (!(err instanceof QueryTimeout || err instanceof Unsupported)) throw err;
+      skipInteractions = true;
+    }
+  }
   const first = await Promise.allSettled(
     KINDS.map((kind) => client.subredditCounts(kind, username, { after, before, split: false })),
   );
@@ -968,7 +980,7 @@ async function archiveLifetime(client, dumps, username, wanted, after, before) {
 // attempt, the aggregate fallback (skipping the interactions retry once the archive
 // already found it unusable), and the cache writes. Returns {rows, hit}: `hit` is the
 // cache entry the rows came from (for its `fetchedAt`), or null when they're fresh.
-async function lifetimeRows(client, dumps, cache, username, wanted, after, before, bucket) {
+async function lifetimeRows(client, dumps, cache, username, wanted, after, before, bucket, interactionsFirst) {
   const user = username.toLowerCase();
   const lifeKey = lifetimeKey(user, before, bucket);
   const hit = await cacheGet(cache, lifeKey, isRows);
@@ -981,7 +993,9 @@ async function lifetimeRows(client, dumps, cache, username, wanted, after, befor
   const archived = wanted && dumps ? await archiveLifetime(client, dumps, username, wanted, after, before) : null;
   const life = archived?.status === "answered"
     ? { counts: archived.counts, partial: true, source: "archive" }
-    : await lifetimeCounts(client, username, { wanted, after, before, skipInteractions: archived?.status === "no-interactions" });
+    : await lifetimeCounts(client, username, {
+      wanted, after, before, interactionsFirst, skipInteractions: archived?.status === "no-interactions",
+    });
 
   const rows = [...life.counts].map(([sub, c]) => [sub, c.posts, c.comments]);
   if (!life.partial) {
@@ -1126,8 +1140,10 @@ const lifeOnlyKey = (user, to, bucket, wanted) =>
 // Scans larger than this many users ask first (or, from the queue, profile only this many).
 export const LARGE_SCAN = 300;
 // Rough requests per user: about 4 without saved totals (two totals, "before" searches
-// and the odd retry), about 1 with them (the "before" search for this post).
+// and the odd retry), or 3 when one interactions query gives the totals (interactionsFirst),
+// and about 1 with them (the "before" search for this post).
 const REQUESTS_NEW = 4;
+const REQUESTS_NEW_INTERACTIONS = 3;
 const REQUESTS_SAVED = 1;
 // Rough seconds per request, measured against the live API: 1.8 one user at a time and
 // 1.3 with 2 or more in parallel. The server is the bottleneck, so past 2 in parallel
@@ -1139,7 +1155,7 @@ const SECONDS_PER_REQUEST_PARALLEL = 1.3;
 // seconds}. `saved` counts users whose lifetime totals are saved (and still fresh) for this
 // post: counts are saved per post (docs/adr/0006), so without `before` (the post's time)
 // none are found.
-export async function estimateScan(cache, usernames, { after = null, before = null, delay = SCAN_DEFAULTS.delay, concurrency = SCAN_DEFAULTS.concurrency } = {}) {
+export async function estimateScan(cache, usernames, { after = null, before = null, delay = SCAN_DEFAULTS.delay, concurrency = SCAN_DEFAULTS.concurrency, interactionsFirst = false } = {}) {
   const bucket = windowBucket(after);
   let saved = 0;
   // In batches, so a big thread doesn't open thousands of storage reads at once.
@@ -1148,7 +1164,7 @@ export async function estimateScan(cache, usernames, { after = null, before = nu
       .map((u) => cacheGet(cache, lifetimeKey(u, before, bucket), isRows)));
     saved += hits.filter(Boolean).length;
   }
-  const requests = saved * REQUESTS_SAVED + (usernames.length - saved) * REQUESTS_NEW;
+  const requests = saved * REQUESTS_SAVED + (usernames.length - saved) * (interactionsFirst ? REQUESTS_NEW_INTERACTIONS : REQUESTS_NEW);
   const perRequest = concurrency > 1 ? SECONDS_PER_REQUEST_PARALLEL : SECONDS_PER_REQUEST;
   const seconds = requests * Math.max(delay, perRequest);
   return { users: usernames.length, saved, requests, seconds };
@@ -1182,14 +1198,14 @@ export function emptyProfile(username, threadComments) {
 // come from its archive files. With `only` and `dumps`, when the archive covers every
 // wanted subreddit, lifetime counts come from it plus one interactions query (see
 // archiveLifetime).
-export async function buildProfile(client, username, threadComments, post, { only = null, after = null, cache = null, dumps = null } = {}) {
+export async function buildProfile(client, username, threadComments, post, { only = null, after = null, cache = null, dumps = null, interactionsFirst = false } = {}) {
   const profile = emptyProfile(username, threadComments);
   const user = username.toLowerCase();
   const bucket = windowBucket(after);
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
 
   // Every count stops at the post (docs/adr/0006).
-  const { rows, hit } = await lifetimeRows(client, dumps, cache, username, wanted, after, post.createdUtc, bucket);
+  const { rows, hit } = await lifetimeRows(client, dumps, cache, username, wanted, after, post.createdUtc, bucket, interactionsFirst);
 
   const byKey = new Map();
   for (const [sub, posts, comments] of rows) {

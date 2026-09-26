@@ -220,8 +220,9 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    comments. For a post older than where a covered subreddit's archive files (below) end,
    the thread comes from the files plus one
    `GET /api/comments/search?link_id=…&after=<the files' end>` for the comments made since.
-3. For each commenter, `GET /api/{posts,comments}/search/aggregate?aggregate=subreddit&author=…&before=<post time>`
-   returns per-subreddit counts up to the post. For the "before" facts it asks
+3. For each commenter, `GET /api/users/interactions/subreddits?author=…&before=<post time>`
+   returns per-subreddit post and comment counts up to the post, in one query
+   (`weight_posts=1000000&weight_comments=1` packs both counts into one number). For the "before" facts it asks
    `GET /api/{posts,comments}/search?author=…&subreddit=…&before=<post time>&fields=created_utc&limit=100`
    for the timestamps themselves, which gives the count, the days active and the first
    date in one small request (the `created_utc` aggregate would be cheaper, but it
@@ -243,12 +244,12 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    If the pages run out before the post, Arctic Shift is asked per user about the rest. A
    post older than the files needs none of this: everything before it is in the files.
 
-Aggregations can time out for very active users. The page then tries
-`GET /api/users/interactions/subreddits`, which answers for posts and comments in one query
-(`weight_posts=1000000&weight_comments=1` packs both counts into one number). If that fails
-too, it splits only the kind that timed out: into one query per subreddit when `subs` is
-set, otherwise into yearly chunks. For ordinary users the two aggregations are quicker, so
-they stay the first choice.
+If `interactions` can't answer for someone, the page falls back to two queries: when it refuses a huge account, such as AutoModerator, or times out. Those are
+`GET /api/{posts,comments}/search/aggregate?aggregate=subreddit&author=…&before=<post time>`.
+If one of those times out too, it splits only the kind that timed out: into one query per
+subreddit when `subs` is set, otherwise into yearly chunks. `interactions` went first after
+a benchmark (docs/adr/0007): it gave the same counts as the two aggregates for 50 of 50
+users, in about half the time, with fewer "slow down" replies.
 
 The page spaces request starts by `delay` and caps how many are in flight, starting at
 `par`: the cap halves on a 429, slow-down or network error, and rises again after a run of
