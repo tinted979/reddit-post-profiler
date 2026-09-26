@@ -39,14 +39,14 @@ const TAIL_COMMENTS_PER_PAGE = 50;
 const TAIL_MIN_PAGES = 2;
 const TAIL_MAX_PAGES = 20;
 const TAIL_MAX_WORTH = 100;
+// Seconds in a day, for epoch-second arithmetic.
+export const DAY = 86400;
+// The history windows a scan can be limited to (years back from the post, docs/adr/0006).
+export const HISTORY_YEARS = Object.freeze([1, 5, 10]);
+
 // Pacing a scan starts with, and the range the page accepts. The server tops out at about
 // 0.8 requests/s whatever the settings, so going faster only brings more "slow down"
 // replies (see SECONDS_PER_REQUEST).
-// Seconds in a day, for epoch-second arithmetic.
-export const DAY = 86400;
-// The history windows a scan can be limited to (years back from today).
-export const HISTORY_YEARS = Object.freeze([1, 5, 10]);
-
 export const SCAN_DEFAULTS = Object.freeze({ delay: 0.75, concurrency: 2, cacheDays: 7 });
 export const SCAN_LIMITS = Object.freeze({
   delay: Object.freeze({ min: 0.25, max: 30 }),
@@ -354,7 +354,7 @@ export class ArcticShiftClient {
   }
 
   async _request(path, params, group) {
-    const label = requestLabel(path, params, { split: Boolean(group) });
+    const label = requestLabel(path, params, { split: Boolean(group) && !group.before });
     const url = new URL(path, this.baseUrl);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
     url.searchParams.set("meta-app", this.appTag);
@@ -541,9 +541,9 @@ export class ArcticShiftClient {
   }
 
   // Map of subreddit -> {posts, comments} from one interactions query. `after`/`before`
-  // bound the time window (epoch seconds). Throws Unsupported when the endpoint refuses or
-  // fails for this user, or its counts can't be decoded; QueryTimeout, ServerBusy,
-  // rate-limit and network errors pass through.
+  // bound the time window (epoch seconds). Throws Unsupported when the endpoint refuses this
+  // user (a 4xx other than 429) or its counts can't be decoded; QueryTimeout, ServerBusy, a
+  // 5xx that outlasts the retries, rate-limit and network errors pass through.
   async interactionCounts(author, { after = null, before = null } = {}) {
     const params = { author, limit: "", weight_posts: POST_WEIGHT, weight_comments: 1 };
     if (after !== null) params.after = after;
@@ -586,8 +586,9 @@ export class ArcticShiftClient {
       }
     }
     // One group for the whole split (and any split inside it), so a part that gives up on a
-    // busy server takes the unsent rest with it.
-    const shared = group ?? { failed: false };
+    // busy server takes the unsent rest with it. A count in one subreddit (the "before"
+    // counts) keeps its label when split; only lifetime totals' parts are labelled split.
+    const shared = group ?? { failed: false, before: subreddit !== null };
     const parts = only?.length && subreddit === null
       ? only.map((sub) => this.subredditCounts(kind, author, { subreddit: sub, after, before, group: shared }))
       : yearlyRanges(before, this._now(), after).map(([start, end]) =>
@@ -725,7 +726,7 @@ export function tailBudget(numComments) {
 
 // The most tail pages worth fetching for a thread of `numComments`: about what asking per
 // commenter would cost instead. With `only` (lifetime counts for covered subreddits) every
-// commenter needs a request or two until the tail reaches the present, so about one page
+// commenter needs a request or two until the tail reaches the post, so about one page
 // per thread comment; otherwise only those active since the files end need a "before"
 // search, so about half that. Never below tailBudget, never above TAIL_MAX_WORTH.
 export function tailWorth(numComments, { only = false } = {}) {
@@ -925,7 +926,7 @@ async function lifetimeCounts(client, username, { wanted, after, before, skipInt
 // of two aggregates. Returns one shape on every path, tagged by `status`:
 // {status: "answered", counts} for the wanted subreddits (so it's cached under its own
 // `lifeonly` key rather than as the user's full profile); {status: "unavailable"} when the
-// archive doesn't cover them all or can't be read (the aggregates then answer as usual);
+// archive doesn't cover them all or can't be read (lifetimeCounts then answers as usual);
 // or {status: "no-interactions"} when interactions can't answer: the aggregates answer
 // instead, but without retrying the interactions query they already found unusable.
 //
@@ -977,8 +978,8 @@ async function archiveLifetime(client, dumps, username, wanted, after, before) {
 
 // The whole lifetime block for buildProfile, as rows ([subreddit, posts, comments][]):
 // the `life` cache, the `lifeonly` cache (only with `only` and `dumps`), the archive
-// attempt, the aggregate fallback (skipping the interactions retry once the archive
-// already found it unusable), and the cache writes. Returns {rows, hit}: `hit` is the
+// attempt, the API fallback (lifetimeCounts, skipping the interactions query once the
+// archive already found it unusable), and the cache writes. Returns {rows, hit}: `hit` is the
 // cache entry the rows came from (for its `fetchedAt`), or null when they're fresh.
 async function lifetimeRows(client, dumps, cache, username, wanted, after, before, bucket, interactionsFirst) {
   const user = username.toLowerCase();
@@ -1197,7 +1198,9 @@ export function emptyProfile(username, threadComments) {
 // With `dumps` (a DumpSource, see dumps.js), "before" facts for a covered subreddit
 // come from its archive files. With `only` and `dumps`, when the archive covers every
 // wanted subreddit, lifetime counts come from it plus one interactions query (see
-// archiveLifetime).
+// archiveLifetime). With `interactionsFirst` (app.js sets it, docs/adr/0007), one
+// interactions query answers the lifetime counts before the two aggregates are tried (see
+// lifetimeCounts).
 export async function buildProfile(client, username, threadComments, post, { only = null, after = null, cache = null, dumps = null, interactionsFirst = false } = {}) {
   const profile = emptyProfile(username, threadComments);
   const user = username.toLowerCase();

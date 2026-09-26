@@ -21,7 +21,8 @@ const openFixtures = ({ manifest = MANIFEST, ...opts } = {}) =>
   DumpSource.open({ baseUrl: BASE, fetchFn: async () => new Response(JSON.stringify(manifest)), openFile: localFile, ...opts });
 
 // In the fixture r/Python files, post p1 (by Alice) has Alice's comment at 1699000000 and
-// carol's at 1699990000, which falls in the files' last hour, so the tail fetches it again.
+// carol's at 1699990000, which falls in the files' last hour, so the thread's search after
+// the files end gets it again.
 const COMMENTS_THROUGH = 1699990000 - INGEST_LAG;
 const NOW = 1_700_100_000;
 const P1 = { id: "p1", author: "Alice", subreddit: "Python", createdUtc: 1699900000, title: "p1", numComments: 3 };

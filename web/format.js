@@ -92,6 +92,39 @@ export function requestsText(arcticShift, archive) {
   return archive === null || archive === undefined ? api : `${api} and ${plural(archive, "archive request")}`;
 }
 
+// The end-of-scan note on what the archive answered: sentences that each start with a space,
+// or "" if it answered nothing. `archive` is where the files alone end (DumpSource
+// covers(…, {withTail: false})), `tailed` where the tab's tail takes them (covers()),
+// `tailRequests` how many requests this scan's tail fetch sent, `dumps` the source's
+// counters, and `date` formats a time (epoch seconds). "Before" facts are complete up to
+// the second before the post.
+export function archiveNote({ post, archive, tailed, tailRequests, dumps, date }) {
+  if (dumps.broken) return ` The r/${archive.name} archive files stopped answering partway, so Arctic Shift answered for the rest.`;
+  let text = "";
+  if (dumps.reads > 0) {
+    const filesEnd = Math.min(archive.postsThrough, archive.commentsThrough);
+    if (post.createdUtc - 1 <= filesEnd) {
+      text += ` Activity in r/${archive.name} before the post came from archive files.`;
+    } else {
+      text += ` Activity in r/${archive.name} before the post, up to ${date(filesEnd)}, came from archive files.`;
+      const tailEnd = tailed ? Math.min(tailed.postsThrough, tailed.commentsThrough) : filesEnd;
+      const source = tailEnd <= filesEnd ? null
+        : tailRequests ? `${plural(tailRequests, "request")} for the whole subreddit`
+        : "what an earlier scan in this tab fetched for the whole subreddit";
+      if (!source) text += " Activity after that came from Arctic Shift for each user.";
+      else if (tailEnd >= post.createdUtc - 1) text += ` Activity from then to the post came from ${source}${tailRequests ? " rather than for each user" : ""}.`;
+      else text += ` Activity after that came from ${source}, up to ${date(tailEnd)}, and from Arctic Shift for each user for the rest.`;
+    }
+  }
+  if (dumps.lifetimeReads > 0) {
+    text += dumps.lifetimeGaps
+      ? " Subreddit counts came from the archive files, plus Arctic Shift for anything between where they end and the post."
+      : " Subreddit counts came from the archive files.";
+  }
+  if (dumps.threadReads > 0) text += " The thread's comments came from the archive files, plus Arctic Shift for those made since.";
+  return text;
+}
+
 export function tookText({ seconds, profilingSeconds }) {
   const total = formatDuration(seconds);
   return profilingSeconds === null ? total : `${total} (profiling ${formatDuration(profilingSeconds)})`;

@@ -1,6 +1,6 @@
 // The lifetime-count benchmark (tools/lifetime_bench.mjs): for P8, whether one interactions
-// query can stand in for the two aggregates a scan asks first. It runs against a fake API
-// here; the owner runs it live.
+// query gives the same counts as the two aggregates (it did, so full scans now ask it first,
+// docs/adr/0007). It runs against a fake API here; the owner runs it live.
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -190,4 +190,15 @@ test("main benchmarks a post's commenters and writes the results, through the fe
   // Every request carries the page's own tag.
   assert.ok(api.requests.every((r) => r.q["meta-app"] === "reddit-post-profiler"));
   assert.match(lines.join("\n"), /agree: 1 of 2/);
+});
+
+test("main exits with status 3, not a crash, when the server is busy before the benchmark starts", async () => {
+  const api = fakeApi({ busyAfter: 0 }); // "slow down" from the first request, finding the post
+  const errors = [];
+  const code = await main(["--post", "abc123"], {
+    fetchFn: api.fetchFn, now: api.clock.now, sleep: api.clock.sleep, ms: api.clock.ms, log: () => {}, error: (l) => errors.push(l),
+  });
+  assert.equal(code, 3);
+  assert.match(errors.join("\n"), /^lifetime_bench: /);
+  assert.ok(api.requests.every((r) => r.path === "/api/posts/ids"));
 });

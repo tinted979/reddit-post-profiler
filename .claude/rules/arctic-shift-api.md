@@ -32,6 +32,12 @@ paths:
   - It did again on 2026-09-26: 3 subreddit-wide searches, 7 days back, with `fields`, took about 0.3 s each. Every page was a full 100 while more rows remained.
   - The API README says `auto` answers 100–1000 rows depending on the server's capacity; more than 100 hasn't been seen yet. The archive fetcher asks for `auto` and takes a page under 100 rows as the end.
 - Outside a browser, responses carry `x-ratelimit-reset` (seconds left in the current 60 s window) and `x-ratelimit-reset-at` (epoch ms, on a minute boundary), but no `x-ratelimit-remaining` (checked 2026-09-25).
+- **Already in use by the code,** so allowed:
+  - `/api/posts/ids?ids&fields`;
+  - `/api/comments/tree?link_id&limit`;
+  - `/api/{posts,comments}/search` by `author`, `link_id` or `subreddit`, with `after`, `before`, `sort`, `limit` and `fields`;
+  - `/api/{posts,comments}/search/aggregate?aggregate=subreddit&author&limit=` (an empty `limit` returns every subreddit), with `subreddit`, `after` and `before`;
+  - `/api/users/interactions/subreddits?author&limit=&weight_posts&weight_comments`, with `after` and `before`.
 
 Add a fact here only after checking it live, with the date. Agents may only use endpoints and
 parameters listed here; anything else needs a live check by a human first (docs/adr/0002).

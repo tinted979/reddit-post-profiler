@@ -9,7 +9,8 @@
 #   tools/check_dumps.sh files [MANIFEST] each file in MANIFEST (default: the live one)
 #
 # upload_dumps.sh runs `files` on a new build before its manifest goes up, and `manifest`
-# after. .github/workflows/archive-check.yml runs it all weekly, so a changed Cloudflare
+# and `cors` after (with --only, just those two). The sync's verify job runs it all after
+# each publish, and .github/workflows/archive-check.yml weekly, so a changed Cloudflare
 # setting (compression, a challenge page, CORS) shows up as a failed run instead of the
 # page quietly switching the archive off and sending every scan back to the API.
 
@@ -110,7 +111,8 @@ check_cors() {
   headers=$(fetch -D - -o /dev/null -X OPTIONS -H "Origin: $OTHER" \
     -H "Access-Control-Request-Method: GET" -H "Access-Control-Request-Headers: range" "$PUBLIC/$path")
   grep -qi "^access-control-allow-origin:" <<< "$headers" && check "preflight from $OTHER is allowed"
-  [ "$problems" -eq 0 ] && echo "  ok: ${ORIGINS[*]} allowed, $OTHER refused"
+  # An if, not `&&`: a function ending in a failed test would stop the script under set -e.
+  if [ "$problems" -eq 0 ]; then echo "  ok: ${ORIGINS[*]} allowed, $OTHER refused"; fi
 }
 
 check_files() {
@@ -136,7 +138,7 @@ check_files() {
     grep -qi "^content-encoding:" <<< "$headers" && check "$path: served compressed, which breaks range reads"
     # For information: whether the edge cache holds the file yet.
     cache=$(grep -i "^cf-cache-status:" <<< "$headers" | tr -d '\r' || true)
-    [ "$problems" -eq "$before" ] && echo "  ok: $path (${bytes} bytes; ${cache:-no cf-cache-status})"
+    if [ "$problems" -eq "$before" ]; then echo "  ok: $path (${bytes} bytes; ${cache:-no cf-cache-status})"; fi
   done <<< "$list"
 }
 

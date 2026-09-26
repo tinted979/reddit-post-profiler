@@ -6,13 +6,13 @@ This is how the R2 archive (bucket `rpp-db`, served at https://rpp-db.tinted979.
 
 ## What runs
 
-- **Hourly, `.github/workflows/archive-sync.yml`** (once it's turned on).
+- **Hourly, `.github/workflows/archive-sync.yml`**, while `ARCHIVE_SYNC_ENABLED` is `true` (on since 2026-09-26; see "Pausing").
   - **Each run:** for every subreddit in `tools/archive.json` that's due, it:
     1. fetches what's new from Arctic Shift;
     2. splices that onto the live build and publishes a new build;
     3. deletes builds that were replaced at least 72 h ago.
   - **Each week,** each subreddit re-fetches its last 7 days, to catch items Arctic Shift archived late.
-  - **The token:** only one step of one job, `publish`, sees it. That step runs shell with rclone and curl only.
+  - **The token:** only one step of one job, `publish`, sees it. That step runs only shell: rclone, curl, sha256sum and standard tools.
 - **Weekly, `.github/workflows/archive-check.yml`:** checks the archive serves the page what it needs (the manifest, CORS, range reads).
 - **By hand:** first imports of big subreddits, and the jobs below.
 
@@ -49,7 +49,7 @@ The build job's summary has:
 | `… is earlier than the live build's … cutoff` | The fetch stopped short of the live build's cutoff (its budget, or an error), so the live build stays. | If it keeps happening for one subreddit, it's too busy for the budget: raise `budget`, or make its cadence shorter so each run has less to fetch. |
 | `isn't in the archive yet` | It's listed, but has no build and no `"backfill": "api"`. | Import it (below). |
 | publish: `the live manifest changed since this bundle was made` | Another upload (yours, say) landed between build and publish. | Nothing: the next run builds from the new manifest. |
-| publish: `not every build due was pruned` | The new build is live, but the builds named above it weren't deleted. They're recorded as pruned and won't be tried again. | Delete them by hand if you like (see "Builds on R2"). |
+| publish: `not every build due was pruned` | The new build is live, but the builds named above it weren't deleted. They're recorded as pruned and won't be tried again. The run's later bundles aren't published and `verify` doesn't run; the next run builds them again. | Delete them by hand if you like (see "Builds on R2"). |
 | verify fails | The new build is live, but the page may not read it right. | Run `tools/check_dumps.sh` yourself, and see the Hosting notes in `.claude/rules/archive.md`. |
 
 ## Adding a subreddit
@@ -67,7 +67,7 @@ The build job's summary has:
   The download tool starts each page at the last item's time. So an item that shares its second with the end of a page can go missing, and the weekly repair only reaches 7 days back. That's a handful of items, too few to change counts.
 - **Stopping one:** take it out of `tools/archive.json`.
   - Its live build then stays in the manifest, still correct up to its cutoff, and the page still uses it for scans before that.
-  - To drop it from the manifest too, make a whole upload with `--drop key`, from a directory that holds every other subreddit's build.
+  - To drop it from the manifest too, make a whole upload with `--drop key`, from a directory that holds the live `manifest.json` and every other subreddit's live build. A whole upload doesn't check cutoffs, so an older local build would move that subreddit back.
 
 ## Forcing a run
 
@@ -88,7 +88,7 @@ With a subreddit named, it builds just that one, due or not. Tick "repair" to re
 
 - **The publish log:** each publish is logged in `r/<key>/published.json`, a public file listing which build it replaced and when.
 - **Pruning:**
-  - A build is deleted 72 h after the publish that replaced it, at most 5 per publish.
+  - A build is deleted by the first publish at least 72 h after the one that replaced it, at most 5 per publish. `publish_build.sh` checks the 72 h against R2's own log, not only the bundle's list.
   - Never deleted: a build a manifest names, or one the log doesn't know.
 - **Builds the log doesn't know** are only reported: a publish that prunes lists them as "neither live nor in the publish log". Examples:
   - hand uploads from before the sync;
@@ -96,11 +96,10 @@ With a subreddit named, it builds just that one, due or not. Tick "repair" to re
 
   To deal with one:
   1. List a subreddit's builds: `rclone lsf --dirs-only r2:rpp-db/r/<key>/`.
-  2. Check that neither the live manifest (`curl -s https://rpp-db.tinted979.dev/manifest.json?check=1`) nor anything you're about to upload names it.
+  2. Check that neither the live manifest (`curl -s "https://rpp-db.tinted979.dev/manifest.json?check=$(date +%s)"`, past the edge cache) nor anything you're about to upload names it.
   3. Delete it: `rclone purge r2:rpp-db/r/<key>/<version>`.
 - **A half-finished upload:** both `upload_dumps.sh` and the sync upload build files first and the manifest last. So a stop in between leaves unreferenced files, which does no harm.
-  - A whole upload can simply be run again.
-  - An `--only` run, or a sync publish, then refuses the same version ("already on R2"). Rebuild with a new `--version`, or let the next sync run do it.
+  - Running it again refuses the same version: a whole upload with "already exists on R2", an `--only` run or a sync publish with "already on R2". Rebuild with a new `--version`, or let the next sync run do it.
 
 ## Rotating the token
 

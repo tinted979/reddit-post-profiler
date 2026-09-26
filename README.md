@@ -17,13 +17,15 @@ up in the thread, not what they did afterwards.
 
 Nothing to install. Paste a post URL and press *Analyze*. Users appear as they're
 profiled, ordered by how many comments they left in the thread. Click a user to see every
-subreddit they're active in, filter by user or subreddit, or download a CSV. The status line
+subreddit they'd been active in before the post, filter by user or subreddit, or download a CSV. The status line
 estimates the time left from the recent pace, allowing for saved results and any rate-limit
 pause, and when the run ends it shows how long it really took (and how much of that was
 profiling, the part the estimate covers). *Stop* ends a run at once and keeps what was found so far.
 
 Everything runs in your browser and talks to Arctic Shift directly. The whole thread comes
-in one request, several users are profiled at once, and most commenters take 2 requests.
+in one request, several users are profiled at once, and a commenter without saved results
+usually takes 1 request, or 2–3 if they'd been active in the post's subreddit before the post
+and it has no archive files.
 Results are saved in your browser, so rescanning a thread reuses them instead of asking the
 API again. (Counts stop at each post, so they're saved per post.)
 
@@ -39,7 +41,7 @@ Arctic Shift site tags its own, so the archive's maintainer can see where the tr
 |---|---|
 | *N in thread* | their comments in this thread (0 for a post author who didn't comment) |
 | *new here* / *occasional* / *regular* | how established they were in the post's subreddit before the post was made (see [Badges](#badges)). The badge shows their posts and comments there; open the card for how many days they were active and when they started |
-| *N subreddits* | subreddits they have archived posts or comments in |
+| *N subreddits* | subreddits they had archived posts or comments in before the post |
 | *saved* | reused from an earlier scan in this browser, with no new requests |
 | *lookup failed* | Arctic Shift kept failing for this user (open the card for details). Press *Analyze* again to retry; saved results are reused for everyone else |
 
@@ -47,7 +49,7 @@ The line under a name lists the post's subreddit first, then their most active o
 Opening a card shows the full table, with the post's own subreddit highlighted at the top,
 and a link to their Reddit profile.
 Each post and comment count links to the Arctic Shift search page listing those posts or
-comments (newest first, within the `years` window if set).
+comments (newest first, up to the post, and within the `years` window if set).
 
 ### Badges
 
@@ -139,8 +141,10 @@ https://tinted979.github.io/reddit-post-profiler/?post=https://redd.it/1l7d1e4&m
 - Every scan also fetches the list of archive files (`manifest.json`) from
   `rpp-db.tinted979.dev`, the project's file host on Cloudflare R2. For a subreddit it
   covers, the page reads parts of those files instead of asking Arctic Shift. The files
-  are sorted by username, so the host (Cloudflare) sees your IP address, the subreddit, and
-  roughly where in the alphabet each looked-up name falls, but not the names themselves.
+  are sorted by username (and one by post), so the host (Cloudflare) sees your IP address,
+  the subreddit, roughly where in the alphabet each looked-up name falls and, for a post
+  older than the files, roughly where its id falls among the posts, but not the names or
+  the post itself.
 - Results are saved in this browser's IndexedDB (database `reddit-tool`, the project's earlier name, kept so saved data carries over): each user's
   per-subreddit counts, and their "before" counts, days active and first date for each
   post you scan. They're reused
@@ -149,9 +153,9 @@ https://tinted979.github.io/reddit-post-profiler/?post=https://redd.it/1l7d1e4&m
   Saved scans (each post, its options and every profile shown) are kept
   until you delete them. *Clear saved results* under *Options* deletes everything now, and
   `cache=0` saves nothing.
-- A saved "before" count is reused only if it was fetched at least an hour after the post,
-  and saved totals from before a user's latest comment in the thread aren't trusted to
-  skip queries, so rescanning a thread that's still growing stays correct.
+- Saved counts stop at the post, like every count. A saved "before" count is reused, and
+  saved totals are trusted to skip a "before" query, only if they were fetched at least an
+  hour after the post, so something made just before the post but archived late isn't missed.
 
 ## Responsible use
 
@@ -190,19 +194,19 @@ activity in each subreddit:
 
 ```
 username,thread_comments,target_subreddit,target_posts_before,target_comments_before,subreddit,posts,comments,total,error,target_active_days_before,target_first_before_utc,target_badge,target_days_exact
-barkmonster,2,learnpython,0,24,learnpython,0,82,82,,12,2024-03-05T18:22:10.000Z,occasional,true
 barkmonster,2,learnpython,0,24,ADHD,0,53,53,,12,2024-03-05T18:22:10.000Z,occasional,true
+barkmonster,2,learnpython,0,24,learnpython,0,24,24,,12,2024-03-05T18:22:10.000Z,occasional,true
 …
 ```
 
 - `thread_comments`: the user's comment count in the analysed thread
 - `target_subreddit`: the post's subreddit
-- `target_posts_before` / `target_comments_before`: their activity there before the post was created (blank if the lookup failed, or for a post older than the `years` window, where it isn't looked up)
+- `target_posts_before` / `target_comments_before`: their activity there before the post was created (blank if the lookup failed, or in a scan saved before counts stopped at the post whose post was older than its `years` window)
 - `posts` / `comments` / `total`: their counts in `subreddit` before the post, as archived by Arctic Shift: all of them, or those within the `years` window before the post
 - `error`: why the lookup failed, if it did
 - `target_active_days_before`: different days they posted or commented in the post's subreddit before it (see `target_days_exact`)
 - `target_first_before_utc`: when the first of those was
-- `target_badge`: `new`, `occasional` or `regular` under the badge settings in use (blank for a post older than the `years` window)
+- `target_badge`: `new`, `occasional` or `regular` under the badge settings in use (blank when the "before" counts are)
 - `target_days_exact`: `true`, or `false` when `target_active_days_before` is only a lower bound (past 100 posts or comments there, when the archive files don't cover the subreddit); blank when unknown
 
 Subreddits below the minimum (`min`) are left out, except the post's own.
@@ -229,7 +233,7 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    currently answers all zeros). Past 100 items it adds the aggregate for the exact count
    and one more search for the first date. These run in parallel, and it skips a
    "before" query when the counts show no activity in the post's subreddit before the post. For a subreddit with archive files on
-   the project's R2 bucket, listed in the bucket's manifest
+   the project's R2 bucket (brought up to date every hour), listed in the bucket's manifest
    (`https://rpp-db.tinted979.dev/manifest.json`), those come from the files instead.
    What's between the files' end and the post is fetched once per scan for the whole
    subreddit rather than once per commenter:
@@ -252,8 +256,8 @@ a benchmark (docs/adr/0007): it gave the same counts as the two aggregates for 5
 users, in about half the time, with fewer "slow down" replies.
 
 The page spaces request starts by `delay` and caps how many are in flight, starting at
-`par`: the cap halves on a 429, slow-down or network error, and rises again after a run of
-successes.
+`par`: the cap halves on a 429, slow-down, server error (5xx) or network error, and rises
+again after a run of successes.
 
 Archive file reads are byte-range requests to the R2 bucket, served through Cloudflare's
 cache, so they aren't paced like Arctic Shift's. The status line counts both kinds while a
@@ -267,7 +271,7 @@ scan's cost can be checked against what it should have asked.
 
 ```sh
 cd web && npm ci && npm test   # web app tests (Node 22+; npm ci installs the one test-only dependency)
-uv run --with duckdb --with pytest pytest tools   # dump build and upload-check tests
+uv run --with duckdb --with pytest pytest tools   # archive tool tests (build, splice, sync, upload, publish)
 ```
 
 To try the web app locally, serve `web/` with any static server (ES modules don't load
@@ -286,7 +290,14 @@ only changes when a pull request is merged. After deploying, CI checks that the 
 loads the new commit. How AI agents take part (who can change what, and where a human
 decides) is in [WORKFLOW.md](WORKFLOW.md).
 
-The archive files are built with `tools/build_dumps.py` and uploaded with
+The archive covers the subreddits in `tools/archive.json`, and
+`.github/workflows/archive-sync.yml` keeps it current. Every hour it fetches what Arctic
+Shift has archived since each due subreddit's build, splices that onto the build and
+publishes the new one, manifest last, and it deletes builds replaced at least 72 hours
+before (docs/adr/0005). Only its `publish` job holds the R2 token. How to run, pause and
+repair it is in [docs/archive-runbook.md](docs/archive-runbook.md).
+
+Builds made by hand (a first import, say) use `tools/build_dumps.py` and
 `tools/upload_dumps.sh`. It first checks the upload against what's live
 (`tools/check_upload.py`: no live subreddit dropped, no build directory reused), then checks
 the public URL serves the new files correctly (range requests, CORS for the page's origin
@@ -295,8 +306,9 @@ settings are listed in [.claude/rules/archive.md](.claude/rules/archive.md).
 
 `.github/workflows/agent-review.yml` has read-only Claude reviewers comment on each pull
 request once, when it's opened ready, reopened or marked ready for review (drafts wait): a
-general reviewer always, and security or architecture reviewers when the change touches
-their area. Their roles are in `.claude/agents/`, they can only comment, and they check
+general reviewer on every PR but README- or `docs/history/`-only ones, and security or
+architecture reviewers when the change touches their area. A `review:<role>` label runs, or
+re-runs, one reviewer on demand. Their roles are in `.claude/agents/`, they can only comment, and they check
 changes against the rules in [CLAUDE.md](CLAUDE.md#rules-for-changes). They need a
 `CLAUDE_CODE_OAUTH_TOKEN` secret (from `claude setup-token`), so reviews use the Claude
 subscription's usage rather than API billing. [WORKFLOW.md](WORKFLOW.md) has the details.

@@ -2,8 +2,9 @@
 # Publish one subreddit's new build to the R2 bucket, from a bundle made by
 # `check_upload.py merge-one`. The archive sync's publish job runs this and nothing else,
 # since it's the one step that holds the R2 token (docs/adr/0005): it uses only rclone, curl,
-# sha256sum and coreutils (no Node or Python), and it treats the bundle as untrusted, checking
-# every name in it before any rclone call. upload_dumps.sh --only runs it too.
+# sha256sum and standard shell tools (coreutils, grep, sed, find; no Node or Python), and it
+# treats the bundle as untrusted, checking every name in it before any rclone call.
+# upload_dumps.sh --only runs it too.
 #
 # Usage, from the repo root:  tools/publish_build.sh BUNDLE
 #
@@ -23,9 +24,10 @@
 #  6. The publish log (cached 5 minutes), which pruning reads.
 #  7. Last, the builds in `prune` are deleted, except any the live manifest named until
 #     step 5, or that the publish log on R2 (read at step 1, before this publish's own) doesn't
-#     say was replaced. Then, if there were any, r/<key>/ is listed and builds that are neither live
-#     nor in the publish log are reported: they're never deleted automatically. A failed
-#     prune fails the script after the publish stands, so it shows.
+#     say was replaced at least PRUNE_AFTER ago. Then, if there were any, r/<key>/ is listed
+#     and builds that are neither live nor in the publish log are reported: they're never
+#     deleted automatically. A failed prune fails the script after the publish stands, so it
+#     shows.
 # A build uploaded in step 3 that goes no further is left unreferenced, never deleted here.
 #
 # RCLONE and CURL name the programs (the tests pass fakes); RCLONE_REMOTE (default r2),
@@ -41,8 +43,10 @@ PUBLIC="${DUMPS_URL:-https://rpp-db.tinted979.dev}"
 FILES=(posts_by_author comments_by_author comments_by_link)
 # The manifest and the log are small; anything bigger isn't one.
 MAX_JSON_BYTES=1048576
-# The most builds one publish prunes (check_upload.py's PRUNE_MAX).
+# The most builds one publish prunes, and how long after it was replaced a build may go
+# (check_upload.py's PRUNE_MAX and PRUNE_AFTER).
 PRUNE_MAX=5
+PRUNE_AFTER=$((72 * 3600))
 VERSION_PATTERN='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,39}$'
 
 fail() { echo "error: $*" >&2; exit 1; }
@@ -152,13 +156,25 @@ unchanged
 echo "$BUILD/ is live."
 
 # Step 7: builds replaced long enough ago. $work/live.json is the manifest this publish replaced.
+# When R2's log says version $1 was replaced (the latest time, if it's there twice); nothing if it
+# doesn't say. Each publish in the log is an object with no objects inside, so it's read without
+# a JSON parser.
+replaced_at() {
+  tr -d ' \t\r\n' < "$work/live-log.json" | grep -o '{[^{}]*}' | grep -F "\"replaced\":\"$1\"" |
+    grep -o '"utc":[0-9]\{1,12\}' | cut -d: -f2 | sort -n | tail -1
+}
+now=$(date +%s)
 unpruned=0
 for v in "${PRUNE[@]}"; do
+  when=$(replaced_at "$v" || true)
   if grep -qF "\"r/$KEY/$v/" "$work/live.json"; then
     echo "  kept r/$KEY/$v/: the manifest named it until now" >&2
     unpruned=$((unpruned + 1))
-  elif ! grep -qF "\"replaced\": \"$v\"" "$work/live-log.json"; then
+  elif [ -z "$when" ]; then
     echo "  kept r/$KEY/$v/: the publish log on R2 doesn't say it was replaced" >&2
+    unpruned=$((unpruned + 1))
+  elif [ $((now - when)) -lt "$PRUNE_AFTER" ]; then
+    echo "  kept r/$KEY/$v/: the publish log on R2 says it was replaced less than 72 h ago" >&2
     unpruned=$((unpruned + 1))
   elif "$RCLONE" purge "$REMOTE:$BUCKET/r/$KEY/$v" 2> "$work/purge.err" || grep -qi "directory not found" "$work/purge.err"; then
     echo "  pruned r/$KEY/$v/"

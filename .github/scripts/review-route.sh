@@ -21,8 +21,10 @@ fi
 if ! grep -qvE '^(README\.md$|docs/history/)' <<<"$files"; then echo '[]'; exit 0; fi
 
 roles='["pr-reviewer"'
-# Security: CI, agent config, deploy and archive scripts, the CORS policy, the page shell.
-if grep -qE '^(\.github/|\.claude/|tools/.*\.sh$|tools/r2-cors\.json$|web/index\.html$)' <<<"$files"; then
+# Security: CI, agent config, deploy and archive scripts, the archive sync's scripts, config and
+# runbook (what the token step publishes and prunes, docs/adr/0005), the CORS policy, the page
+# shell.
+if grep -qE '^(\.github/|\.claude/|tools/.*\.sh$|tools/(archive_sync|check_upload)\.py$|tools/fetch_subreddit\.mjs$|tools/(archive|r2-cors)\.json$|docs/archive-runbook\.md$|web/index\.html$)' <<<"$files"; then
   roles+=',"security-reviewer"'
 fi
 # Architecture: the grounding docs (CLAUDE.md, the path-scoped rules, WORKFLOW.md, ADRs), a new

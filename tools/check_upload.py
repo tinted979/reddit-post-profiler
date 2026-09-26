@@ -22,7 +22,7 @@ the output of `rclone lsf -R --dirs-only --max-depth 2 <remote>:<bucket>/r`.
 To publish one subreddit's build rather than a whole manifest (the archive sync, and
 upload_dumps.sh --only; docs/adr/0005), with no token:
 
-  check_upload.py merge-one --key KEY --dumps DIR --live LIVE_MANIFEST --log LOG --out BUNDLE [--allow-older]
+  check_upload.py merge-one --key KEY --dumps DIR --live LIVE_MANIFEST --log LOG --out BUNDLE [--allow-older] [--repair]
 
 It merges r/KEY's entry from DIR/manifest.json into the live manifest (as downloaded,
 byte for byte), leaving every other entry as it's live, and checks the new build: a
@@ -35,6 +35,7 @@ manifest.json, r/KEY/<version>/*.parquet and r/KEY/published.json (the log with 
 publish added), and `prune` when older builds are due to go: r/KEY's builds that the log says
 were replaced at least PRUNE_AFTER ago, never the live one or the new one, at most PRUNE_MAX
 a publish, oldest first. They're recorded in the log's `pruned`, so none is listed twice.
+--repair marks the publish as a repair in the log, for tools/archive_sync.py's schedule.
 """
 
 from __future__ import annotations

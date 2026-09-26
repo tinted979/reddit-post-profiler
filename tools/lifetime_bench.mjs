@@ -1,6 +1,8 @@
 // Benchmark for P8 of the archive plan (docs/history/2026-09-25-archive-sync.md): can one
 // /api/users/interactions/subreddits query stand in for the two
-// /api/{posts,comments}/search/aggregate queries a full scan asks first for each commenter?
+// /api/{posts,comments}/search/aggregate queries for each commenter's lifetime counts? It
+// passed on 2026-09-26, so full scans now ask interactions first (docs/adr/0007); run it again
+// to check that still holds.
 // For each user it asks both, with the same bounds as a scan (every count stops at the post,
 // docs/adr/0006), in alternating order so neither always goes first, and compares the answers.
 //
@@ -23,7 +25,8 @@
 // switching (P8b): at least 99% agreement, no slower, and no more slow-downs.
 //
 // Exit status: 0 when it ran through; 3 when a busy or rate-limiting server stopped it (the
-// results so far are still printed and saved); 2 for bad arguments.
+// results so far are still printed and saved), or an API error kept it from reading the post
+// and its commenters; 2 for bad arguments or a post that isn't in the archive.
 
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -153,7 +156,7 @@ async function measure(bench, call) {
 
 async function askAggregates(bench, user, bounds) {
   const r = await measure(bench, async () => {
-    // As a scan asks first (core.js lifetimeCounts): a timed-out aggregate once more, no split.
+    // As a scan asks them (core.js lifetimeCounts): a timed-out aggregate once more, no split.
     const settled = await Promise.allSettled(KINDS.map((kind) =>
       bench.client.subredditCounts(kind, user, { ...bounds, split: false })));
     // A busy or rate-limiting reply wins over the other's timeout, so the run stops.
@@ -302,13 +305,22 @@ export async function main(argv, { fetchFn, now, sleep, ms: msClock, log = conso
   let users = opts.users;
   let before = opts.before ?? Math.floor(Date.now() / 1000) - 3600;
   if (opts.post) {
-    const post = await bench.client.getPost(opts.post);
+    let post;
+    let commenters;
+    try {
+      post = await bench.client.getPost(opts.post);
+      if (post) commenters = await collectCommenters(bench.client, post);
+    } catch (err) {
+      // An API error before the run (a busy server, say) stops it like one during the run.
+      if (!(err instanceof ArcticShiftError)) throw err;
+      error(`lifetime_bench: couldn't read the post and its commenters: ${err.message}`);
+      return 3;
+    }
     if (!post) {
       error(`lifetime_bench: no post ${opts.post} in the archive`);
       return 2;
     }
     before = opts.before ?? post.createdUtc;
-    const commenters = await collectCommenters(bench.client, post);
     users = [...commenters].sort((a, b) => b[1].count - a[1].count).slice(0, opts.max).map(([name]) => name);
     log(`r/${post.subreddit} post ${post.id}: ${users.length} of ${commenters.size} commenters, counted up to the post`);
   }

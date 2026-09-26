@@ -1,6 +1,6 @@
 # 0004. A static per-subreddit archive on R2, read with range requests
 
-**Status:** Superseded by 0005, which keeps this decision and adds a scheduled sync (accepted 2026-09-25; built in PRs #17 and #18, plans in docs/history/).
+**Status:** Superseded by 0005, which keeps this decision and adds a scheduled sync. (Accepted 2026-09-25; built in PRs #15–#18, plans in docs/history/2026-09-24-archive-before-facts.md and 2026-09-25-archive-lifetime-counts.md.)
 
 ## Context
 

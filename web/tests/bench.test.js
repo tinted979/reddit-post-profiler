@@ -92,7 +92,8 @@ test("the tail scenarios ask about the whole subreddit once, then little or noth
   assert.equal(by["archive-tail-only"].api.total, 2);
   assert.deepEqual(by["archive-tail-only"].result.subreddits, by["archive-only"].result.subreddits);
 
-  // A full scan: the tail, then only the user's two lifetime aggregates (no gap searches).
+  // A full scan: the tail, then only the user's two lifetime aggregates (no gap searches;
+  // core.js's default order, where the page asks one interactions query instead).
   assert.equal(tail("archive-tail-full"), 2);
   assert.equal(hits("archive-tail-full", "/api/comments/search"), 0);
   assert.equal(hits("archive-tail-full", "/api/posts/search/aggregate"), 1);

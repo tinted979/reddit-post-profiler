@@ -67,3 +67,44 @@ test("explain turns errors into plain advice", () => {
   assert.equal(explain(new ArcticShiftError("x", 503)), "Arctic Shift returned an error (HTTP 503).");
   assert.equal(explain(new Error("Something else")), "Something else");
 });
+
+// The end-of-scan note on what the archive answered. Files end at FILES, the post is at POST.
+const { archiveNote } = await import("../format.js");
+const FILES = 1_000_000;
+const noteFor = (post, { tailed = FILES, tailRequests = 0, ...counters } = {}) => archiveNote({
+  post: { createdUtc: post },
+  archive: { name: "Python", postsThrough: FILES + 50, commentsThrough: FILES },
+  tailed: { postsThrough: tailed, commentsThrough: tailed + 50 },
+  tailRequests,
+  dumps: { broken: false, reads: 1, lifetimeReads: 0, lifetimeGaps: 0, threadReads: 0, ...counters },
+  date: (t) => `<${t}>`,
+});
+
+test("archiveNote: a post older than where the files end took its before facts from them alone", () => {
+  // Not "up to" a date after the post, and nothing about tails, even one an earlier scan left.
+  assert.equal(noteFor(FILES - 10, { tailed: FILES + 500 }), " Activity in r/Python before the post came from archive files.");
+});
+
+test("archiveNote credits the whole-subreddit fetch only when it reached the post", () => {
+  const post = FILES + 1000;
+  const upTo = ` Activity in r/Python before the post, up to <${FILES}>, came from archive files.`;
+  assert.equal(noteFor(post, { tailed: post - 1, tailRequests: 3 }),
+    `${upTo} Activity from then to the post came from 3 requests for the whole subreddit rather than for each user.`);
+  assert.equal(noteFor(post, { tailed: FILES + 400, tailRequests: 3 }),
+    `${upTo} Activity after that came from 3 requests for the whole subreddit, up to <${FILES + 400}>, and from Arctic Shift for each user for the rest.`);
+  assert.equal(noteFor(post, { tailed: post - 1 }),
+    `${upTo} Activity from then to the post came from what an earlier scan in this tab fetched for the whole subreddit.`);
+  assert.equal(noteFor(post, { tailed: FILES + 400 }),
+    `${upTo} Activity after that came from what an earlier scan in this tab fetched for the whole subreddit, up to <${FILES + 400}>, and from Arctic Shift for each user for the rest.`);
+  assert.equal(noteFor(post), `${upTo} Activity after that came from Arctic Shift for each user.`);
+});
+
+test("archiveNote: counts and threads from the files, a broken archive, and nothing read", () => {
+  const post = FILES - 10;
+  assert.equal(noteFor(post, { reads: 0, lifetimeReads: 2 }), " Subreddit counts came from the archive files.");
+  assert.equal(noteFor(post, { reads: 0, lifetimeReads: 2, lifetimeGaps: 1 }),
+    " Subreddit counts came from the archive files, plus Arctic Shift for anything between where they end and the post.");
+  assert.equal(noteFor(post, { reads: 0, threadReads: 1 }), " The thread's comments came from the archive files, plus Arctic Shift for those made since.");
+  assert.equal(noteFor(post, { broken: true }), " The r/Python archive files stopped answering partway, so Arctic Shift answered for the rest.");
+  assert.equal(noteFor(post, { reads: 0 }), "");
+});
