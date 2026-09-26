@@ -32,7 +32,9 @@ entry gives, and cutoffs that aren't in the future or earlier than the live ones
 none yet. BUNDLE, a new directory, gets what tools/publish_build.sh uploads: key, version,
 live.sha256 (the live manifest's, so it can tell if another publish came between),
 manifest.json, r/KEY/<version>/*.parquet and r/KEY/published.json (the log with this
-publish added).
+publish added), and `prune` when older builds are due to go: r/KEY's builds that the log says
+were replaced at least PRUNE_AFTER ago, never the live one or the new one, at most PRUNE_MAX
+a publish, oldest first. They're recorded in the log's `pruned`, so none is listed twice.
 """
 
 from __future__ import annotations
@@ -52,11 +54,15 @@ KEY_NAME = re.compile(r"^[a-z0-9_]{2,21}$")
 VERSION_NAME = re.compile(r"^\w[\w.-]{0,39}$", re.ASCII)
 # The files of a build.
 BUILD_FILES = ("posts_by_author", "comments_by_author", "comments_by_link")
-# r/<key>/published.json: {format, subreddit, publishes: [{version, replaced, utc}]}, one entry
-# per publish, oldest first. Pruning (P6) deletes a replaced build 72 h after the publish
-# that replaced it, so the log keeps its newest LOG_KEEP entries (six weeks of hourly ones).
+# r/<key>/published.json: {format, subreddit, publishes: [{version, replaced, utc}], pruned:
+# [version]}, one publish entry per publish, oldest first (`pruned` only once there are any).
+# A replaced build is deleted PRUNE_AFTER after the publish that replaced it, long after any
+# page could still hold a manifest naming it (they're cached 5 minutes), so the log keeps its
+# newest LOG_KEEP entries (six weeks of hourly ones).
 LOG_FORMAT = 1
 LOG_KEEP = 1000
+PRUNE_AFTER = 72 * 3600
+PRUNE_MAX = 5
 
 
 def parse_builds(listing: str) -> set[str]:
@@ -119,7 +125,30 @@ def log_problem(log, key: str) -> str | None:
               and (e.get("replaced") is None or (isinstance(e["replaced"], str) and VERSION_NAME.match(e["replaced"]))))
         if not ok:
             return f"has an entry that doesn't check out: {e!r}"
+    pruned = log.get("pruned", [])
+    if not isinstance(pruned, list) or not all(isinstance(v, str) and VERSION_NAME.match(v) for v in pruned):
+        return "has a list of pruned builds that doesn't check out"
     return None
+
+
+def due_for_pruning(log: dict | None, keep: set, now: int) -> list[str]:
+    """r/<key>'s builds that `log` says were replaced at least PRUNE_AFTER before `now`, not
+    pruned yet and not in `keep`: at most PRUNE_MAX, oldest first."""
+    if log is None:
+        return []
+    done = set(log.get("pruned", []))
+    due = []
+    for e in log["publishes"]:
+        v = e.get("replaced")
+        if v and e["utc"] <= now - PRUNE_AFTER and v not in done and v not in keep and v not in due:
+            due.append(v)
+    return due[:PRUNE_MAX]
+
+
+def newly_pruned(old_log: dict | None, new_log: dict) -> list[str]:
+    """The builds `new_log` records as pruned that `old_log` didn't: the bundle's prune list."""
+    before = set(old_log.get("pruned", [])) if isinstance(old_log, dict) else set()
+    return [v for v in new_log.get("pruned", []) if v not in before]
 
 
 def merge_one(local: dict, live: dict | None, key: str, sizes: dict[str, int], log, now: int,
@@ -178,9 +207,13 @@ def merge_one(local: dict, live: dict | None, key: str, sizes: dict[str, int], l
     if found:
         return None, None, found
     merged = {**live, "subreddits": dict(sorted({**live.get("subreddits", {}), key: entry}.items()))}
-    publishes = (log["publishes"] if log is not None else []) + [
-        {"version": version, "replaced": was.get("version") if was else None, "utc": now}]
-    return merged, {"format": LOG_FORMAT, "subreddit": key, "publishes": publishes[-LOG_KEEP:]}, []
+    live_version = was.get("version") if was else None
+    publishes = (log["publishes"] if log is not None else []) + [{"version": version, "replaced": live_version, "utc": now}]
+    new_log = {"format": LOG_FORMAT, "subreddit": key, "publishes": publishes[-LOG_KEEP:]}
+    pruned = (log.get("pruned", []) if log is not None else []) + due_for_pruning(log, {live_version, version}, now)
+    if pruned:
+        new_log["pruned"] = pruned[-LOG_KEEP:]
+    return merged, new_log, []
 
 
 def read_json(path: Path, what: str):
@@ -215,9 +248,9 @@ def merge_one_main(argv: list[str], now: int | None) -> None:
     live_bytes = args.live.read_bytes() if args.live.exists() else b""
     live = read_json(args.live, "the live manifest")
     try:
-        log = read_json(args.log, "the publish log")
+        old_log = read_json(args.log, "the publish log")
     except SystemExit:
-        log = "unreadable"  # merge_one reports it: the log is only ever fixed by hand
+        old_log = "unreadable"  # merge_one reports it: the log is only ever fixed by hand
     # The sizes of the files the entry could name, looked up only under DIR/r/KEY/<version>/.
     entry = (local.get("subreddits") or {}).get(args.key)
     version = entry.get("version") if isinstance(entry, dict) else None
@@ -227,7 +260,7 @@ def merge_one_main(argv: list[str], now: int | None) -> None:
             rel = f"r/{args.key}/{version}/{name}.parquet"
             if (args.dumps / rel).is_file():
                 sizes[rel] = (args.dumps / rel).stat().st_size
-    merged, log, found = merge_one(local, live, args.key, sizes, log, int(now if now is not None else time.time()),
+    merged, log, found = merge_one(local, live, args.key, sizes, old_log, int(now if now is not None else time.time()),
                                    args.allow_older)
     for problem in found:
         print(f"error: {problem}", file=sys.stderr)
@@ -237,12 +270,19 @@ def merge_one_main(argv: list[str], now: int | None) -> None:
     for rel in sizes:
         (out / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(args.dumps / rel, out / rel)
-    (out / "manifest.json").write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
-    (out / "r" / args.key / "published.json").write_text(json.dumps(log, indent=2) + "\n", encoding="utf-8")
-    (out / "key").write_text(args.key + "\n", encoding="utf-8")
-    (out / "version").write_text(version + "\n", encoding="utf-8")
-    (out / "live.sha256").write_text(hashlib.sha256(live_bytes).hexdigest() + "\n", encoding="utf-8")
-    print(f"ready to publish r/{args.key}/{version}/ in {out}")
+
+    # With \n line ends on any platform: publish_build.sh reads these in bash.
+    def write(rel: str, text: str) -> None:
+        (out / rel).write_text(text, encoding="utf-8", newline="\n")
+    write("manifest.json", json.dumps(merged, indent=2) + "\n")
+    write(f"r/{args.key}/published.json", json.dumps(log, indent=2) + "\n")
+    write("key", args.key + "\n")
+    write("version", version + "\n")
+    write("live.sha256", hashlib.sha256(live_bytes).hexdigest() + "\n")
+    prune = newly_pruned(old_log, log)
+    if prune:
+        write("prune", "".join(v + "\n" for v in prune))
+    print(f"ready to publish r/{args.key}/{version}/ in {out}" + (f", then prune {', '.join(prune)}" if prune else ""))
 
 
 def main(argv: list[str] | None = None, now: int | None = None) -> None:

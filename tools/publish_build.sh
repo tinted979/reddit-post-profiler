@@ -9,7 +9,8 @@
 #
 # BUNDLE holds exactly: key, version and live.sha256 (one line each); manifest.json (the live
 # manifest with this subreddit's entry replaced); r/<key>/<version>/{posts_by_author,
-# comments_by_author,comments_by_link}.parquet; and r/<key>/published.json (the publish log).
+# comments_by_author,comments_by_link}.parquet; r/<key>/published.json (the publish log); and,
+# when older builds are due to go, prune (versions of r/<key>, one a line, at most PRUNE_MAX).
 #
 # Steps, in this order; the first that fails stops it:
 #  1. The live manifest on R2 is still the one the bundle was made from (its sha256), so a
@@ -19,7 +20,12 @@
 #  4. ... and each is checked through the public URL: a byte range comes back as a range
 #     (206, with the full size), uncompressed.
 #  5. The live manifest is checked again, and only then replaced (cached 5 minutes).
-#  6. Last, the publish log (cached 5 minutes), which pruning reads.
+#  6. The publish log (cached 5 minutes), which pruning reads.
+#  7. Last, the builds in `prune` are deleted, except any the live manifest named until
+#     step 5, or that the publish log on R2 (read at step 1, before this publish's own) doesn't
+#     say was replaced. Then, if there were any, r/<key>/ is listed and builds that are neither live
+#     nor in the publish log are reported: they're never deleted automatically. A failed
+#     prune fails the script after the publish stands, so it shows.
 # A build uploaded in step 3 that goes no further is left unreferenced, never deleted here.
 #
 # RCLONE and CURL name the programs (the tests pass fakes); RCLONE_REMOTE (default r2),
@@ -35,6 +41,9 @@ PUBLIC="${DUMPS_URL:-https://rpp-db.tinted979.dev}"
 FILES=(posts_by_author comments_by_author comments_by_link)
 # The manifest and the log are small; anything bigger isn't one.
 MAX_JSON_BYTES=1048576
+# The most builds one publish prunes (check_upload.py's PRUNE_MAX).
+PRUNE_MAX=5
+VERSION_PATTERN='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,39}$'
 
 fail() { echo "error: $*" >&2; exit 1; }
 
@@ -57,11 +66,12 @@ field() {
   printf '%s' "$value"
 }
 KEY=$(field key '^[a-z0-9_]{2,21}$')
-VERSION=$(field version '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,39}$')
+VERSION=$(field version "$VERSION_PATTERN")
 LIVE_SHA=$(field live.sha256 '^[0-9a-f]{64}$')
 BUILD="r/$KEY/$VERSION"
 want=(key version live.sha256 manifest.json "r/$KEY/published.json")
 for f in "${FILES[@]}"; do want+=("$BUILD/$f.parquet"); done
+[ ! -f "$BUNDLE/prune" ] || want+=(prune)
 got=$(cd "$BUNDLE" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
 [ "$got" = "$(printf '%s\n' "${want[@]}" | LC_ALL=C sort)" ] ||
   fail "the bundle isn't exactly one build of r/$KEY: it has $(tr '\n' ' ' <<< "$got")"
@@ -71,6 +81,16 @@ done
 for f in "${FILES[@]}"; do
   grep -qF "\"$BUILD/$f.parquet\"" "$BUNDLE/manifest.json" || fail "the bundle's manifest doesn't name $BUILD/$f.parquet"
 done
+PRUNE=()
+if [ -f "$BUNDLE/prune" ]; then
+  mapfile -t PRUNE < "$BUNDLE/prune"
+  [ "${#PRUNE[@]}" -le "$PRUNE_MAX" ] || fail "the bundle prunes more than $PRUNE_MAX builds"
+  for v in "${PRUNE[@]}"; do
+    [[ "$v" =~ $VERSION_PATTERN ]] || fail "the bundle's prune list isn't usable"
+    [ "$v" != "$VERSION" ] || fail "the bundle prunes the build it publishes"
+    if grep -qF "\"r/$KEY/$v/" "$BUNDLE/manifest.json"; then fail "the bundle prunes r/$KEY/$v/, which its manifest names"; fi
+  done
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -84,6 +104,11 @@ unchanged() {
 }
 echo "Publishing $BUILD/ to $REMOTE:$BUCKET ..."
 unchanged
+# With prunes: the publish log as R2 has it, before this publish replaces it. The bundle's list
+# is only a request; step 7 prunes a build only if this log says it was replaced.
+if [ "${#PRUNE[@]}" -gt 0 ]; then
+  "$RCLONE" cat "$REMOTE:$BUCKET/r/$KEY/published.json" > "$work/live-log.json" 2> /dev/null || : > "$work/live-log.json"
+fi
 
 # Step 2: never over an existing build. No directory there is fine; any other failure (auth,
 # network) stops here, since an empty answer would switch this check off.
@@ -124,4 +149,35 @@ unchanged
 "$RCLONE" copyto "$BUNDLE/r/$KEY/published.json" "$REMOTE:$BUCKET/r/$KEY/published.json" \
   --header-upload "Cache-Control: public, max-age=300" \
   --header-upload "Content-Type: application/json"
-echo "Done: $BUILD/ is live."
+echo "$BUILD/ is live."
+
+# Step 7: builds replaced long enough ago. $work/live.json is the manifest this publish replaced.
+unpruned=0
+for v in "${PRUNE[@]}"; do
+  if grep -qF "\"r/$KEY/$v/" "$work/live.json"; then
+    echo "  kept r/$KEY/$v/: the manifest named it until now" >&2
+    unpruned=$((unpruned + 1))
+  elif ! grep -qF "\"replaced\": \"$v\"" "$work/live-log.json"; then
+    echo "  kept r/$KEY/$v/: the publish log on R2 doesn't say it was replaced" >&2
+    unpruned=$((unpruned + 1))
+  elif "$RCLONE" purge "$REMOTE:$BUCKET/r/$KEY/$v" 2> "$work/purge.err" || grep -qi "directory not found" "$work/purge.err"; then
+    echo "  pruned r/$KEY/$v/"
+  else
+    echo "  couldn't prune r/$KEY/$v/: $(head -1 "$work/purge.err")" >&2
+    unpruned=$((unpruned + 1))
+  fi
+done
+if [ "${#PRUNE[@]}" -gt 0 ]; then
+  if listing=$("$RCLONE" lsf --dirs-only "$REMOTE:$BUCKET/r/$KEY/" 2> "$work/lsf.err"); then
+    while IFS= read -r dir; do
+      v=${dir%/}
+      [ -n "$v" ] || continue
+      grep -qF "\"$v\"" "$BUNDLE/r/$KEY/published.json" || grep -qF "\"r/$KEY/$v/" "$BUNDLE/manifest.json" ||
+        echo "  r/$KEY/$v/ is neither live nor in the publish log, so it's never pruned: delete it by hand if nothing needs it" >&2
+    done <<< "$listing"
+  else
+    echo "  couldn't list r/$KEY/ for builds outside the publish log: $(head -1 "$work/lsf.err")" >&2
+  fi
+fi
+[ "$unpruned" -eq 0 ] || fail "published $BUILD/, but not every build due was pruned (see above)"
+echo "Done."
