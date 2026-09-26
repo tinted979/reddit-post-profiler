@@ -762,11 +762,21 @@ const TAIL_FIELDS = { posts: "id,author,created_utc", comments: "id,author,creat
 // when nothing needed fetching.
 export async function fetchTails(client, dumps, post, { only = null, budget = null, now = () => Date.now() / 1000 } = {}) {
   const wanted = only?.length ? parseSubreddits([post.subreddit, ...only]) : null;
-  const allCovered = Boolean(wanted?.every((sub) => dumps.covers(sub)));
+  let allCovered = Boolean(wanted?.every((sub) => dumps.covers(sub)));
   const behind = (sub) => {
     const c = dumps.covers(sub);
     return c && post.createdUtc - 1 > Math.min(c.postsThrough, c.commentsThrough);
   };
+  // With `only` all covered, each other subreddit's tail costs at least a page per kind, and
+  // saves every commenter's interactions query for the gap. That's worth it only while those
+  // pages come to no more than about one per thread comment (what asking per commenter costs,
+  // as tailWorth reckons it). Past that, as with many archived subreddits and a small thread,
+  // only the post's subreddit gets a tail, as in a full scan, and each commenter's one
+  // interactions query covers the rest. An explicit `budget` fetches them all.
+  if (allCovered && budget === null) {
+    const others = wanted.filter((sub) => sub.toLowerCase() !== post.subreddit.toLowerCase() && behind(sub));
+    if (KINDS.length * others.length > (Number(post.numComments) || 0)) allCovered = false;
+  }
   const subs = (allCovered ? wanted : [post.subreddit]).filter(behind);
   const limits = budget === null
     ? { budget: tailBudget(post.numComments), worth: tailWorth(post.numComments, { only: allCovered }) }

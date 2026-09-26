@@ -246,7 +246,9 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    what it fetched, so the next scan asks only for what's new since.
    If you limit a scan to subreddits the archive covers (Only check subreddits, or tick
    Only subreddits in the archive), each user's counts there also come from the files and
-   those pages, with no requests per user.
+   those pages, with no requests per user. When fetching each archived subreddit's pages
+   would take more requests than asking each commenter (many archived subreddits and a small
+   thread), only the post's subreddit gets them, and each commenter takes one request.
    If the pages run out before the post, Arctic Shift is asked per user about the rest. A
    post older than the files needs none of this: everything before it is in the files.
 
