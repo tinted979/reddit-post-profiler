@@ -1,0 +1,181 @@
+name: Sync the archive
+
+# Keeps the R2 archive current for the subreddits in tools/archive.json (docs/adr/0005,
+# docs/archive-runbook.md). Not an agent workflow: nothing here runs an AI.
+#
+# Three jobs, so the R2 token is held by as little as possible:
+#   build    no secrets: tools/archive_sync.py downloads the live builds through the public
+#            URL, fetches from Arctic Shift (tools/fetch_subreddit.mjs, tagged
+#            meta-app=reddit-post-profiler-archive, within a budget), splices, and makes
+#            bundles, which go to the next job as an artifact.
+#   publish  environment `archive` (its deployment-branch rule allows only main), which holds
+#            the token: a pinned, checksummed rclone, then tools/publish_build.sh on each bundle
+#            in order. The secrets reach that one step only, and the job runs no Node or
+#            Python of ours (only the checkout and download actions, before that step):
+#            processes in one job can read each other's environment, so only a job
+#            boundary keeps the token from the build's code.
+#   verify   no secrets: tools/check_dumps.sh, as the page sees the archive.
+#
+# Scheduled runs happen only while the repository variable ARCHIVE_SYNC_ENABLED is "true";
+# a dispatch works either way, from main only.
+on:
+  schedule:
+    - cron: "23 * * * *" # hourly; each subreddit is built on its own cadence
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "sync: build and publish; dry-run: build only; plan: say what's due"
+        type: choice
+        options: [sync, dry-run, plan]
+        default: dry-run
+      subreddit:
+        description: "Only this subreddit, due or not (blank: every one that's due)"
+        type: string
+        default: ""
+      repair:
+        description: "Repair that subreddit (re-fetch repair_days back) rather than sync it"
+        type: boolean
+        default: false
+      budget:
+        description: "Pages per fetch (blank: the config's)"
+        type: string
+        default: ""
+
+permissions: {}
+
+# One run at a time, and a run is never cancelled halfway through publishing.
+concurrency:
+  group: archive-sync
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.ARCHIVE_SYNC_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    outputs:
+      bundles: ${{ steps.build.outputs.bundles }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: web/.nvmrc
+          package-manager-cache: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false # no cache to poison: nothing restored, nothing saved
+      - name: Plan or build
+        id: build
+        env:
+          # Dispatch inputs are read from the environment, never pasted into the script.
+          MODE: ${{ inputs.mode || 'sync' }}
+          SUBREDDIT: ${{ inputs.subreddit }}
+          REPAIR: ${{ inputs.repair }}
+          BUDGET: ${{ inputs.budget }}
+          DUCKDB_VERSION: 1.5.5
+        run: |
+          sync() { uv run --quiet --python 3.12 --no-project --with "duckdb==$DUCKDB_VERSION" python tools/archive_sync.py "$@"; }
+          out="$RUNNER_TEMP/sync"
+          if [ "$MODE" = plan ]; then
+            sync plan | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "bundles=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          args=(build --out "$out")
+          if [ "$REPAIR" = true ]; then
+            [ -n "$SUBREDDIT" ] || { echo "::error::A repair needs a subreddit."; exit 1; }
+            args+=(--repair "$SUBREDDIT")
+          elif [ -n "$SUBREDDIT" ]; then
+            args+=(--only "$SUBREDDIT")
+          fi
+          if [ -n "$BUDGET" ]; then args+=(--budget "$BUDGET"); fi
+          sync "${args[@]}"
+          count=0
+          if [ -d "$out/bundles" ]; then count=$(find "$out/bundles" -mindepth 1 -maxdepth 1 -type d | wc -l); fi
+          echo "bundles=$count" >> "$GITHUB_OUTPUT"
+          {
+            echo "### $count bundle(s) built ($MODE)"
+            jq -r '.built[] | "- r/\(.name): \(.mode), \(.fetched.posts.items) posts and \(.fetched.comments.items) comments"' "$out/summary.json"
+            jq -r '.skipped[] | "- \(.)"' "$out/summary.json"
+            jq -r '"Pages fetched: \(.pages)" + (if .busy then " (Arctic Shift was busy)" else "" end)' "$out/summary.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.build.outputs.bundles != '0'
+        with:
+          name: bundles
+          path: ${{ runner.temp }}/sync/bundles
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: build
+    # `build` succeeded (it's skipped while the schedule is off), made bundles, and this isn't a
+    # dry run or a plan.
+    if: needs.build.result == 'success' && needs.build.outputs.bundles != '0' && (github.event_name == 'schedule' || inputs.mode == 'sync')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: archive
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: tools
+          persist-credentials: false
+      # Outside the checkout, so no bundle can overwrite the script that holds the token. The
+      # bundles are untrusted: publish_build.sh checks every name in them before rclone runs.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bundles
+          path: ${{ runner.temp }}/bundles
+      - name: Install rclone
+        env:
+          RCLONE_VERSION: 1.75.1
+          RCLONE_SHA256: 982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab
+        run: |
+          zip="rclone-v${RCLONE_VERSION}-linux-amd64.zip"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/${zip}"
+          echo "${RCLONE_SHA256}  ${zip}" | sha256sum -c -
+          mkdir -p bin
+          unzip -j -o "$zip" "rclone-v${RCLONE_VERSION}-linux-amd64/rclone" -d bin
+          chmod +x bin/rclone
+          bin/rclone version | head -1
+      - name: Publish, in order, stopping at the first that fails
+        env:
+          # The token: this step only.
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_ACL: private
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true" # a token limited to one bucket can't check buckets
+          RCLONE: ${{ runner.temp }}/bin/rclone
+          BUNDLES: ${{ runner.temp }}/bundles
+        run: |
+          for bundle in "$BUNDLES"/*/; do
+            tools/publish_build.sh "${bundle%/}"
+          done
+
+  verify:
+    needs: publish
+    if: needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: web/.nvmrc
+          package-manager-cache: false
+      - name: Check the archive as the page sees it
+        run: tools/check_dumps.sh
