@@ -234,7 +234,7 @@ The page uses the [Arctic Shift API](https://github.com/ArthurHeitmann/arctic_sh
    currently answers all zeros). Past 100 items it adds the aggregate for the exact count
    and one more search for the first date. These run in parallel, and it skips a
    "before" query when the counts show no activity in the post's subreddit before the post. For a subreddit with archive files on
-   the project's R2 bucket (brought up to date every hour), listed in the bucket's manifest
+   the project's R2 bucket (brought up to date every few hours), listed in the bucket's manifest
    (`https://rpp-db.tinted979.dev/manifest.json`), those come from the files instead.
    What's between the files' end and the post is fetched once per scan for the whole
    subreddit rather than once per commenter:
@@ -295,8 +295,9 @@ loads the new commit. How AI agents take part (who can change what, and where a 
 decides) is in [WORKFLOW.md](WORKFLOW.md).
 
 The archive covers the subreddits in `tools/archive.json`, and
-`.github/workflows/archive-sync.yml` keeps it current. Every hour it fetches what Arctic
-Shift has archived since each due subreddit's build, splices that onto the build and
+`.github/workflows/archive-sync.yml` keeps it current. It runs every hour, and for each
+subreddit due by its cadence there (every 6 hours for now) it fetches what Arctic Shift
+has archived since the subreddit's build, splices that onto the build and
 publishes the new one, manifest last, and it deletes builds replaced at least 72 hours
 before (docs/adr/0005). Only its `publish` job holds the R2 token. How to run, pause and
 repair it is in [docs/archive-runbook.md](docs/archive-runbook.md).
