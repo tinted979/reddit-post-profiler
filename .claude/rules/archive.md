@@ -20,7 +20,7 @@ Moved from CLAUDE.md (web app architecture and Subreddit dumps). Why it's built 
 
 ## Subreddit dumps
 
-`.github/workflows/archive-sync.yml` keeps the covered subreddits current, hourly (`ci-and-agents.md` has its jobs). `docs/archive-runbook.md` covers setup, imports, repairs, pausing, pruning by hand, the token, and updating rclone, duckdb and hyparquet.
+`.github/workflows/archive-sync.yml` runs hourly and brings each covered subreddit up to date on its own cadence in `tools/archive.json` (`ci-and-agents.md` has its jobs). `docs/archive-runbook.md` covers setup, imports, repairs, pausing, pruning by hand, the token, and updating rclone, duckdb and hyparquet.
 
 Arctic Shift's per-subreddit dumps are served as static Parquet on Cloudflare R2 (`dumps.js`). For a covered subreddit the page takes "before" facts from the files plus a tail up to the post fetched once per scan (docs/adr/0005, 0006), and for a scan limited (`only`) to covered subreddits, lifetime counts too; only when those stop short of the post does it ask per user about the rest (timestamp searches for "before" facts, one `interactions` query for lifetime counts). Otherwise lifetime counts come from the API, since a subreddit's dump doesn't cover the rest of Reddit. For a post older than the files, the thread's commenters come from `comments_by_link` plus one search for the thread's comments since; for a newer post, from the API's comment tree. The page's privacy text (README and `index.html`) names the archive host; keep it true if what the page reads changes.
 
