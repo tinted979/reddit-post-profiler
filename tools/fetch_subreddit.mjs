@@ -40,8 +40,8 @@ import { ArcticShiftClient, ArcticShiftError, refusesMore } from "../web/core.js
 export const ARCHIVE_TAG = "reddit-post-profiler-archive";
 export const USER_AGENT = `${ARCHIVE_TAG} (+https://github.com/tinted979/reddit-post-profiler)`;
 // Seconds a row is given to be archived before a fetch may call its second complete. Arctic
-// Shift normally archives within a minute; the page allows an hour on top (INGEST_LAG), and
-// the sync's overlap and weekly repair catch what comes later still.
+// Shift normally archives within a minute; the page allows an hour on top (dumps.js's
+// DUMP_TAIL_MARGIN), and the sync's overlap and weekly repair catch what comes later still.
 export const SETTLE = 60;
 // Seconds between request starts, one request in flight: slower than the page, since nobody
 // is waiting.
