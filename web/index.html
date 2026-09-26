@@ -47,7 +47,9 @@
             <div class="field">
               <label for="only-subs">Only check subreddits</label>
               <input id="only-subs" type="text" placeholder="all (e.g. rust, golang)" aria-describedby="only-help">
-              <small id="only-help">The post's own subreddit is always included.</small>
+              <label class="inline-check"><input id="only-archived" type="checkbox" aria-describedby="only-archived-note only-help"> Only subreddits in the archive</label>
+              <small id="only-archived-note"></small>
+              <small id="only-help">The post's own subreddit is always included. The archive box adds every subreddit the archive covers when the scan starts; Arctic Shift answers for what it doesn't.</small>
             </div>
             <div class="field">
               <label for="years">History to check</label>

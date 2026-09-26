@@ -39,7 +39,9 @@ import {
 } from "./core.js";
 import { openCache, openScans } from "./cache.js";
 import { archiveNote, breakdownLines, describeRule, explain, formatDuration, formatEta, plural, requestsText, timelineText, tookText } from "./format.js";
-import { FIELD_IDS, mergeOptions, optionsSummary, parseMinCount, parseOptions, readShareParams, scanOptionNotes, shareParams } from "./options.js";
+import {
+  FIELD_IDS, archivedNote, mergeOptions, optionsSummary, parseMinCount, parseOptions, readShareParams, scanOnly, scanOptionNotes, shareParams,
+} from "./options.js";
 import { DumpSource, TailStore, archiveFileName } from "./dumps.js";
 import { LinkQueue, MAX_WAITING, QUEUE_CONCURRENCY, QUEUE_KEY } from "./queue.js";
 
@@ -93,7 +95,7 @@ function debounce(fn, ms) {
 
 // The options as a run will use them, clamped to what the tool supports.
 function readOptions() {
-  const fields = { includeOp: $("include-op").checked };
+  const fields = { includeOp: $("include-op").checked, onlyArchived: $("only-archived").checked };
   for (const [key, id] of Object.entries(FIELD_IDS)) fields[key] = $(id).value;
   return parseOptions(fields);
 }
@@ -105,6 +107,10 @@ function minCount() {
 // Put the options back in the form as they'll be used (after a shared link or a typo).
 function showOptions(opts) {
   $("include-op").checked = opts.includeOp;
+  if ($("only-archived").checked !== opts.onlyArchived) {
+    $("only-archived").checked = opts.onlyArchived;
+    updateArchivedNote();
+  }
   $("exclude").value = opts.exclude.join(", ");
   $("only-subs").value = opts.only.join(", ");
   $("years").value = opts.years ?? "";
@@ -114,6 +120,22 @@ function showOptions(opts) {
   $("cache-days").value = opts.cacheDays;
   $("min-count").value = minCount();
   updateOptionsSummary(opts);
+}
+
+// The note beside "Only subreddits in the archive": the archive's list as it is now, read
+// when the box is ticked. A slower answer to an earlier tick is dropped.
+let archivedNoteSeq = 0;
+async function updateArchivedNote() {
+  const seq = ++archivedNoteSeq;
+  const note = $("only-archived-note");
+  if (!$("only-archived").checked) {
+    note.textContent = "";
+    return;
+  }
+  note.textContent = "Reading the archive's list…";
+  const dumps = await DumpSource.open();
+  if (seq !== archivedNoteSeq || !$("only-archived").checked) return;
+  note.textContent = archivedNote(dumps?.subreddits() ?? null);
 }
 
 // "Options: author included · top 20 · last 5 years", so settings from a shared link are
@@ -647,7 +669,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
       countsTo: "post",
       beforeKnown: state.beforeKnown,
       opts: {
-        only: opts.only, years: opts.years, maxUsers: capped ? LARGE_SCAN : opts.maxUsers,
+        only: opts.only, onlyArchived: opts.onlyArchived, years: opts.years, maxUsers: capped ? LARGE_SCAN : opts.maxUsers,
         includeOp: opts.includeOp, exclude: opts.exclude,
       },
       stats: scanStats(profiles, state.post, state.beforeKnown, badges),
@@ -702,6 +724,15 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
     // Archive files for the post's subreddit, if there are any: "before" facts come from
     // them rather than Arctic Shift searches. No manifest, or a broken one, means the API.
     const dumps = await DumpSource.open({ signal: controller.signal, onRequest: countArchive, tails });
+    // The subreddits to check: the typed ones, and with "Only subreddits in the archive",
+    // every subreddit it covers now.
+    const only = scanOnly(opts, dumps?.subreddits() ?? null);
+    if (only === null) {
+      const message = "“Only subreddits in the archive” is ticked, but the archive's list of subreddits couldn't be read. Try again, or untick it to check every subreddit.";
+      showError(fail(message));
+      ended("failed", "The archive's list couldn't be read.");
+      return outcome;
+    }
     // Where the files alone end, for the end-of-scan note.
     const archive = dumps?.covers(post.subreddit, { withTail: false }) ?? null;
     // What the files don't have yet, fetched once for the scan rather than per commenter.
@@ -709,7 +740,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
     if (dumps) {
       setStatus("Checking recent activity…");
       const sent = client.requests;
-      tailReport = await fetchTails(client, dumps, post, { only: opts.only });
+      tailReport = await fetchTails(client, dumps, post, { only });
       tailRequests = client.requests - sent;
     }
 
@@ -780,7 +811,7 @@ async function run({ fromQueue = false, postRef = null, opts = null } = {}) {
       try {
         // One interactions query per user for the lifetime counts (docs/adr/0007).
         profile = await buildProfile(client, username, count, post, {
-          only: opts.only, after, cache, dumps, interactionsFirst: true,
+          only, after, cache, dumps, interactionsFirst: true,
         });
       } catch (err) {
         if (err instanceof Aborted) throw err;
@@ -1327,7 +1358,8 @@ function fillFromScan(summary) {
   $("post").value = redditPostUrl(post);
   // The scan's own options (which ones it saved) over the form's for the rest.
   showOptions(mergeOptions(readOptions(), {
-    includeOp: Boolean(o.includeOp), exclude: o.exclude ?? [], only: o.only ?? [], years: o.years ?? null, maxUsers: o.maxUsers ?? null,
+    includeOp: Boolean(o.includeOp), exclude: o.exclude ?? [], only: o.only ?? [], onlyArchived: o.onlyArchived === true,
+    years: o.years ?? null, maxUsers: o.maxUsers ?? null,
   }));
 }
 
@@ -1514,6 +1546,9 @@ function init() {
   badges = parseBadges(fields.badges ?? null) ?? storedBadges() ?? DEFAULT_BADGES;
   showBadges();
   $("include-op").checked = fields.includeOp;
+  $("only-archived").checked = fields.onlyArchived;
+  $("only-archived").addEventListener("change", updateArchivedNote);
+  if (fields.onlyArchived) updateArchivedNote();
   for (const [key, id] of Object.entries(FIELD_IDS)) {
     if (key in fields) $(id).value = fields[key];
   }
