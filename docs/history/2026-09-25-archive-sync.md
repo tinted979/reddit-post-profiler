@@ -11,8 +11,11 @@
 >   - P5, publishing one subreddit (#80);
 >   - P6, pruning (#81);
 >   - P7a, the orchestrator and config (#82), and `upload_dumps.sh --only`, the manual path (#83).
->   - P7b, the workflow, runbook and docs (#84).
-> - **Next:** the go-live steps in `docs/archive-runbook.md`, "Setting up the sync": the token, the `archive` environment, a dry run, one real run, then `ARCHIVE_SYNC_ENABLED`. After that, P8 (`interactions` first).
+>   - P7b, the workflow, runbook and docs (#84). **Live since 2026-09-26:**
+>     - the first publish, `2026-09-26T122954Z`, caught up about 44 hours of r/Hasan_Piker in 30 requests;
+>     - the hourly schedule is on.
+>   - P8a, the lifetime benchmark (#85).
+> - **Next:** the owner runs `tools/lifetime_bench.mjs` live. If it passes the gate, P8b (`interactions` first for full scans).
 > - **Measured** (live, 2026-09-26): an "only" scan of a 53-commenter r/Hasan_Piker post older than the files went from 60 requests to 2 (the post, and one search for the thread's comments after the files), with no per-user requests.
 
 # Fewer Arctic Shift requests: shared subreddit tails, and a scheduled archive sync
@@ -233,7 +236,10 @@ This merges two proposals:
     2. dispatch a dry run;
     3. run hasan_piker;
     4. enable the sync.
-- **P8a: Lifetime benchmark.** `tools/lifetime_bench.mjs`, which the owner runs. Gate: at least 99% agreement, no slower, and no more slow-downs.
+- **P8a: Lifetime benchmark** (#85). `tools/lifetime_bench.mjs`, which the owner runs. Gate: at least 99% agreement, no slower, and no more slow-downs.
+  - **What it asks, per user:** the two aggregates, asked as a scan asks first (`split: false`, and a timed-out one sent once more) and `interactions`. All three carry `before`, since every count now stops at the post (docs/adr/0006). The order alternates between users.
+  - **How latency is compared:** over the users where both answered. `interactions` also answers for heavy users whose aggregates time out, and those would otherwise count against it.
+  - **What it reports:** how many of those heavy users `interactions` answered, which is the extra gain beyond halving the requests.
 - **P8b: Interactions first** (gated).
   - `lifetimeCounts` tries `interactionCounts` first, behind a `buildProfile` option that `app.js` turns on.
   - `estimateScan` takes per-user costs.

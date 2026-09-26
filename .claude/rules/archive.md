@@ -61,6 +61,15 @@ Arctic Shift's per-subreddit dumps are served as static Parquet on Cloudflare R2
          - A failed prune fails the script after the publish stands.
        - The `prune` list itself is checked before any rclone call: at most 5 lines, each a version, not the new build, and not named by the new manifest.
     - Tests: `tools/tests/test_publish_one.py` and `test_publish_build.py`.
+- **`tools/lifetime_bench.mjs`** is the owner's benchmark for P8 of the archive plan: whether one `interactions` query can stand in for the two aggregates a full scan asks first for each commenter.
+  - **What it asks:** both, for a post's commenters (`--post`) or given users (`--users`), with the same bounds as a scan (up to the post; `--years` for a window), alternating which goes first.
+  - **How:** through the page's client, one request at a time, 1 s apart, with the page's `meta-app`. It stops at the first busy or rate-limiting reply.
+  - **What it reports:**
+    - agreement, ignoring the case of subreddit names, with what differs;
+    - errors by kind;
+    - latency and retries, over the users where both answered;
+    - the P8b gate: at least 99% agreement, no slower, and no more retries.
+  - **Tests:** `web/tests/lifetime-bench.test.js`, against a fake API.
 - **`tools/archive_sync.py`** is the sync's build job, with no token. Its config is `tools/archive.json`: each subreddit's `cadence` (1h–7d) and optional `"backfill": "api"`, plus `overlap`, `repair_days`, `repair_every`, `budget` (pages per fetch) and `run_budget` (pages per run, every fetch together; ADR 0005's budget per run). Once a run's budget is spent, the subreddits left wait for the next run.
   - **`plan`** says what's due:
     - a sync once the cadence has passed since the live build (less 15 min of slack), cut at the older cutoff less `overlap`;
