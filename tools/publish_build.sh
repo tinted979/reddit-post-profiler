@@ -40,7 +40,7 @@ fail() { echo "error: $*" >&2; exit 1; }
 
 [ $# -eq 1 ] || fail "usage: $0 BUNDLE"
 BUNDLE="$1"
-[ -d "$BUNDLE" ] && [ ! -L "$BUNDLE" ] || fail "$BUNDLE isn't a directory"
+if [ ! -d "$BUNDLE" ] || [ -L "$BUNDLE" ]; then fail "$BUNDLE isn't a directory"; fi
 for tool in "$RCLONE" "$CURL" sha256sum; do
   command -v "$tool" >/dev/null || fail "$tool isn't installed"
 done
