@@ -95,7 +95,7 @@ jobs:
       - name: Install the web tests' dev dependency
         working-directory: web
         run: npm ci
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: false # no cache to poison: nothing restored, nothing saved
       - name: Python for the dump tool tests (python -m pytest)
@@ -124,7 +124,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
-      - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+      - uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790 # v1.0.235
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.writer.outputs.token }}
@@ -190,7 +190,7 @@ jobs:
       - name: Install the web tests' dev dependency
         working-directory: web
         run: npm ci
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: false # no cache to poison: nothing restored, nothing saved
       - name: Python for the dump tool tests (python -m pytest)
@@ -222,7 +222,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
-      - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+      - uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790 # v1.0.235
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.writer.outputs.token }}
