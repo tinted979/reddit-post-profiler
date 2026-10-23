@@ -88,14 +88,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: web/.nvmrc
           package-manager-cache: false
       - name: Install the web tests' dev dependency
         working-directory: web
         run: npm ci
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: false # no cache to poison: nothing restored, nothing saved
       - name: Python for the dump tool tests (python -m pytest)
@@ -116,7 +116,7 @@ jobs:
           bwrap --ro-bind / / --unshare-pid true && echo "bubblewrap works"
       - name: Writer token (contents, pull requests, issues; no workflows or actions)
         id: writer
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ vars.WRITER_APP_CLIENT_ID }}
           private-key: ${{ secrets.WRITER_APP_PRIVATE_KEY }}
@@ -124,7 +124,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
-      - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+      - uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1.0.252
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.writer.outputs.token }}
@@ -183,14 +183,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: web/.nvmrc
           package-manager-cache: false
       - name: Install the web tests' dev dependency
         working-directory: web
         run: npm ci
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: false # no cache to poison: nothing restored, nothing saved
       - name: Python for the dump tool tests (python -m pytest)
@@ -214,7 +214,7 @@ jobs:
           bwrap --ro-bind / / --unshare-pid true && echo "bubblewrap works"
       - name: Writer token (contents, pull requests, issues; no workflows or actions)
         id: writer
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ vars.WRITER_APP_CLIENT_ID }}
           private-key: ${{ secrets.WRITER_APP_PRIVATE_KEY }}
@@ -222,7 +222,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
-      - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+      - uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1.0.252
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.writer.outputs.token }}
